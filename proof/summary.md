@@ -12,14 +12,21 @@ You can regenerate fresh artifacts with:
 
 Primary bounded patch benchmark:
 
-| Metric | `qwen2.5:32b` raw | `qwen3.5:9b + Memla` |
+| Metric | Hosted `meta/Llama-3.3-70B-Instruct` raw | Local `qwen3.5:9b + Memla` |
 | --- | --- | --- |
-| Apply rate | `0.0` | `0.6667` |
+| Apply rate | `0.0` | `1.0` |
+| Semantic success | `0.0` | `1.0` |
+
+Same-model control on the same OAuth slice:
+
+| Metric | `qwen3.5:9b` raw | `qwen3.5:9b + Memla` |
+| --- | --- | --- |
+| Apply rate | `0.0` | `1.0` |
 | Semantic success | `0.0` | `0.6667` |
 
-Support signals:
+Additional support:
+- earlier larger-local baseline: `qwen2.5:32b` raw apply `0.0` -> `qwen3.5:9b + Memla` apply `0.6667`
 - second repo family: apply `0.0 -> 0.3333`
-- second coding benchmark type: compile-loop command recall `0.0 -> 0.3125`
 
 ## Math
 
@@ -42,9 +49,10 @@ Harder end-to-end bounded math:
 What this supports:
 - Memla improves technical decision quality inside bounded executors.
 - Smaller local models can behave like much larger raw models on verifier-backed slices.
+- The same base model improves materially once the Memla runtime is added.
 - The coding wedge is real enough to package as a CLI.
 
 What this does not claim:
 - universal model parity
-- `9b` beats `32b` at everything
+- `9b` beats `70b` at everything
 - tiny models become frontier models everywhere

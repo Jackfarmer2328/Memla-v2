@@ -1,9 +1,11 @@
 # 90-Second Demo Flow
 
 1. Open the current coding patch report.
-   qwen2.5:32b apply rate: `0`. qwen3.5:9b + Memla apply rate: `0.7`.
+   Hosted Llama-3.3-70B raw apply rate: `0`. qwen3.5:9b + Memla apply rate: `1`.
+   Raw semantic success: `0`. Memla semantic success: `1`.
+2. Open the same-model control.
+   qwen3.5:9b raw apply rate: `0`. qwen3.5:9b + Memla apply rate: `1`.
    Raw semantic success: `0`. Memla semantic success: `0.6667`.
-2. Show one coding case where raw never reached an applyable patch and Memla did.
 3. Open the math reranker report with the executor held constant.
    4b ambiguous-step choice accuracy: `0.5455` -> `1`.
    9b ambiguous-step choice accuracy: `0.4545` -> `1`.

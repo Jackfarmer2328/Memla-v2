@@ -23,7 +23,7 @@ Hosted GitHub Models example:
 $env:LLM_PROVIDER="github_models"
 $env:GITHUB_TOKEN="YOUR_GITHUB_TOKEN"
 $env:LLM_BASE_URL="https://models.github.ai/inference"
-memla coding run --prompt "Repair the failing auth tests" --repo-root . --model "openai/gpt-5"
+memla coding run --prompt "Repair the failing auth tests" --repo-root . --model "meta/Llama-3.3-70B-Instruct"
 ```
 
 Core use cases:
@@ -33,7 +33,8 @@ Core use cases:
 - proof-pack generation for static report sites
 
 Current bounded public claim:
-- on coding, `qwen3.5:9b + Memla` beat local `qwen2.5:32b` raw on execution outcome in the primary patch benchmark
+- on coding, local `qwen3.5:9b + Memla` beat hosted `meta/Llama-3.3-70B-Instruct` raw on execution outcome in the primary patch benchmark
+- on coding, the same `qwen3.5:9b` base model moved from `0.0` apply / `0.0` semantic success raw to `1.0` apply / `0.6667` semantic success with Memla on the same OAuth slice
 - on math, `qwen3.5:4b + Memla` matched `qwen2.5:32b` raw on a harder bounded pack
 - on ambiguous math decision states, Memla lifted both `4b` and `9b` to perfect choice accuracy on the tested slice
 
