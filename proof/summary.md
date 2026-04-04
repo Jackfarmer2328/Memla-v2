@@ -12,7 +12,7 @@ You can regenerate fresh artifacts with:
 
 Primary bounded patch benchmark:
 
-| Metric | Hosted `meta/Llama-3.3-70B-Instruct` raw | Local `qwen3.5:9b + Memla` |
+| Metric | Hosted `Meta-Llama-3.1-405B-Instruct` raw | Local `qwen3.5:9b + Memla` |
 | --- | --- | --- |
 | Apply rate | `0.0` | `1.0` |
 | Semantic success | `0.0` | `1.0` |
@@ -25,6 +25,7 @@ Same-model control on the same OAuth slice:
 | Semantic success | `0.0` | `0.6667` |
 
 Additional support:
+- earlier hosted upper rung: `meta/Llama-3.3-70B-Instruct` raw apply `0.0` -> local `qwen3.5:9b + Memla` apply `1.0`
 - second repo family against hosted `70b` raw: apply `0.0 -> 0.3333`
 - earlier larger-local baseline: `qwen2.5:32b` raw apply `0.0` -> `qwen3.5:9b + Memla` apply `0.6667`
 
@@ -54,5 +55,5 @@ What this supports:
 
 What this does not claim:
 - universal model parity
-- `9b` beats `70b` at everything
+- `9b` beats `405b` at everything
 - tiny models become frontier models everywhere

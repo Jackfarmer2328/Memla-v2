@@ -32,7 +32,7 @@ Public proof summary:
 - `proof/summary.md`
 
 Current strongest public result:
-- on coding, local `qwen3.5:9b + Memla` beat hosted `meta/Llama-3.3-70B-Instruct` raw on execution outcome in the primary patch benchmark
+- on coding, local `qwen3.5:9b + Memla` beat hosted `Meta-Llama-3.1-405B-Instruct` raw on execution outcome in the primary patch benchmark
 - on coding, the same `qwen3.5:9b` base model moved from `0.0` apply / `0.0` semantic success raw to `1.0` apply / `0.6667` semantic success with Memla on the same OAuth slice
 - on a second repo family, hosted `meta/Llama-3.3-70B-Instruct` raw again stayed at `0.0` apply while local `qwen3.5:9b + Memla` reached `0.3333` apply on the FastAPI slice
 - on math, `qwen3.5:4b + Memla` matched `qwen2.5:32b` raw on the harder bounded pack

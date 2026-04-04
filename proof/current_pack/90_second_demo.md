@@ -1,7 +1,7 @@
 # 90-Second Demo Flow
 
 1. Open the current coding patch report.
-   Hosted Llama-3.3-70B raw apply rate: `0`. qwen3.5:9b + Memla apply rate: `1`.
+   Hosted Meta-Llama-3.1-405B-Instruct raw apply rate: `0`. qwen3.5:9b + Memla apply rate: `1`.
    Raw semantic success: `0`. Memla semantic success: `1`.
 2. Open the same-model control.
    qwen3.5:9b raw apply rate: `0`. qwen3.5:9b + Memla apply rate: `1`.
