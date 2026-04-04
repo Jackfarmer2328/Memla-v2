@@ -214,6 +214,8 @@ def _handle_coding_run(args: argparse.Namespace) -> int:
         top_k=args.top_k,
         num_ctx=args.num_ctx,
         enable_compile_loop=not args.disable_compile_loop,
+        c2a_policy_path=args.c2a_policy_path,
+        disable_c2a_policy=args.disable_c2a_policy,
     )
     try:
         result = session.ask(args.prompt, test_command=args.test_command)
@@ -238,6 +240,8 @@ def _handle_coding_plan(args: argparse.Namespace) -> int:
         top_k=args.top_k,
         num_ctx=args.num_ctx,
         enable_compile_loop=not args.disable_compile_loop,
+        c2a_policy_path=args.c2a_policy_path,
+        disable_c2a_policy=args.disable_c2a_policy,
     )
     try:
         plan = session.build_plan(args.prompt)
@@ -270,6 +274,8 @@ def _handle_patch_benchmark(args: argparse.Namespace) -> int:
         raw_base_url=args.raw_base_url,
         memla_provider=args.memla_provider,
         memla_base_url=args.memla_base_url,
+        memla_c2a_policy_path=args.memla_c2a_policy_path,
+        disable_memla_c2a_policy=args.disable_memla_c2a_policy,
     )
     markdown = render_patch_execution_markdown(report)
     out_dir = Path(args.out_dir).resolve() if args.out_dir else _default_report_dir("patch_benchmark")
@@ -303,6 +309,8 @@ def _handle_compile_benchmark(args: argparse.Namespace) -> int:
         temperature=args.temperature,
         top_k=args.top_k,
         num_ctx=args.num_ctx,
+        memla_c2a_policy_path=args.memla_c2a_policy_path,
+        disable_memla_c2a_policy=args.disable_memla_c2a_policy,
     )
     markdown = render_compile_loop_benchmark_markdown(report)
     out_dir = Path(args.out_dir).resolve() if args.out_dir else _default_report_dir("compile_benchmark")
@@ -340,6 +348,8 @@ def _handle_c2a_benchmark(args: argparse.Namespace) -> int:
         raw_base_url=args.raw_base_url,
         memla_provider=args.memla_provider,
         memla_base_url=args.memla_base_url,
+        memla_c2a_policy_path=args.memla_c2a_policy_path,
+        disable_memla_c2a_policy=args.disable_memla_c2a_policy,
     )
     markdown = render_coding_c2a_markdown(report)
     out_dir = Path(args.out_dir).resolve() if args.out_dir else _default_report_dir("coding_c2a_benchmark")
@@ -608,6 +618,8 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--top-k", type=int, default=12)
     run_parser.add_argument("--num-ctx", type=int, default=None)
     run_parser.add_argument("--disable-compile-loop", action="store_true", help="Turn off compile-loop priors for this run.")
+    run_parser.add_argument("--c2a-policy-path", default="", help="Optional explicit C2A policy bank JSON path.")
+    run_parser.add_argument("--disable-c2a-policy", action="store_true", help="Disable self-transmutation priors for this run.")
     run_parser.add_argument("--json", action="store_true", help="Emit structured JSON instead of readable text.")
     run_parser.set_defaults(func=_handle_coding_run)
 
@@ -621,6 +633,8 @@ def _build_parser() -> argparse.ArgumentParser:
     plan_parser.add_argument("--top-k", type=int, default=12)
     plan_parser.add_argument("--num-ctx", type=int, default=None)
     plan_parser.add_argument("--disable-compile-loop", action="store_true", help="Turn off compile-loop priors while planning.")
+    plan_parser.add_argument("--c2a-policy-path", default="", help="Optional explicit C2A policy bank JSON path.")
+    plan_parser.add_argument("--disable-c2a-policy", action="store_true", help="Disable self-transmutation priors while planning.")
     plan_parser.add_argument("--json", action="store_true", help="Emit structured JSON instead of readable text.")
     plan_parser.set_defaults(func=_handle_coding_plan)
 
@@ -641,6 +655,8 @@ def _build_parser() -> argparse.ArgumentParser:
     patch_parser.add_argument("--raw-base-url", default="", help="Optional base URL override for the raw lane.")
     patch_parser.add_argument("--memla-provider", default="", help="Optional provider override for the Memla lane.")
     patch_parser.add_argument("--memla-base-url", default="", help="Optional base URL override for the Memla lane.")
+    patch_parser.add_argument("--memla-c2a-policy-path", default="", help="Optional explicit C2A policy bank JSON path for the Memla lane.")
+    patch_parser.add_argument("--disable-memla-c2a-policy", action="store_true", help="Disable self-transmutation priors for the Memla lane.")
     patch_parser.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
     patch_parser.set_defaults(func=_handle_patch_benchmark)
 
@@ -653,6 +669,8 @@ def _build_parser() -> argparse.ArgumentParser:
     compile_parser.add_argument("--temperature", type=float, default=0.1)
     compile_parser.add_argument("--top-k", type=int, default=12)
     compile_parser.add_argument("--num-ctx", type=int, default=None)
+    compile_parser.add_argument("--memla-c2a-policy-path", default="", help="Optional explicit C2A policy bank JSON path for the planning and compile lanes.")
+    compile_parser.add_argument("--disable-memla-c2a-policy", action="store_true", help="Disable self-transmutation priors for the planning and compile lanes.")
     compile_parser.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
     compile_parser.set_defaults(func=_handle_compile_benchmark)
 
@@ -670,6 +688,8 @@ def _build_parser() -> argparse.ArgumentParser:
     c2a_parser.add_argument("--raw-base-url", default="", help="Optional base URL override for the raw lane.")
     c2a_parser.add_argument("--memla-provider", default="", help="Optional provider override for the Memla lane.")
     c2a_parser.add_argument("--memla-base-url", default="", help="Optional base URL override for the Memla lane.")
+    c2a_parser.add_argument("--memla-c2a-policy-path", default="", help="Optional explicit C2A policy bank JSON path for the Memla lane.")
+    c2a_parser.add_argument("--disable-memla-c2a-policy", action="store_true", help="Disable self-transmutation priors for the Memla lane.")
     c2a_parser.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
     c2a_parser.set_defaults(func=_handle_c2a_benchmark)
 

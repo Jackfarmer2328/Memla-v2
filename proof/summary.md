@@ -42,6 +42,13 @@ Pure coding C2A, same base model:
 | --- | --- | --- |
 | C2A utility | `0.4908` | `0.5058` |
 
+Same-model OAuth patch transfer after loading the `405b`-only bank:
+
+| Metric | `qwen3.5:9b + Memla` with bank disabled | `405b`-distilled `qwen3.5:9b + Memla` |
+| --- | --- | --- |
+| Apply rate | `0.6667` | `1.0` |
+| Semantic success | `0.6667` | `0.6667` |
+
 Repeated same-model validation after `405b`-only distillation:
 - run 1: raw `0.2917`, Memla `0.5058`, index `1.734`
 - run 2: raw `0.2767`, Memla `0.5058`, index `1.828`
@@ -70,7 +77,7 @@ What this supports:
 - Memla improves technical decision quality inside bounded executors.
 - Smaller local models can behave like much larger raw models on verifier-backed slices.
 - The same base model improves materially once the Memla runtime is added.
-- Memla can begin to absorb useful C2A priors from a conquered upper-rung teacher and show a small repeated same-model gain.
+- Memla can begin to absorb useful C2A priors from a conquered upper-rung teacher, show a small repeated same-model C2A gain, and transfer part of that gain back into patch execution.
 - The coding wedge is real enough to package as a CLI.
 
 What this does not claim:

@@ -16,6 +16,7 @@
 ## Early self-transmutation support
 - Pure coding C2A baseline: qwen3.5:9b raw `0.2742`, qwen3.5:9b + Memla `0.4908`.
 - 405b-only teacher bank: raw `0.1417`, Memla `0.4825`, utility index `3.4051` on the captured upper-rung C2A benchmark.
+- Same-model OAuth patch transfer after loading the 405b-only bank: apply `0.6667` -> `1.0`, semantic success held at `0.6667`.
 - Distilled same-model repeats after loading the 405b-only bank:
   - run 1: raw `0.2917`, Memla `0.5058`, index `1.734`
   - run 2: raw `0.2767`, Memla `0.5058`, index `1.828`
@@ -26,7 +27,7 @@
 - This is bounded-runtime evidence, not universal proof complete.
 - The hosted 405b headline currently comes from a 3-case OAuth patch slice.
 - The FastAPI repeat confirms the apply-rate shape on a second family, but not the same semantic-success jump.
-- The self-transmutation lift is currently small and measured on the pure coding C2A harness, not yet on patch execution.
+- The self-transmutation lift is currently small, and the patch-transfer signal is still one bounded OAuth slice rather than a broad family repeat.
 - Coding still benefits from more repo-family repeats and cleaner execution metrics.
 
 ## Why this matters

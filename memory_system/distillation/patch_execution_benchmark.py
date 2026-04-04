@@ -2065,6 +2065,8 @@ def _build_memla_workflow_block(
     num_ctx: int | None,
     provider: str | None = None,
     base_url: str | None = None,
+    c2a_policy_path: str = "",
+    disable_c2a_policy: bool = False,
 ) -> tuple[str, list[str]]:
     with _override_llm_env(provider=provider, base_url=base_url):
         session = CodingSession(
@@ -2075,6 +2077,8 @@ def _build_memla_workflow_block(
             top_k=top_k,
             num_ctx=num_ctx,
             enable_compile_loop=True,
+            c2a_policy_path=c2a_policy_path,
+            disable_c2a_policy=disable_c2a_policy,
         )
         try:
             workspace_snapshot = session.build_plan(prompt)
@@ -2153,6 +2157,8 @@ def run_patch_execution_benchmark(
     raw_base_url: str = "",
     memla_provider: str = "",
     memla_base_url: str = "",
+    memla_c2a_policy_path: str = "",
+    disable_memla_c2a_policy: bool = False,
 ) -> dict[str, Any]:
     repo_root, cases = load_patch_cases(pack_path, split=split, limit=limit)
     raw_client = _build_llm_client(provider=raw_provider or None, base_url=raw_base_url or None)
@@ -2186,6 +2192,8 @@ def run_patch_execution_benchmark(
                     num_ctx=num_ctx,
                     provider=memla_provider or None,
                     base_url=memla_base_url or None,
+                    c2a_policy_path=memla_c2a_policy_path,
+                    disable_c2a_policy=disable_memla_c2a_policy,
                 )
                 stage = "raw_lane"
                 raw_bootstrap_result = _bootstrap_worktree_dependencies(worktree_dir, case.expected_commands)
@@ -2221,6 +2229,8 @@ def run_patch_execution_benchmark(
                         num_ctx=num_ctx,
                         provider=memla_provider or None,
                         base_url=memla_base_url or None,
+                        c2a_policy_path=memla_c2a_policy_path,
+                        disable_c2a_policy=disable_memla_c2a_policy,
                     )
 
                 memla_result = _evaluate_lane(

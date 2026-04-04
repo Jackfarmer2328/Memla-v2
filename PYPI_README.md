@@ -35,6 +35,8 @@ Core use cases:
 Current bounded public claim:
 - on coding, local `qwen3.5:9b + Memla` beat hosted `Meta-Llama-3.1-405B-Instruct` raw on execution outcome in the primary patch benchmark
 - on coding, the same `qwen3.5:9b` base model moved from `0.0` apply / `0.0` semantic success raw to `1.0` apply / `0.6667` semantic success with Memla on the same OAuth slice
+- after loading a `405b`-only self-transmutation bank, same-model `qwen3.5:9b + Memla` on the OAuth slice improved from `0.6667` apply / `0.6667` semantic success with the bank disabled to `1.0` apply / `0.6667` semantic success with the bank enabled
+- on pure coding C2A, the same `405b`-only self-transmutation bank lifted same-model `qwen3.5:9b + Memla` utility from the earlier `0.4908` baseline to `0.5058`, and that repeated across `3` runs with average uplift `+0.015`
 - on coding, hosted `Grok-3` raw also stayed at `0.0` apply / `0.0` semantic success on the OAuth slice while local `qwen3.5:9b + Memla` reached `0.6667` apply / `0.6667` semantic success
 - on a second repo family, hosted `meta/Llama-3.3-70B-Instruct` raw again stayed at `0.0` apply while local `qwen3.5:9b + Memla` reached `0.3333` apply on the FastAPI slice
 - on a second repo family against hosted `Grok-3` raw, local `qwen3.5:9b + Memla` reached `0.5` apply on `2` completed FastAPI cases while the raw lane stayed at `0.0` apply and one raw-lane case failed with `HTTPError`

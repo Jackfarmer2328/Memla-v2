@@ -194,6 +194,8 @@ class CodingSession:
         num_ctx: int | None = None,
         session_id: Optional[str] = None,
         enable_compile_loop: bool = True,
+        c2a_policy_path: str = "",
+        disable_c2a_policy: bool = False,
     ) -> None:
         self.model = model
         self.user_id = user_id
@@ -203,6 +205,8 @@ class CodingSession:
         self.num_ctx = num_ctx
         self.session_id = session_id or _new_session_id()
         self.enable_compile_loop = bool(enable_compile_loop)
+        self.c2a_policy_path = str(c2a_policy_path or "").strip()
+        self.disable_c2a_policy = bool(disable_c2a_policy)
 
         self.log = EpisodeLog(db_path)
         self.client = UniversalLLMClient.from_env()
@@ -240,6 +244,8 @@ class CodingSession:
             prompt=prompt,
             repo_root=self.repo_root,
             enable_compile_loop=self.enable_compile_loop,
+            c2a_policy_path=self.c2a_policy_path,
+            disable_c2a_policy=self.disable_c2a_policy,
         )
 
     def ask(self, prompt: str, *, test_command: Optional[str] = None) -> ProxyResult:
@@ -264,6 +270,8 @@ class CodingSession:
             prompt=prompt,
             repo_root=self.repo_root,
             enable_compile_loop=self.enable_compile_loop,
+            c2a_policy_path=self.c2a_policy_path,
+            disable_c2a_policy=self.disable_c2a_policy,
         )
         distilled_priors = _build_distilled_priors_block(similar_traces)
         workflow_priors_block = _build_workflow_priors_block(workflow_priors)

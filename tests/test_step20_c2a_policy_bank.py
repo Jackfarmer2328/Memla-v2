@@ -115,6 +115,47 @@ def test_workflow_plan_uses_self_transmutation_policy_bank(tmp_path):
     assert "memory_system/cli.py" in plan.self_transmutation_boosts["preferred_files"]
 
 
+def test_workflow_plan_can_disable_self_transmutation_policy_bank(tmp_path):
+    (tmp_path / ".memla").mkdir(parents=True)
+    (tmp_path / "memory_system").mkdir(parents=True)
+    (tmp_path / "memory_system" / "cli.py").write_text("def main():\n    return 0\n", encoding="utf-8")
+    (tmp_path / ".memla" / "c2a_policy_bank.json").write_text(
+        json.dumps(
+            {
+                "token_counts": {"cli": 1},
+                "token_constraint_weights": {"cli": {"cli_command_flow": 2.0}},
+                "token_role_weights": {"cli": {"cli_surface": 2.0}},
+                "token_transmutation_weights": {
+                    "cli": {"Trade shell flexibility for a repeatable command-line workflow.": 2.0}
+                },
+                "token_file_weights": {"cli": {"memory_system/cli.py": 2.0}},
+                "token_region_weights": {"cli": {"memory_system/cli.py": 2.0}},
+                "token_teacher_constraint_weights": {},
+                "token_teacher_transmutation_weights": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    summary = WorkflowPriorSummary(
+        suggested_files=[],
+        suggested_commands=[],
+        source_trace_ids=[7],
+    )
+
+    plan = build_workflow_plan(
+        candidates=[],
+        summary=summary,
+        prompt="Expose the public CLI.",
+        repo_root=str(tmp_path),
+        enable_compile_loop=False,
+        disable_c2a_policy=True,
+    )
+
+    assert plan.self_transmutation_boosts["matched_tokens"] == []
+    assert plan.self_transmutation_boosts["preferred_files"] == []
+    assert plan.self_transmutation_boosts["transmutations"] == []
+
+
 def test_memla_distill_c2a_writes_policy_bank(monkeypatch, capsys, tmp_path):
     trace_bank = tmp_path / "trace_bank.json"
     trace_bank.write_text('{"rows":[]}', encoding="utf-8")

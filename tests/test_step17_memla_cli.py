@@ -10,8 +10,11 @@ from memory_system.distillation.workflow_planner import WorkflowPlan
 
 
 def test_memla_coding_plan_renders_workflow_block(monkeypatch, capsys, tmp_path):
+    captured: dict[str, object] = {}
+
     class DummySession:
         def __init__(self, **kwargs):
+            captured.update(kwargs)
             self.kwargs = kwargs
 
         def build_plan(self, prompt: str):
@@ -49,11 +52,16 @@ def test_memla_coding_plan_renders_workflow_block(monkeypatch, capsys, tmp_path)
     assert "=== MEMLA WORKFLOW PLAN ===" in out
     assert "Likely files: src/auth.py, tests/test_auth.py" in out
     assert "Predicted constraints: ownership_resolution_gap" in out
+    assert captured["c2a_policy_path"] == ""
+    assert captured["disable_c2a_policy"] is False
 
 
 def test_memla_coding_run_json_outputs_structured_proxy_result(monkeypatch, capsys, tmp_path):
+    captured: dict[str, object] = {}
+
     class DummySession:
         def __init__(self, **kwargs):
+            captured.update(kwargs)
             self.kwargs = kwargs
 
         def ask(self, prompt: str, *, test_command: str | None = None):
@@ -96,6 +104,7 @@ def test_memla_coding_run_json_outputs_structured_proxy_result(monkeypatch, caps
             str(tmp_path / "memory.sqlite"),
             "--test-command",
             "pytest -q",
+            "--disable-c2a-policy",
             "--json",
         ]
     )
@@ -105,6 +114,7 @@ def test_memla_coding_run_json_outputs_structured_proxy_result(monkeypatch, caps
     assert payload["suggested_files"] == ["src/auth.py", "tests/test_auth.py"]
     assert payload["validated_trade_path"]["supporting_commands"] == ["pytest -q"]
     assert payload["residual_constraints"] == ["missing_import_or_dependency"]
+    assert captured["disable_c2a_policy"] is True
 
 
 def test_memla_patch_benchmark_writes_report_bundle(monkeypatch, capsys, tmp_path):
@@ -148,6 +158,7 @@ def test_memla_patch_benchmark_writes_report_bundle(monkeypatch, capsys, tmp_pat
             "ollama",
             "--memla-base-url",
             "http://127.0.0.1:11435",
+            "--disable-memla-c2a-policy",
             "--db",
             str(tmp_path / "bench.sqlite"),
             "--out-dir",
@@ -165,6 +176,7 @@ def test_memla_patch_benchmark_writes_report_bundle(monkeypatch, capsys, tmp_pat
     assert captured["raw_base_url"] == "https://models.github.ai/inference"
     assert captured["memla_provider"] == "ollama"
     assert captured["memla_base_url"] == "http://127.0.0.1:11435"
+    assert captured["disable_memla_c2a_policy"] is True
 
 
 def test_memla_coding_c2a_benchmark_writes_report_bundle(monkeypatch, capsys, tmp_path):
@@ -209,6 +221,8 @@ def test_memla_coding_c2a_benchmark_writes_report_bundle(monkeypatch, capsys, tm
             "ollama",
             "--memla-base-url",
             "http://127.0.0.1:11435",
+            "--memla-c2a-policy-path",
+            str(tmp_path / ".memla" / "bank.json"),
             "--db",
             str(tmp_path / "bench.sqlite"),
             "--out-dir",
@@ -224,6 +238,7 @@ def test_memla_coding_c2a_benchmark_writes_report_bundle(monkeypatch, capsys, tm
     assert "memla utility 0.81" in out
     assert captured["raw_provider"] == "github_models"
     assert captured["memla_provider"] == "ollama"
+    assert captured["memla_c2a_policy_path"] == str(tmp_path / ".memla" / "bank.json")
 
 
 def test_memla_pack_thesis_routes_to_builder(monkeypatch, capsys, tmp_path):

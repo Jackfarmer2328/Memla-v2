@@ -96,6 +96,8 @@ def run_compile_loop_benchmark(
     temperature: float = 0.1,
     top_k: int = 12,
     num_ctx: int | None = None,
+    memla_c2a_policy_path: str = "",
+    disable_memla_c2a_policy: bool = False,
 ) -> dict[str, Any]:
     client = UniversalLLMClient.from_env()
     cases = load_eval_cases(cases_path)
@@ -120,6 +122,8 @@ def run_compile_loop_benchmark(
                 top_k=top_k,
                 num_ctx=num_ctx,
                 enable_compile_loop=False,
+                c2a_policy_path=memla_c2a_policy_path,
+                disable_c2a_policy=disable_memla_c2a_policy,
             )
             compile_session = CodingSession(
                 model=model,
@@ -130,6 +134,8 @@ def run_compile_loop_benchmark(
                 top_k=top_k,
                 num_ctx=num_ctx,
                 enable_compile_loop=True,
+                c2a_policy_path=memla_c2a_policy_path,
+                disable_c2a_policy=disable_memla_c2a_policy,
             )
             stage = "raw"
             try:

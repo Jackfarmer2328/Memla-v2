@@ -450,6 +450,8 @@ def run_coding_c2a_benchmark(
     raw_base_url: str = "",
     memla_provider: str = "",
     memla_base_url: str = "",
+    memla_c2a_policy_path: str = "",
+    disable_memla_c2a_policy: bool = False,
 ) -> dict[str, Any]:
     cases = load_eval_cases(cases_path)
     raw_client = _build_llm_client(provider=raw_provider or None, base_url=raw_base_url or None)
@@ -467,6 +469,8 @@ def run_coding_c2a_benchmark(
             top_k=top_k,
             num_ctx=num_ctx,
             enable_compile_loop=True,
+            c2a_policy_path=memla_c2a_policy_path,
+            disable_c2a_policy=disable_memla_c2a_policy,
         )
         try:
             for case in cases:

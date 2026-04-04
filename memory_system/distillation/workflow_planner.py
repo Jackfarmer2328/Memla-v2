@@ -1078,9 +1078,24 @@ def build_workflow_plan(
     repo_root: str = "",
     max_steps: int = 4,
     enable_compile_loop: bool = True,
+    c2a_policy_path: str = "",
+    disable_c2a_policy: bool = False,
 ) -> WorkflowPlan:
     prompt_tokens = _tokenize(prompt)
-    policy_priors = suggest_c2a_policy_priors(prompt=prompt, repo_root=repo_root)
+    policy_priors = (
+        {
+            "matched_tokens": [],
+            "constraints": [],
+            "roles": [],
+            "transmutations": [],
+            "preferred_files": [],
+            "preferred_regions": [],
+            "teacher_rescue_constraints": [],
+            "teacher_rescue_transmutations": [],
+        }
+        if disable_c2a_policy
+        else suggest_c2a_policy_priors(prompt=prompt, repo_root=repo_root, explicit_path=c2a_policy_path)
+    )
     desired_roles = infer_prompt_roles(prompt)
     current_family = infer_repo_family(repo_root) if repo_root else "unknown"
     family_candidates = [candidate for candidate in candidates if candidate.same_repo or candidate.repo_family_match]
