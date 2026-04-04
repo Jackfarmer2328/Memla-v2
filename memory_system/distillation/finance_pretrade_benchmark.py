@@ -455,6 +455,8 @@ def backtest_finance_decision(case: FinancePretradeCase, decision: FinanceDecisi
     modified_hits: list[FinanceRuleHit] = []
     modified_order: dict[str, Any] = {}
     current_decision = str(decision.decision or "").strip().lower()
+    hard_hits = [hit for hit in initial_hits if str(hit.severity or "").strip().lower() == "hard"]
+    soft_hits = [hit for hit in initial_hits if str(hit.severity or "").strip().lower() == "soft"]
 
     if current_decision == "allow":
         compliance_passed = not initial_hits
@@ -462,14 +464,28 @@ def backtest_finance_decision(case: FinancePretradeCase, decision: FinanceDecisi
         if initial_hits:
             residuals.extend([f"order_still_violates:{hit.rule_id}" for hit in initial_hits])
     elif current_decision == "block":
-        compliance_passed = bool(initial_hits)
-        final_status = "block_ok" if compliance_passed else "unnecessary_block"
-        if not compliance_passed:
+        if hard_hits:
+            compliance_passed = True
+            final_status = "block_ok"
+        elif soft_hits:
+            compliance_passed = False
+            final_status = "overblocked_soft_review"
+            residuals.extend([f"soft_review_prefers_escalation:{hit.rule_id}" for hit in soft_hits])
+        else:
+            compliance_passed = False
+            final_status = "unnecessary_block"
             residuals.append("no_triggered_rule_for_block")
     elif current_decision == "escalate":
-        compliance_passed = bool(initial_hits)
-        final_status = "escalate_ok" if compliance_passed else "unnecessary_escalation"
-        if not compliance_passed:
+        if hard_hits:
+            compliance_passed = False
+            final_status = "escalation_insufficient_for_hard_block"
+            residuals.extend([f"hard_rule_requires_block_or_modify:{hit.rule_id}" for hit in hard_hits])
+        elif soft_hits:
+            compliance_passed = True
+            final_status = "escalate_ok"
+        else:
+            compliance_passed = False
+            final_status = "unnecessary_escalation"
             residuals.append("no_triggered_rule_for_escalation")
     elif current_decision == "modify":
         if not decision.rewrite:

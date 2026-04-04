@@ -4,8 +4,11 @@ import json
 
 from memory_system.cli import main
 from memory_system.distillation.finance_pretrade_benchmark import (
+    FinanceDecision,
+    backtest_finance_decision,
     _normalize_action,
     _normalize_rule,
+    load_finance_pretrade_cases,
     render_finance_pretrade_markdown,
     run_finance_pretrade_benchmark,
 )
@@ -351,3 +354,82 @@ def test_run_finance_pretrade_benchmark_can_filter_case_ids(monkeypatch, tmp_pat
     assert report["cases_requested"] == 1
     assert report["cases"] == 1
     assert report["rows"][0]["case_id"] == "keep_me"
+
+
+def test_backtest_finance_decision_prefers_escalation_for_soft_duplicate_controls(tmp_path):
+    cases_path = tmp_path / "finance_cases.jsonl"
+    cases_path.write_text(
+        json.dumps(
+            {
+                "case_id": "duplicate_window_escalate",
+                "prompt": "A matching order reappears inside the duplicate-order review window.",
+                "order": {
+                    "symbol": "MSFT",
+                    "side": "buy",
+                    "quantity": 100,
+                    "price": 412.5,
+                    "route": "ARCA",
+                    "ts": 1712251320,
+                },
+                "account": {"current_position": 0},
+                "market": {"reference_price": 412.5},
+                "controls": {
+                    "max_order_notional": 1000000.0,
+                    "approval_notional": 800000.0,
+                    "max_long_position": 5000,
+                    "max_short_position": 5000,
+                    "max_price_deviation_pct": 0.05,
+                    "duplicate_window_seconds": 5,
+                    "allowed_routes": ["ARCA"],
+                },
+                "recent_orders": [
+                    {
+                        "symbol": "MSFT",
+                        "side": "buy",
+                        "quantity": 100,
+                        "price": 412.5,
+                        "route": "ARCA",
+                        "ts": 1712251317,
+                    }
+                ],
+                "expected_outcome": "escalate",
+                "expected_rule_hits": ["duplicate_order_window"],
+                "expected_actions": ["request_supervisor_approval"],
+                "expected_rewrite": {},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    case = load_finance_pretrade_cases(str(cases_path))[0]
+
+    blocked = backtest_finance_decision(
+        case,
+        FinanceDecision(
+            decision="block",
+            predicted_rule_hits=["duplicate_order_window"],
+            next_actions=["block_order"],
+            rewrite={},
+            rationale="Block duplicate.",
+            response_text="",
+            parse_mode="json",
+        ),
+    )
+    escalated = backtest_finance_decision(
+        case,
+        FinanceDecision(
+            decision="escalate",
+            predicted_rule_hits=["duplicate_order_window"],
+            next_actions=["request_supervisor_approval"],
+            rewrite={},
+            rationale="Escalate duplicate for review.",
+            response_text="",
+            parse_mode="json",
+        ),
+    )
+
+    assert blocked.compliance_passed is False
+    assert blocked.final_status == "overblocked_soft_review"
+    assert "soft_review_prefers_escalation:duplicate_order_window" in blocked.residual_constraints
+    assert escalated.compliance_passed is True
+    assert escalated.final_status == "escalate_ok"
