@@ -26,7 +26,9 @@ Same-model control on the same OAuth slice:
 
 Additional support:
 - earlier hosted upper rung: `meta/Llama-3.3-70B-Instruct` raw apply `0.0` -> local `qwen3.5:9b + Memla` apply `1.0`
+- hosted `Grok-3` raw on the same OAuth slice: apply `0.0` -> `0.6667`, semantic success `0.0` -> `0.6667`
 - second repo family against hosted `70b` raw: apply `0.0 -> 0.3333`
+- second repo family against hosted `Grok-3` raw: apply `0.0 -> 0.5` on `2` completed FastAPI cases, with one raw-lane `HTTPError`
 - earlier larger-local baseline: `qwen2.5:32b` raw apply `0.0` -> `qwen3.5:9b + Memla` apply `0.6667`
 
 ## Math

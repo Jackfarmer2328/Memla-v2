@@ -8,9 +8,10 @@
 
 ## Extra coding support
 - Earlier hosted upper rung: meta/Llama-3.3-70B-Instruct raw apply `0` -> qwen3.5:9b + Memla apply `1`.
+- Grok OAuth rung: Grok-3 raw apply `0` and semantic success `0` -> qwen3.5:9b + Memla apply `0.6667` and semantic success `0.6667`.
 - Second repo-family repeat against hosted 70b raw: apply `0` -> `0.3333`.
+- Second repo-family repeat against hosted Grok raw: apply `0` -> `0.5` on 2 completed FastAPI cases, with one raw-lane HTTP error.
 - Earlier larger-local baseline: qwen2.5:32b raw apply `0` -> qwen3.5:9b + Memla apply `0.6667`.
-- Second repo-family patch execution: raw apply `0` -> Memla apply `0.3`.
 
 ## Honest limit
 - This is bounded-runtime evidence, not universal proof complete.

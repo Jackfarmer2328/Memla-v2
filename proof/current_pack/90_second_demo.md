@@ -9,9 +9,12 @@
 3. Show the second repo-family repeat.
    Hosted Llama-3.3-70B raw apply rate: `0`. qwen3.5:9b + Memla apply rate: `0.3333`.
    Same shape on FastAPI, even though semantic success stayed flat there.
-4. Open the math reranker report with the executor held constant.
+4. Show the Grok support rung.
+   On OAuth, hosted Grok-3 raw stayed at `0` apply / `0` semantic success while qwen3.5:9b + Memla reached `0.6667` / `0.6667`.
+   On FastAPI, hosted Grok-3 raw again stayed at `0` apply while qwen3.5:9b + Memla reached `0.5` apply on 2 completed cases.
+5. Open the math reranker report with the executor held constant.
    4b ambiguous-step choice accuracy: `0.5455` -> `1`.
    9b ambiguous-step choice accuracy: `0.4545` -> `1`.
-5. Open the harder end-to-end math report.
+6. Open the harder end-to-end math report.
    4b raw solve accuracy: `0.875`. 4b + Memla: `1`. Teacher raw: `1`.
-6. Close with the thesis: Memla improves the decisions that bounded executors turn into real work.
+7. Close with the thesis: Memla improves the decisions that bounded executors turn into real work.
