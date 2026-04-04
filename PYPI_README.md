@@ -1,6 +1,6 @@
 # Memla
 
-Memla is a local CLI runtime for Ollama models.
+Memla is a CLI runtime for local or hosted models.
 
 It helps smaller models make better technical decisions inside verifier-backed loops instead of using raw prompting alone.
 
@@ -15,6 +15,15 @@ Quick check:
 ```bash
 memla --help
 memla doctor --repo-root . --model qwen3.5:9b
+```
+
+Hosted GitHub Models example:
+
+```powershell
+$env:LLM_PROVIDER="github_models"
+$env:GITHUB_TOKEN="YOUR_GITHUB_TOKEN"
+$env:LLM_BASE_URL="https://models.github.ai/inference"
+memla coding run --prompt "Repair the failing auth tests" --repo-root . --model "openai/gpt-5"
 ```
 
 Core use cases:

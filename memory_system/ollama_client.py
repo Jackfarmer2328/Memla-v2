@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -20,11 +21,13 @@ class UniversalLLMClient:
     - provider="ollama": local Ollama /api/chat (no API key)
     - provider="openai": OpenAI-compatible /v1/chat/completions (API key)
     - provider="anthropic": Anthropic /v1/messages (API key via x-api-key)
+    - provider="github_models": GitHub Models /inference/chat/completions (GitHub token)
 
     Configure via constructor or env:
-    - LLM_PROVIDER: "ollama" | "openai" | "anthropic"
+    - LLM_PROVIDER: "ollama" | "openai" | "anthropic" | "github_models"
     - LLM_BASE_URL: e.g. "http://127.0.0.1:11434" (ollama) or "https://api.openai.com" or "https://api.anthropic.com"
     - LLM_API_KEY: any API key string (used when provider != "ollama")
+    - GITHUB_TOKEN / GITHUB_MODELS_TOKEN: optional fallback when provider="github_models"
     """
 
     def __init__(
@@ -35,19 +38,36 @@ class UniversalLLMClient:
         api_key: Optional[str] = None,
         headers: Optional[dict[str, str]] = None,
     ) -> None:
-        self.provider = provider.strip().lower()
-        self.base_url = base_url.rstrip("/")
+        self.provider = self._normalize_provider(provider)
+        self.base_url = self._normalize_base_url(self.provider, base_url)
         self.api_key = api_key
         self.headers = headers or {}
 
     @classmethod
     def from_env(cls) -> "UniversalLLMClient":
-        import os
-
-        provider = os.environ.get("LLM_PROVIDER", "ollama")
-        base_url = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:11434")
+        provider = cls._normalize_provider(os.environ.get("LLM_PROVIDER", "ollama"))
+        base_url = cls._normalize_base_url(provider, os.environ.get("LLM_BASE_URL", "http://127.0.0.1:11434"))
         api_key = os.environ.get("LLM_API_KEY")
+        if provider == "github_models" and not api_key:
+            api_key = os.environ.get("GITHUB_MODELS_TOKEN") or os.environ.get("GITHUB_TOKEN")
         return cls(provider=provider, base_url=base_url, api_key=api_key)
+
+    @staticmethod
+    def _normalize_provider(provider: str) -> str:
+        normalized = provider.strip().lower().replace("-", "_")
+        if normalized in {"github", "githubmodels"}:
+            return "github_models"
+        return normalized
+
+    @staticmethod
+    def _normalize_base_url(provider: str, base_url: str) -> str:
+        base = (base_url or "").strip().rstrip("/")
+        if provider == "github_models":
+            if not base or base in {"http://127.0.0.1:11434", "http://localhost:11434"}:
+                return "https://models.github.ai/inference"
+            if base == "https://models.github.ai":
+                return "https://models.github.ai/inference"
+        return base or "http://127.0.0.1:11434"
 
     def chat(
         self,
@@ -61,6 +81,8 @@ class UniversalLLMClient:
             return self._chat_ollama(model=model, messages=messages, temperature=temperature, num_ctx=num_ctx)
         if self.provider == "anthropic":
             return self._chat_anthropic(model=model, messages=messages, temperature=temperature)
+        if self.provider == "github_models":
+            return self._chat_github_models(model=model, messages=messages, temperature=temperature)
         # default to OpenAI-compatible
         return self._chat_openai_compatible(model=model, messages=messages, temperature=temperature)
 
@@ -121,6 +143,50 @@ class UniversalLLMClient:
             raise RuntimeError(f"Unexpected OpenAI-compatible response: {json.dumps(data)[:500]}") from e
         if not isinstance(content, str):
             raise RuntimeError(f"Unexpected OpenAI-compatible response: {json.dumps(data)[:500]}")
+        return content
+
+    def _chat_github_models(
+        self,
+        *,
+        model: str,
+        messages: list[ChatMessage],
+        temperature: float,
+    ) -> str:
+        """
+        Native GitHub Models chat endpoint.
+
+        - Endpoint: POST /inference/chat/completions
+        - Auth: Bearer token from GITHUB_TOKEN, GITHUB_MODELS_TOKEN, or LLM_API_KEY
+        - Response shape mirrors OpenAI chat completions
+        """
+        if not self.api_key:
+            raise RuntimeError(
+                "GitHub Models requires a token. Set LLM_API_KEY, GITHUB_MODELS_TOKEN, or GITHUB_TOKEN."
+            )
+
+        url = f"{self.base_url}/chat/completions"
+        hdrs = dict(self.headers)
+        hdrs.setdefault("Accept", "application/vnd.github+json")
+        hdrs.setdefault("Authorization", f"Bearer {self.api_key}")
+        hdrs.setdefault("X-GitHub-Api-Version", "2022-11-28")
+        hdrs.setdefault("Content-Type", "application/json")
+
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": [{"role": m.role, "content": m.content} for m in messages],
+            "temperature": float(temperature),
+        }
+
+        resp = requests.post(url, json=payload, timeout=600, headers=hdrs)
+        resp.raise_for_status()
+        data = resp.json()
+
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except Exception as e:
+            raise RuntimeError(f"Unexpected GitHub Models response: {json.dumps(data)[:500]}") from e
+        if not isinstance(content, str):
+            raise RuntimeError(f"Unexpected GitHub Models response: {json.dumps(data)[:500]}")
         return content
 
     def _chat_anthropic(

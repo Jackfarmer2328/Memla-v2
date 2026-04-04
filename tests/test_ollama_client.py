@@ -66,3 +66,64 @@ def test_anthropic_does_not_retry_non_transient_http_error(monkeypatch):
         raise AssertionError("Expected an HTTPError for a non-transient Anthropic failure.")
 
     assert len(calls) == 1
+
+
+def test_github_models_uses_expected_endpoint_and_headers(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_post(url, *, json, timeout, headers):
+        captured["url"] = url
+        captured["json"] = json
+        captured["timeout"] = timeout
+        captured["headers"] = headers
+        return _DummyResponse(200, {"choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr("memory_system.ollama_client.requests.post", fake_post)
+
+    client = UniversalLLMClient(
+        provider="github_models",
+        base_url="https://models.github.ai/inference",
+        api_key="gh-token",
+    )
+    out = client.chat(
+        model="openai/gpt-5",
+        messages=[ChatMessage(role="user", content="hello")],
+        temperature=0.3,
+    )
+
+    assert out == "ok"
+    assert captured["url"] == "https://models.github.ai/inference/chat/completions"
+    assert captured["json"] == {
+        "model": "openai/gpt-5",
+        "messages": [{"role": "user", "content": "hello"}],
+        "temperature": 0.3,
+    }
+    headers = captured["headers"]
+    assert isinstance(headers, dict)
+    assert headers["Authorization"] == "Bearer gh-token"
+    assert headers["Accept"] == "application/vnd.github+json"
+    assert headers["X-GitHub-Api-Version"] == "2022-11-28"
+
+
+def test_github_models_from_env_uses_github_token_fallback(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "github_models")
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.setenv("GITHUB_TOKEN", "gh-env-token")
+
+    client = UniversalLLMClient.from_env()
+
+    assert client.provider == "github_models"
+    assert client.base_url == "https://models.github.ai/inference"
+    assert client.api_key == "gh-env-token"
+
+
+def test_github_models_normalizes_base_url_without_inference_suffix():
+    client = UniversalLLMClient(
+        provider="github",
+        base_url="https://models.github.ai",
+        api_key="gh-token",
+    )
+
+    assert client.provider == "github_models"
+    assert client.base_url == "https://models.github.ai/inference"

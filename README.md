@@ -1,6 +1,6 @@
 # Memla CLI
 
-Memla is a bounded runtime that helps smaller local models make better technical decisions inside verifier-backed loops.
+Memla is a bounded runtime that helps smaller models make better technical decisions inside verifier-backed loops.
 
 Install from PyPI:
 
@@ -42,8 +42,8 @@ This is a bounded-runtime claim, not a universal model-parity claim.
 
 Prerequisites:
 - Python 3.11+
-- Ollama running locally
-- one or more local models already pulled
+- either Ollama running locally or a hosted chat model reachable through the shared LLM client
+- one or more models already available
 
 Install:
 
@@ -68,6 +68,17 @@ Run a local environment check:
 ```bash
 memla doctor --repo-root . --model qwen3.5:9b
 ```
+
+Use a hosted GitHub Models endpoint instead of Ollama:
+
+```powershell
+$env:LLM_PROVIDER="github_models"
+$env:GITHUB_TOKEN="YOUR_GITHUB_TOKEN"
+$env:LLM_BASE_URL="https://models.github.ai/inference"
+memla coding run --prompt "Repair the failing auth tests" --repo-root . --model "openai/gpt-5"
+```
+
+If you prefer, `LLM_API_KEY` also works in place of `GITHUB_TOKEN`.
 
 ## Main commands
 

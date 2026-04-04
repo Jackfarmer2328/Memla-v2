@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "memla"
 version = "0.1.1"
-description = "Local CLI runtime that helps smaller Ollama models make better technical decisions in verifier-backed loops."
+description = "CLI runtime that helps smaller local or hosted models make better technical decisions in verifier-backed loops."
 readme = { file = "PYPI_README.md", content-type = "text/markdown" }
 requires-python = ">=3.11"
 authors = [
