@@ -109,12 +109,6 @@ memla pack thesis --coding path\\to\\coding_patch_execution_report.json --math-r
 
 Benchmark commands write report bundles under `./memla_reports/` by default.
 
-Publish a generated proof pack to the repo root for Vercel:
-
-```bash
-memla pack publish-site --source path\\to\\generated_pack --out-dir .
-```
-
 ## Public proof note
 
 This repo intentionally omits bulky raw benchmark dumps from version control so the public snapshot stays product-shaped.
@@ -143,10 +137,3 @@ Memla is being packaged as:
 The wedge is:
 
 **make local 9b/14b/32b coding models more execution-capable than their raw form.**
-
-## GitHub and Vercel
-
-This repo is set up so GitHub and Vercel can work together cleanly:
-- GitHub Actions runs the focused test suite on push and pull request
-- `memla pack publish-site --source path\\to\\generated_pack --out-dir .` syncs a proof pack to the repo root
-- the root `vercel.json` is a static deployment config so Vercel can deploy the proof site directly from the repo root
