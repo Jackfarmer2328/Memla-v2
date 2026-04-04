@@ -130,6 +130,18 @@ Run the finance pre-trade compliance backtester:
 memla finance benchmark-pretrade --cases cases\\finance_pretrade_eval_cases.jsonl --raw-model meta/Llama-3.3-70B-Instruct --memla-model qwen3.5:9b
 ```
 
+Extract a normalized finance trace bank from one or more pre-trade benchmark reports:
+
+```bash
+memla finance extract-pretrade --report memla_reports\\finance_pretrade_benchmark_20260404_161024\\finance_pretrade_benchmark_report.json
+```
+
+Distill a finance self-transmutation policy bank Memla can load from `.memla`:
+
+```bash
+memla finance distill-pretrade --trace-bank memla_reports\\finance_pretrade_extract\\finance_trace_bank_summary.json --repo-root .
+```
+
 Extract a normalized C2A trace bank from one or more benchmark reports:
 
 ```bash

@@ -25,6 +25,14 @@ from .distillation.finance_pretrade_benchmark import (
     render_finance_pretrade_markdown,
     run_finance_pretrade_benchmark,
 )
+from .distillation.finance_policy_bank import (
+    distill_finance_policy_bank,
+    render_finance_policy_bank_markdown,
+)
+from .distillation.finance_trace_bank import (
+    extract_finance_trace_bank,
+    render_finance_trace_bank_markdown,
+)
 from .distillation.c2a_trace_bank import (
     extract_c2a_trace_bank,
     render_c2a_trace_bank_markdown,
@@ -488,6 +496,7 @@ def _handle_math_benchmark(args: argparse.Namespace) -> int:
 def _handle_finance_pretrade_benchmark(args: argparse.Namespace) -> int:
     report = run_finance_pretrade_benchmark(
         cases_path=args.cases,
+        repo_root=str(_resolve_repo_root(args.repo_root)),
         raw_model=args.raw_model,
         memla_model=args.memla_model,
         raw_iterations=args.raw_iterations,
@@ -498,6 +507,8 @@ def _handle_finance_pretrade_benchmark(args: argparse.Namespace) -> int:
         raw_base_url=args.raw_base_url,
         memla_provider=args.memla_provider,
         memla_base_url=args.memla_base_url,
+        memla_finance_policy_path=args.memla_finance_policy_path,
+        disable_memla_finance_policy=args.disable_memla_finance_policy,
     )
     markdown = render_finance_pretrade_markdown(report)
     out_dir = Path(args.out_dir).resolve() if args.out_dir else _default_report_dir("finance_pretrade_benchmark")
@@ -517,6 +528,77 @@ def _handle_finance_pretrade_benchmark(args: argparse.Namespace) -> int:
         f"memla utility {report.get('avg_memla_finance_utility', 0.0)} | "
         f"utility index {utility_text}"
     )
+    return 0
+
+
+def _handle_extract_finance_pretrade(args: argparse.Namespace) -> int:
+    report = extract_finance_trace_bank(
+        report_paths=list(args.report or []),
+        min_utility_delta=args.min_delta,
+    )
+    markdown = render_finance_trace_bank_markdown(report)
+    out_dir = Path(args.out_dir).resolve() if args.out_dir else _default_report_dir("finance_pretrade_extract")
+    json_path, md_path = _write_report_bundle(
+        report=report,
+        markdown=markdown,
+        out_dir=out_dir,
+        stem="finance_trace_bank_summary",
+    )
+    jsonl_path = out_dir / "finance_trace_bank.jsonl"
+    jsonl_lines = [json.dumps(row, ensure_ascii=True) for row in report.get("rows", [])]
+    jsonl_path.write_text("\n".join(jsonl_lines) + ("\n" if jsonl_lines else ""), encoding="utf-8")
+    if args.json:
+        _print_json(
+            {
+                "json_summary": str(json_path),
+                "markdown_summary": str(md_path),
+                "jsonl_bank": str(jsonl_path),
+                "rows_extracted": report.get("rows_extracted", 0),
+                "winner_counts": report.get("winner_counts", {}),
+                "teacher_signal_class_counts": report.get("teacher_signal_class_counts", {}),
+            }
+        )
+    else:
+        print(f"Wrote finance trace bank JSON summary: {json_path}")
+        print(f"Wrote finance trace bank Markdown summary: {md_path}")
+        print(f"Wrote finance trace bank JSONL: {jsonl_path}")
+        print(
+            "Summary: "
+            f"rows {report.get('rows_extracted', 0)} | "
+            f"winner counts {report.get('winner_counts', {})} | "
+            f"teacher signals {report.get('teacher_signal_class_counts', {})}"
+        )
+    return 0
+
+
+def _handle_distill_finance_pretrade(args: argparse.Namespace) -> int:
+    repo_root = _resolve_repo_root(args.repo_root)
+    out_path = Path(args.out).resolve() if args.out else (repo_root / ".memla" / "finance_policy_bank.json").resolve()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    report = distill_finance_policy_bank(
+        trace_bank_path=args.trace_bank,
+        min_priority=args.min_priority,
+    )
+    out_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    md_path = out_path.with_suffix(".md")
+    md_path.write_text(render_finance_policy_bank_markdown(report), encoding="utf-8")
+    if args.json:
+        _print_json(
+            {
+                "policy_bank": str(out_path),
+                "markdown_summary": str(md_path),
+                "rows_used": report.get("rows_used", 0),
+                "source_models": report.get("source_models", {}),
+            }
+        )
+    else:
+        print(f"Wrote finance policy bank JSON: {out_path}")
+        print(f"Wrote finance policy bank Markdown: {md_path}")
+        print(
+            "Summary: "
+            f"rows used {report.get('rows_used', 0)} | "
+            f"source models {report.get('source_models', {})}"
+        )
     return 0
 
 
@@ -796,6 +878,7 @@ def _build_parser() -> argparse.ArgumentParser:
     finance_sub = finance_parser.add_subparsers(dest="finance_command")
     finance_bench = finance_sub.add_parser("benchmark-pretrade", help="Run a pre-trade compliance replay benchmark.")
     finance_bench.add_argument("--cases", required=True, help="Finance pre-trade case JSONL path.")
+    finance_bench.add_argument("--repo-root", default=".", help="Repository root used for local finance policy banks.")
     finance_bench.add_argument("--raw-model", required=True, help="Baseline raw model.")
     finance_bench.add_argument("--memla-model", required=True, help="Memla repair-loop model.")
     finance_bench.add_argument("--raw-iterations", type=int, default=1, help="How many attempts the raw lane gets.")
@@ -806,8 +889,40 @@ def _build_parser() -> argparse.ArgumentParser:
     finance_bench.add_argument("--raw-base-url", default="", help="Optional base URL override for the raw lane.")
     finance_bench.add_argument("--memla-provider", default="", help="Optional provider override for the Memla lane.")
     finance_bench.add_argument("--memla-base-url", default="", help="Optional base URL override for the Memla lane.")
+    finance_bench.add_argument("--memla-finance-policy-path", default="", help="Optional explicit finance policy bank JSON path for the Memla lane.")
+    finance_bench.add_argument("--disable-memla-finance-policy", action="store_true", help="Disable finance self-transmutation priors for the Memla lane.")
     finance_bench.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
     finance_bench.set_defaults(func=_handle_finance_pretrade_benchmark)
+
+    finance_extract = finance_sub.add_parser("extract-pretrade", help="Extract normalized teacher-vs-Memla rows from finance pre-trade benchmark reports.")
+    finance_extract.add_argument(
+        "--report",
+        action="append",
+        required=True,
+        help="Path to a finance_pretrade_benchmark_report.json file. Repeat for multiple reports.",
+    )
+    finance_extract.add_argument(
+        "--min-delta",
+        type=float,
+        default=None,
+        help="Optional minimum Memla-minus-raw utility delta required to keep a row.",
+    )
+    finance_extract.add_argument("--out-dir", default="", help="Directory for extracted finance trace-bank artifacts. Defaults to ./memla_reports/<timestamp>.")
+    finance_extract.add_argument("--json", action="store_true", help="Print the extraction summary as JSON.")
+    finance_extract.set_defaults(func=_handle_extract_finance_pretrade)
+
+    finance_distill = finance_sub.add_parser("distill-pretrade", help="Distill a finance self-transmutation policy bank from extracted finance traces.")
+    finance_distill.add_argument("--trace-bank", required=True, help="Path to a finance trace-bank summary JSON or JSONL file.")
+    finance_distill.add_argument("--repo-root", default=".", help="Repository root where the finance policy bank should live. Defaults to the current directory.")
+    finance_distill.add_argument("--out", default="", help="Optional explicit output JSON path. Defaults to <repo>/.memla/finance_policy_bank.json.")
+    finance_distill.add_argument(
+        "--min-priority",
+        default="medium",
+        choices=["low", "medium", "high"],
+        help="Minimum teaching priority a row must have to influence the distilled finance bank.",
+    )
+    finance_distill.add_argument("--json", action="store_true", help="Print the distillation summary as JSON.")
+    finance_distill.set_defaults(func=_handle_distill_finance_pretrade)
 
     pack_parser = subparsers.add_parser("pack", help="Build Memla proof and buyer packs.")
     pack_sub = pack_parser.add_subparsers(dest="pack_command")

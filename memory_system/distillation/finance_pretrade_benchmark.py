@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..ollama_client import ChatMessage
+from .finance_policy_bank import suggest_finance_policy_priors
 from .patch_execution_benchmark import _build_llm_client
 
 
@@ -641,6 +642,35 @@ def _finance_utility(
     return round(float(utility), 4)
 
 
+def _render_finance_policy_block(priors: dict[str, Any]) -> str:
+    if not any(priors.get(key) for key in ("decisions", "rules", "actions", "teacher_rescue_decisions", "teacher_rescue_actions")):
+        return ""
+    lines = ["=== MEMLA FINANCE PRIORS ==="]
+    matched_tokens = list(priors.get("matched_tokens") or [])
+    if matched_tokens:
+        lines.append(f"Matched prompt tokens: {', '.join(matched_tokens[:8])}")
+    decisions = list(priors.get("decisions") or [])
+    if decisions:
+        lines.append(f"Preferred decisions: {', '.join(decisions[:3])}")
+    rules = list(priors.get("rules") or [])
+    if rules:
+        lines.append(f"Likely rules: {', '.join(rules[:4])}")
+    actions = list(priors.get("actions") or [])
+    if actions:
+        lines.append(f"Likely actions: {', '.join(actions[:4])}")
+    rescue_decisions = list(priors.get("teacher_rescue_decisions") or [])
+    if rescue_decisions:
+        lines.append(f"Teacher rescue decisions: {', '.join(rescue_decisions[:3])}")
+    rescue_rules = list(priors.get("teacher_rescue_rules") or [])
+    if rescue_rules:
+        lines.append(f"Teacher rescue rules: {', '.join(rescue_rules[:4])}")
+    rescue_actions = list(priors.get("teacher_rescue_actions") or [])
+    if rescue_actions:
+        lines.append(f"Teacher rescue actions: {', '.join(rescue_actions[:4])}")
+    lines.append("Use these priors only if they fit the current state and preserve direct control.")
+    return "\n".join(lines)
+
+
 def _query_finance_decision(
     *,
     client: Any,
@@ -650,11 +680,15 @@ def _query_finance_decision(
     num_ctx: int | None,
     residual_constraints: list[str] | None = None,
     prior_trace: list[dict[str, Any]] | None = None,
+    policy_priors: dict[str, Any] | None = None,
 ) -> FinanceDecision:
     user_parts = [
         "Evaluate this pre-trade compliance state and return the best bounded action.",
         _render_case_payload(case),
     ]
+    policy_block = _render_finance_policy_block(policy_priors or {})
+    if policy_block:
+        user_parts.append(policy_block)
     if residual_constraints:
         user_parts.append(
             "Verifier residual constraints from the previous attempt:\n"
@@ -694,6 +728,7 @@ def _decision_loop(
     iterations: int,
     temperature: float,
     num_ctx: int | None,
+    policy_priors: dict[str, Any] | None = None,
 ) -> tuple[FinanceDecision, FinanceBacktestResult, list[dict[str, Any]]]:
     last_decision = FinanceDecision(
         decision="block",
@@ -724,6 +759,7 @@ def _decision_loop(
             num_ctx=num_ctx,
             residual_constraints=residual_constraints if residual_constraints else None,
             prior_trace=traces if traces else None,
+            policy_priors=policy_priors,
         )
         backtest = backtest_finance_decision(case, decision)
         traces.append(
@@ -753,6 +789,7 @@ def _decision_loop(
 def run_finance_pretrade_benchmark(
     *,
     cases_path: str,
+    repo_root: str = "",
     raw_model: str,
     memla_model: str,
     raw_iterations: int = 1,
@@ -763,6 +800,8 @@ def run_finance_pretrade_benchmark(
     raw_base_url: str = "",
     memla_provider: str = "",
     memla_base_url: str = "",
+    memla_finance_policy_path: str = "",
+    disable_memla_finance_policy: bool = False,
 ) -> dict[str, Any]:
     cases = load_finance_pretrade_cases(cases_path)
     raw_client = _build_llm_client(provider=raw_provider or None, base_url=raw_base_url or None)
@@ -773,6 +812,23 @@ def run_finance_pretrade_benchmark(
     for case in cases:
         try:
             actual_rule_hits = _normalize_action([hit.rule_id for hit in evaluate_pretrade_rules(case, case.order)])
+            policy_priors = (
+                {
+                    "matched_tokens": [],
+                    "decisions": [],
+                    "rules": [],
+                    "actions": [],
+                    "teacher_rescue_decisions": [],
+                    "teacher_rescue_rules": [],
+                    "teacher_rescue_actions": [],
+                }
+                if disable_memla_finance_policy
+                else suggest_finance_policy_priors(
+                    prompt=case.prompt,
+                    repo_root=repo_root,
+                    explicit_path=memla_finance_policy_path,
+                )
+            )
             raw_decision, raw_backtest, raw_trace = _decision_loop(
                 client=raw_client,
                 model=raw_model,
@@ -788,6 +844,7 @@ def run_finance_pretrade_benchmark(
                 iterations=max(memla_iterations, 1),
                 temperature=temperature,
                 num_ctx=num_ctx,
+                policy_priors=policy_priors,
             )
 
             raw_rule_recall = _score_overlap(raw_decision.predicted_rule_hits, case.expected_rule_hits)
@@ -872,6 +929,9 @@ def run_finance_pretrade_benchmark(
         "memla_model": memla_model,
         "raw_provider": raw_client.provider,
         "memla_provider": memla_client.provider,
+        "repo_root": str(Path(repo_root).resolve()) if repo_root else "",
+        "memla_finance_policy_path": str(Path(memla_finance_policy_path).resolve()) if memla_finance_policy_path else "",
+        "memla_finance_policy_enabled": not disable_memla_finance_policy,
         "cases": len(rows),
         "cases_requested": len(cases),
         "failed_case_count": len(failures),
