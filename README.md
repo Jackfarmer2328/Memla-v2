@@ -139,6 +139,15 @@ memla finance benchmark-pretrade --cases cases\\finance_pretrade_public_eval_cas
 Public provenance for that pack:
 - `cases/finance_pretrade_public_sources.md`
 
+Run the healthcare denied-claim replay benchmark:
+
+```bash
+memla healthcare benchmark-denials --cases cases\\healthcare_denial_eval_cases.jsonl --raw-model qwen3.5:9b --memla-model qwen3.5:9b --raw-provider ollama --raw-base-url http://127.0.0.1:11435 --memla-provider ollama --memla-base-url http://127.0.0.1:11435
+```
+
+Public provenance for the bundled healthcare pack:
+- `cases/healthcare_denial_public_sources.md`
+
 Extract a normalized finance trace bank from one or more pre-trade benchmark reports:
 
 ```bash

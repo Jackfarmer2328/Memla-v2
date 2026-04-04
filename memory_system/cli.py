@@ -25,6 +25,10 @@ from .distillation.finance_pretrade_benchmark import (
     render_finance_pretrade_markdown,
     run_finance_pretrade_benchmark,
 )
+from .distillation.healthcare_denial_benchmark import (
+    render_healthcare_denial_markdown,
+    run_healthcare_denial_benchmark,
+)
 from .distillation.finance_policy_bank import (
     distill_finance_policy_bank,
     render_finance_policy_bank_markdown,
@@ -604,6 +608,43 @@ def _handle_distill_finance_pretrade(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_healthcare_denial_benchmark(args: argparse.Namespace) -> int:
+    report = run_healthcare_denial_benchmark(
+        cases_path=args.cases,
+        case_ids=list(args.case_id or []),
+        limit=args.limit,
+        raw_model=args.raw_model,
+        memla_model=args.memla_model,
+        raw_iterations=args.raw_iterations,
+        memla_iterations=args.memla_iterations,
+        temperature=args.temperature,
+        num_ctx=args.num_ctx,
+        raw_provider=args.raw_provider,
+        raw_base_url=args.raw_base_url,
+        memla_provider=args.memla_provider,
+        memla_base_url=args.memla_base_url,
+    )
+    markdown = render_healthcare_denial_markdown(report)
+    out_dir = Path(args.out_dir).resolve() if args.out_dir else _default_report_dir("healthcare_denial_benchmark")
+    json_path, md_path = _write_report_bundle(
+        report=report,
+        markdown=markdown,
+        out_dir=out_dir,
+        stem="healthcare_denial_benchmark_report",
+    )
+    print(f"Wrote healthcare benchmark JSON: {json_path}")
+    print(f"Wrote healthcare benchmark Markdown: {md_path}")
+    utility_index = report.get("memla_vs_raw_healthcare_utility_index")
+    utility_text = utility_index if utility_index is not None else "n/a"
+    print(
+        "Summary: "
+        f"raw utility {report.get('avg_raw_healthcare_utility', 0.0)} | "
+        f"memla utility {report.get('avg_memla_healthcare_utility', 0.0)} | "
+        f"utility index {utility_text}"
+    )
+    return 0
+
+
 def _handle_thesis_pack(args: argparse.Namespace) -> int:
     out_dir = Path(args.out_dir).resolve() if args.out_dir else _default_report_dir("thesis_pack")
     result = build_thesis_pack(
@@ -927,6 +968,25 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     finance_distill.add_argument("--json", action="store_true", help="Print the distillation summary as JSON.")
     finance_distill.set_defaults(func=_handle_distill_finance_pretrade)
+
+    healthcare_parser = subparsers.add_parser("healthcare", help="Run healthcare denial replay benchmarks.")
+    healthcare_sub = healthcare_parser.add_subparsers(dest="healthcare_command")
+    healthcare_bench = healthcare_sub.add_parser("benchmark-denials", help="Run a denied-claim replay benchmark.")
+    healthcare_bench.add_argument("--cases", required=True, help="Healthcare denied-claim case JSONL path.")
+    healthcare_bench.add_argument("--case-id", action="append", default=[], help="Optional case id filter. Repeat to run only specific healthcare cases.")
+    healthcare_bench.add_argument("--limit", type=int, default=None, help="Optional max number of healthcare cases to run after filtering.")
+    healthcare_bench.add_argument("--raw-model", required=True, help="Baseline raw model.")
+    healthcare_bench.add_argument("--memla-model", required=True, help="Memla repair-loop model.")
+    healthcare_bench.add_argument("--raw-iterations", type=int, default=1, help="How many attempts the raw lane gets.")
+    healthcare_bench.add_argument("--memla-iterations", type=int, default=3, help="How many verifier-backed repair attempts the Memla lane gets.")
+    healthcare_bench.add_argument("--temperature", type=float, default=0.1)
+    healthcare_bench.add_argument("--num-ctx", type=int, default=None)
+    healthcare_bench.add_argument("--raw-provider", default="", help="Optional provider override for the raw lane.")
+    healthcare_bench.add_argument("--raw-base-url", default="", help="Optional base URL override for the raw lane.")
+    healthcare_bench.add_argument("--memla-provider", default="", help="Optional provider override for the Memla lane.")
+    healthcare_bench.add_argument("--memla-base-url", default="", help="Optional base URL override for the Memla lane.")
+    healthcare_bench.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
+    healthcare_bench.set_defaults(func=_handle_healthcare_denial_benchmark)
 
     pack_parser = subparsers.add_parser("pack", help="Build Memla proof and buyer packs.")
     pack_sub = pack_parser.add_subparsers(dest="pack_command")
