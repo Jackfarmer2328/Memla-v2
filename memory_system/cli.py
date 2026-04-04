@@ -21,6 +21,10 @@ from .distillation.coding_c2a_benchmark import (
     render_coding_c2a_markdown,
     run_coding_c2a_benchmark,
 )
+from .distillation.finance_pretrade_benchmark import (
+    render_finance_pretrade_markdown,
+    run_finance_pretrade_benchmark,
+)
 from .distillation.c2a_trace_bank import (
     extract_c2a_trace_bank,
     render_c2a_trace_bank_markdown,
@@ -481,6 +485,41 @@ def _handle_math_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_finance_pretrade_benchmark(args: argparse.Namespace) -> int:
+    report = run_finance_pretrade_benchmark(
+        cases_path=args.cases,
+        raw_model=args.raw_model,
+        memla_model=args.memla_model,
+        raw_iterations=args.raw_iterations,
+        memla_iterations=args.memla_iterations,
+        temperature=args.temperature,
+        num_ctx=args.num_ctx,
+        raw_provider=args.raw_provider,
+        raw_base_url=args.raw_base_url,
+        memla_provider=args.memla_provider,
+        memla_base_url=args.memla_base_url,
+    )
+    markdown = render_finance_pretrade_markdown(report)
+    out_dir = Path(args.out_dir).resolve() if args.out_dir else _default_report_dir("finance_pretrade_benchmark")
+    json_path, md_path = _write_report_bundle(
+        report=report,
+        markdown=markdown,
+        out_dir=out_dir,
+        stem="finance_pretrade_benchmark_report",
+    )
+    print(f"Wrote finance benchmark JSON: {json_path}")
+    print(f"Wrote finance benchmark Markdown: {md_path}")
+    utility_index = report.get("memla_vs_raw_finance_utility_index")
+    utility_text = utility_index if utility_index is not None else "n/a"
+    print(
+        "Summary: "
+        f"raw utility {report.get('avg_raw_finance_utility', 0.0)} | "
+        f"memla utility {report.get('avg_memla_finance_utility', 0.0)} | "
+        f"utility index {utility_text}"
+    )
+    return 0
+
+
 def _handle_thesis_pack(args: argparse.Namespace) -> int:
     out_dir = Path(args.out_dir).resolve() if args.out_dir else _default_report_dir("thesis_pack")
     result = build_thesis_pack(
@@ -752,6 +791,23 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     math_bench.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
     math_bench.set_defaults(func=_handle_math_benchmark)
+
+    finance_parser = subparsers.add_parser("finance", help="Run finance compliance backtests and benchmarks.")
+    finance_sub = finance_parser.add_subparsers(dest="finance_command")
+    finance_bench = finance_sub.add_parser("benchmark-pretrade", help="Run a pre-trade compliance replay benchmark.")
+    finance_bench.add_argument("--cases", required=True, help="Finance pre-trade case JSONL path.")
+    finance_bench.add_argument("--raw-model", required=True, help="Baseline raw model.")
+    finance_bench.add_argument("--memla-model", required=True, help="Memla repair-loop model.")
+    finance_bench.add_argument("--raw-iterations", type=int, default=1, help="How many attempts the raw lane gets.")
+    finance_bench.add_argument("--memla-iterations", type=int, default=3, help="How many verifier-backed repair attempts the Memla lane gets.")
+    finance_bench.add_argument("--temperature", type=float, default=0.1)
+    finance_bench.add_argument("--num-ctx", type=int, default=None)
+    finance_bench.add_argument("--raw-provider", default="", help="Optional provider override for the raw lane.")
+    finance_bench.add_argument("--raw-base-url", default="", help="Optional base URL override for the raw lane.")
+    finance_bench.add_argument("--memla-provider", default="", help="Optional provider override for the Memla lane.")
+    finance_bench.add_argument("--memla-base-url", default="", help="Optional base URL override for the Memla lane.")
+    finance_bench.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
+    finance_bench.set_defaults(func=_handle_finance_pretrade_benchmark)
 
     pack_parser = subparsers.add_parser("pack", help="Build Memla proof and buyer packs.")
     pack_sub = pack_parser.add_subparsers(dest="pack_command")

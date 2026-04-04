@@ -18,7 +18,7 @@ This repo is the public, CLI-first version of Memla. It is intentionally narrowe
 - `memla.py`
   - thin top-level entry point
 - `memory_system/`
-  - CLI runtime, coding loop, pure coding C2A benchmark, math benchmark, and pack builder
+  - CLI runtime, coding loop, finance pre-trade backtester, pure coding C2A benchmark, math benchmark, and pack builder
 - `cases/`
   - bundled case files for quick local runs
 - `proof/`
@@ -122,6 +122,12 @@ Run the pure next-move coding C2A benchmark:
 
 ```bash
 memla coding benchmark-c2a --cases cases\\coding_eval_cases.jsonl --repo-root . --raw-model qwen3.5:9b --memla-model qwen3.5:9b
+```
+
+Run the finance pre-trade compliance backtester:
+
+```bash
+memla finance benchmark-pretrade --cases cases\\finance_pretrade_eval_cases.jsonl --raw-model meta/Llama-3.3-70B-Instruct --memla-model qwen3.5:9b
 ```
 
 Extract a normalized C2A trace bank from one or more benchmark reports:
