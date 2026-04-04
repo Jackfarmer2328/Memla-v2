@@ -100,6 +100,12 @@ Run the patch execution benchmark:
 memla coding benchmark-patch --pack path\\to\\git_history_case_pack.json --raw-model qwen2.5:32b --memla-model qwen3.5:9b
 ```
 
+Mix a hosted raw lane with a local Memla lane:
+
+```bash
+memla coding benchmark-patch --pack path\\to\\git_history_case_pack.json --raw-model meta/Llama-3.3-70B-Instruct --memla-model qwen3.5:9b --raw-provider github_models --raw-base-url https://models.github.ai/inference --memla-provider ollama --memla-base-url http://127.0.0.1:11435
+```
+
 Run the compile-loop benchmark:
 
 ```bash

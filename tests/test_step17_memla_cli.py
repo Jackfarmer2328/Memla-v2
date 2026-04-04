@@ -108,15 +108,21 @@ def test_memla_coding_run_json_outputs_structured_proxy_result(monkeypatch, caps
 
 
 def test_memla_patch_benchmark_writes_report_bundle(monkeypatch, capsys, tmp_path):
-    monkeypatch.setattr(
-        "memory_system.cli.run_patch_execution_benchmark",
-        lambda **kwargs: {
+    captured: dict[str, object] = {}
+
+    def _fake_patch_benchmark(**kwargs):
+        captured.update(kwargs)
+        return {
             "raw_apply_rate": 0.0,
             "memla_apply_rate": 0.6667,
             "avg_raw_semantic_command_success_rate": 0.0,
             "avg_memla_semantic_command_success_rate": 0.6667,
             "rows": [],
-        },
+        }
+
+    monkeypatch.setattr(
+        "memory_system.cli.run_patch_execution_benchmark",
+        _fake_patch_benchmark,
     )
     monkeypatch.setattr(
         "memory_system.cli.render_patch_execution_markdown",
@@ -134,6 +140,14 @@ def test_memla_patch_benchmark_writes_report_bundle(monkeypatch, capsys, tmp_pat
             "qwen2.5:32b",
             "--memla-model",
             "qwen3.5:9b",
+            "--raw-provider",
+            "github_models",
+            "--raw-base-url",
+            "https://models.github.ai/inference",
+            "--memla-provider",
+            "ollama",
+            "--memla-base-url",
+            "http://127.0.0.1:11435",
             "--db",
             str(tmp_path / "bench.sqlite"),
             "--out-dir",
@@ -147,6 +161,10 @@ def test_memla_patch_benchmark_writes_report_bundle(monkeypatch, capsys, tmp_pat
     out = capsys.readouterr().out
     assert "Wrote patch benchmark JSON" in out
     assert "memla apply 0.6667" in out
+    assert captured["raw_provider"] == "github_models"
+    assert captured["raw_base_url"] == "https://models.github.ai/inference"
+    assert captured["memla_provider"] == "ollama"
+    assert captured["memla_base_url"] == "http://127.0.0.1:11435"
 
 
 def test_memla_pack_thesis_routes_to_builder(monkeypatch, capsys, tmp_path):

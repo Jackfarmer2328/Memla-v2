@@ -4,6 +4,7 @@ import json
 
 from memory_system.distillation.patch_execution_benchmark import (
     _candidate_local_bin_paths,
+    _build_llm_client,
     _build_diagnostic_sheet,
     _build_patch_prompt,
     _build_retry_feedback_block,
@@ -26,6 +27,19 @@ from memory_system.distillation.patch_execution_benchmark import (
     _select_dependency_bootstrap_command,
     extract_technician_cases,
 )
+
+
+def test_build_llm_client_supports_github_models_env_fallback(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "gh-test-token")
+
+    client = _build_llm_client(
+        provider="github_models",
+        base_url="https://models.github.ai/inference",
+    )
+
+    assert client.provider == "github_models"
+    assert client.base_url == "https://models.github.ai/inference"
+    assert client.api_key == "gh-test-token"
 
 
 def test_extract_diff_block_from_fenced_answer():

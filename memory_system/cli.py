@@ -254,6 +254,10 @@ def _handle_patch_benchmark(args: argparse.Namespace) -> int:
         num_ctx=args.num_ctx,
         raw_iterations=args.raw_iterations,
         memla_iterations=args.memla_iterations,
+        raw_provider=args.raw_provider,
+        raw_base_url=args.raw_base_url,
+        memla_provider=args.memla_provider,
+        memla_base_url=args.memla_base_url,
     )
     markdown = render_patch_execution_markdown(report)
     out_dir = Path(args.out_dir).resolve() if args.out_dir else _default_report_dir("patch_benchmark")
@@ -511,6 +515,10 @@ def _build_parser() -> argparse.ArgumentParser:
     patch_parser.add_argument("--num-ctx", type=int, default=None)
     patch_parser.add_argument("--raw-iterations", type=int, default=1)
     patch_parser.add_argument("--memla-iterations", type=int, default=3)
+    patch_parser.add_argument("--raw-provider", default="", help="Optional provider override for the raw lane.")
+    patch_parser.add_argument("--raw-base-url", default="", help="Optional base URL override for the raw lane.")
+    patch_parser.add_argument("--memla-provider", default="", help="Optional provider override for the Memla lane.")
+    patch_parser.add_argument("--memla-base-url", default="", help="Optional base URL override for the Memla lane.")
     patch_parser.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
     patch_parser.set_defaults(func=_handle_patch_benchmark)
 

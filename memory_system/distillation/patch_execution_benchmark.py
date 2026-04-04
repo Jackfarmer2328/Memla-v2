@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
+from contextlib import contextmanager
 import difflib
 import json
 import os
@@ -2062,27 +2063,76 @@ def _build_memla_workflow_block(
     prompt: str,
     top_k: int,
     num_ctx: int | None,
+    provider: str | None = None,
+    base_url: str | None = None,
 ) -> tuple[str, list[str]]:
-    session = CodingSession(
-        model=planner_model,
-        db_path=db_path,
-        user_id=user_id,
-        repo_root=str(repo_root),
-        top_k=top_k,
-        num_ctx=num_ctx,
-        enable_compile_loop=True,
-    )
-    try:
-        workspace_snapshot = session.build_plan(prompt)
-        workflow_block = render_workflow_plan_block(workspace_snapshot)
-        context_paths = list(workspace_snapshot.likely_files[:6])
-        return workflow_block, context_paths
-    finally:
-        session.close()
+    with _override_llm_env(provider=provider, base_url=base_url):
+        session = CodingSession(
+            model=planner_model,
+            db_path=db_path,
+            user_id=user_id,
+            repo_root=str(repo_root),
+            top_k=top_k,
+            num_ctx=num_ctx,
+            enable_compile_loop=True,
+        )
+        try:
+            workspace_snapshot = session.build_plan(prompt)
+            workflow_block = render_workflow_plan_block(workspace_snapshot)
+            context_paths = list(workspace_snapshot.likely_files[:6])
+            return workflow_block, context_paths
+        finally:
+            session.close()
 
 
 def _missing_expected_files(repo_root: Path, expected_files: list[str]) -> list[str]:
     return [path for path in _normalize(list(expected_files or [])) if not _repo_has_file(repo_root, path)]
+
+
+def _build_llm_client(
+    *,
+    provider: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> UniversalLLMClient:
+    if not any(value for value in (provider, base_url, api_key)):
+        return UniversalLLMClient.from_env()
+    resolved_provider = str(provider or os.environ.get("LLM_PROVIDER", "ollama")).strip()
+    normalized_provider = UniversalLLMClient._normalize_provider(resolved_provider)
+    resolved_base_url = str(base_url or os.environ.get("LLM_BASE_URL", "http://127.0.0.1:11434")).strip()
+    resolved_api_key = api_key or os.environ.get("LLM_API_KEY")
+    if normalized_provider == "github_models" and not resolved_api_key:
+        resolved_api_key = os.environ.get("GITHUB_MODELS_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    return UniversalLLMClient(
+        provider=normalized_provider,
+        base_url=resolved_base_url,
+        api_key=resolved_api_key,
+    )
+
+
+@contextmanager
+def _override_llm_env(
+    *,
+    provider: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+):
+    tracked_keys = ("LLM_PROVIDER", "LLM_BASE_URL", "LLM_API_KEY")
+    previous = {key: os.environ.get(key) for key in tracked_keys}
+    try:
+        if provider:
+            os.environ["LLM_PROVIDER"] = str(provider)
+        if base_url:
+            os.environ["LLM_BASE_URL"] = str(base_url)
+        if api_key:
+            os.environ["LLM_API_KEY"] = str(api_key)
+        yield
+    finally:
+        for key, old_value in previous.items():
+            if old_value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old_value
 
 
 def run_patch_execution_benchmark(
@@ -2099,9 +2149,14 @@ def run_patch_execution_benchmark(
     num_ctx: int | None = None,
     raw_iterations: int = 1,
     memla_iterations: int = 3,
+    raw_provider: str = "",
+    raw_base_url: str = "",
+    memla_provider: str = "",
+    memla_base_url: str = "",
 ) -> dict[str, Any]:
     repo_root, cases = load_patch_cases(pack_path, split=split, limit=limit)
-    client = UniversalLLMClient.from_env()
+    raw_client = _build_llm_client(provider=raw_provider or None, base_url=raw_base_url or None)
+    memla_client = _build_llm_client(provider=memla_provider or None, base_url=memla_base_url or None)
 
     rows: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
@@ -2129,11 +2184,13 @@ def run_patch_execution_benchmark(
                     prompt=case.prompt,
                     top_k=top_k,
                     num_ctx=num_ctx,
+                    provider=memla_provider or None,
+                    base_url=memla_base_url or None,
                 )
                 stage = "raw_lane"
                 raw_bootstrap_result = _bootstrap_worktree_dependencies(worktree_dir, case.expected_commands)
                 raw_result = _evaluate_lane(
-                    client=client,
+                    client=raw_client,
                     model=raw_model,
                     prompt=case.prompt,
                     worktree_root=worktree_dir,
@@ -2162,10 +2219,12 @@ def run_patch_execution_benchmark(
                         prompt=retry_prompt,
                         top_k=top_k,
                         num_ctx=num_ctx,
+                        provider=memla_provider or None,
+                        base_url=memla_base_url or None,
                     )
 
                 memla_result = _evaluate_lane(
-                    client=client,
+                    client=memla_client,
                     model=memla_model,
                     prompt=case.prompt,
                     worktree_root=worktree_dir,
@@ -2250,6 +2309,8 @@ def run_patch_execution_benchmark(
         "cases": len(rows),
         "raw_model": raw_model,
         "memla_model": memla_model,
+        "raw_provider": raw_client.provider,
+        "memla_provider": memla_client.provider,
         "raw_iterations": int(raw_iterations),
         "memla_iterations": int(memla_iterations),
         "failed_case_count": len(failures),
@@ -2280,7 +2341,9 @@ def render_patch_execution_markdown(report: dict[str, Any]) -> str:
         f"- Cases: `{report['cases']}`",
         f"- Cases requested: `{report.get('cases_requested', report['cases'])}`",
         f"- Raw model: `{report['raw_model']}`",
+        f"- Raw provider: `{report.get('raw_provider', 'unknown')}`",
         f"- Memla model: `{report['memla_model']}`",
+        f"- Memla provider: `{report.get('memla_provider', 'unknown')}`",
         f"- Raw iterations: `{report.get('raw_iterations', 1)}`",
         f"- Memla iterations: `{report.get('memla_iterations', 1)}`",
         "",
@@ -2396,6 +2459,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--num_ctx", type=int, default=None)
     parser.add_argument("--raw_iterations", type=int, default=1)
     parser.add_argument("--memla_iterations", type=int, default=3)
+    parser.add_argument("--raw_provider", default="")
+    parser.add_argument("--raw_base_url", default="")
+    parser.add_argument("--memla_provider", default="")
+    parser.add_argument("--memla_base_url", default="")
     parser.add_argument("--out_dir", default="./distill/patch_execution_benchmark")
     args = parser.parse_args(argv)
 
@@ -2412,6 +2479,10 @@ def main(argv: list[str] | None = None) -> int:
         num_ctx=args.num_ctx,
         raw_iterations=args.raw_iterations,
         memla_iterations=args.memla_iterations,
+        raw_provider=args.raw_provider,
+        raw_base_url=args.raw_base_url,
+        memla_provider=args.memla_provider,
+        memla_base_url=args.memla_base_url,
     )
 
     out_dir = Path(args.out_dir)
