@@ -4,6 +4,8 @@ import json
 
 from memory_system.cli import main
 from memory_system.distillation.finance_pretrade_benchmark import (
+    _normalize_action,
+    _normalize_rule,
     render_finance_pretrade_markdown,
     run_finance_pretrade_benchmark,
 )
@@ -167,3 +169,104 @@ def test_memla_finance_pretrade_benchmark_writes_report_bundle(monkeypatch, caps
     assert "memla utility 0.8" in out
     assert captured["raw_provider"] == "github_models"
     assert captured["memla_provider"] == "ollama"
+
+
+def test_finance_alias_normalization_maps_common_rule_and_action_names():
+    assert _normalize_rule(
+        [
+            "approval_notional",
+            "restricted_symbols",
+            "duplicate_window_seconds",
+            "max_price_deviation_pct",
+        ]
+    ) == [
+        "approval_required_notional",
+        "restricted_symbol",
+        "duplicate_order_window",
+        "price_deviation_limit",
+    ]
+    assert _normalize_action(
+        [
+            "review_order",
+            "reprice",
+            "hold_for_review",
+            "reject_order",
+        ]
+    ) == [
+        "request_supervisor_approval",
+        "reprice_within_band",
+        "hold_duplicate_for_review",
+        "block_order",
+    ]
+
+
+def test_run_finance_pretrade_benchmark_scores_alias_labels_as_matches(monkeypatch, tmp_path):
+    cases_path = tmp_path / "finance_alias_cases.jsonl"
+    cases_path.write_text(
+        json.dumps(
+            {
+                "case_id": "approval_alias_case",
+                "prompt": "Escalate the order for approval rather than blocking it.",
+                "order": {
+                    "symbol": "AAPL",
+                    "side": "buy",
+                    "quantity": 3000,
+                    "price": 100.0,
+                    "route": "NYSE",
+                    "ts": 1712251200,
+                },
+                "account": {"current_position": 12000},
+                "market": {"reference_price": 100.0},
+                "controls": {
+                    "max_order_notional": 500000.0,
+                    "approval_notional": 250000.0,
+                    "max_long_position": 25000,
+                    "max_short_position": 10000,
+                    "max_price_deviation_pct": 0.05,
+                    "duplicate_window_seconds": 5,
+                    "allowed_routes": ["NYSE", "ARCA"],
+                },
+                "recent_orders": [],
+                "expected_outcome": "escalate",
+                "expected_rule_hits": ["approval_required_notional"],
+                "expected_actions": ["request_supervisor_approval"],
+                "expected_rewrite": {},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class DummyClient:
+        def __init__(self, provider: str):
+            self.provider = provider
+
+        def chat(self, **kwargs):
+            return json.dumps(
+                {
+                    "decision": "escalate",
+                    "predicted_rule_hits": ["approval_notional"],
+                    "next_actions": ["review_order"],
+                    "rewrite": {},
+                    "rationale": "Supervisor review is required above the approval threshold.",
+                }
+            )
+
+    monkeypatch.setattr(
+        "memory_system.distillation.finance_pretrade_benchmark._build_llm_client",
+        lambda provider=None, base_url=None, api_key=None: DummyClient(provider or "ollama"),
+    )
+
+    report = run_finance_pretrade_benchmark(
+        cases_path=str(cases_path),
+        raw_model="meta/Llama-3.3-70B-Instruct",
+        memla_model="qwen3.5:9b",
+        raw_provider="github_models",
+        memla_provider="ollama",
+    )
+
+    row = report["rows"][0]
+    assert row["raw_rule_recall"] == 1.0
+    assert row["raw_action_recall"] == 1.0
+    assert row["memla_rule_recall"] == 1.0
+    assert row["memla_action_recall"] == 1.0

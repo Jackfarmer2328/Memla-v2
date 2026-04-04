@@ -55,6 +55,33 @@ KNOWN_NEXT_ACTIONS = (
     "block_order",
 )
 
+RULE_ID_ALIASES = {
+    "approval_notional": "approval_required_notional",
+    "approval_threshold": "approval_required_notional",
+    "duplicate_window_seconds": "duplicate_order_window",
+    "duplicate_review_window": "duplicate_order_window",
+    "max_long_position": "projected_long_position_limit",
+    "max_order_value": "max_order_notional",
+    "max_price_deviation_pct": "price_deviation_limit",
+    "max_short_position": "projected_short_position_limit",
+    "price_band": "price_deviation_limit",
+    "price_band_limit": "price_deviation_limit",
+    "restricted_symbols": "restricted_symbol",
+    "unsupported_venue": "unsupported_route",
+}
+
+NEXT_ACTION_ALIASES = {
+    "adjust_price": "reprice_within_band",
+    "block": "block_order",
+    "hold_for_review": "hold_duplicate_for_review",
+    "reject_order": "block_order",
+    "reprice": "reprice_within_band",
+    "request_approval": "request_supervisor_approval",
+    "review_order": "request_supervisor_approval",
+    "route_to_supported_route": "route_to_supported_venue",
+    "supervisor_review": "request_supervisor_approval",
+}
+
 
 @dataclass(frozen=True)
 class FinancePretradeCase:
@@ -167,8 +194,46 @@ def _normalize_str_list(values: list[str]) -> list[str]:
     return out
 
 
+def _normalize_label_token(value: str) -> str:
+    clean = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower())
+    return clean.strip("_")
+
+
+def _normalize_label_list(values: list[str], aliases: dict[str, str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        token = _normalize_label_token(value)
+        if not token:
+            continue
+        canonical = aliases.get(token, token)
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        out.append(canonical)
+    return out
+
+
+def _normalize_rule(values: list[str]) -> list[str]:
+    return _normalize_label_list(values, RULE_ID_ALIASES)
+
+
 def _normalize_action(values: list[str]) -> list[str]:
-    return _normalize_str_list([str(value or "").strip().lower() for value in values])
+    return _normalize_label_list(values, NEXT_ACTION_ALIASES)
+
+
+def _extract_label_hits_from_text(
+    text: str,
+    *,
+    known: tuple[str, ...],
+    aliases: dict[str, str],
+) -> list[str]:
+    normalized_text = _normalize_label_token(text)
+    if not normalized_text:
+        return []
+    candidates = list(known) + list(aliases.keys())
+    hits = [candidate for candidate in candidates if candidate and candidate in normalized_text]
+    return _normalize_label_list(hits, aliases)
 
 
 def _score_overlap(predicted: list[str], expected: list[str]) -> float:
@@ -211,7 +276,7 @@ def load_finance_pretrade_cases(path: str) -> list[FinancePretradeCase]:
                 controls=dict(row.get("controls") or {}),
                 recent_orders=list(row.get("recent_orders") or []),
                 expected_outcome=str(row.get("expected_outcome") or "").strip().lower(),
-                expected_rule_hits=_normalize_action(list(row.get("expected_rule_hits") or [])),
+                expected_rule_hits=_normalize_rule(list(row.get("expected_rule_hits") or [])),
                 expected_actions=_normalize_action(list(row.get("expected_actions") or [])),
                 expected_rewrite=dict(row.get("expected_rewrite") or {}),
             )
@@ -477,12 +542,20 @@ def _normalize_rewrite(value: Any) -> dict[str, Any]:
 
 
 def _normalize_decision_payload(payload: dict[str, Any], response: str) -> FinanceDecision:
-    normalized_rule_hits = _normalize_action(list(payload.get("predicted_rule_hits") or []))
+    normalized_rule_hits = _normalize_rule(list(payload.get("predicted_rule_hits") or []))
     if not normalized_rule_hits:
-        normalized_rule_hits = [rule_id for rule_id in KNOWN_RULE_IDS if rule_id in str(response or "").lower()]
+        normalized_rule_hits = _extract_label_hits_from_text(
+            response,
+            known=KNOWN_RULE_IDS,
+            aliases=RULE_ID_ALIASES,
+        )
     normalized_actions = _normalize_action(list(payload.get("next_actions") or []))
     if not normalized_actions:
-        normalized_actions = [action for action in KNOWN_NEXT_ACTIONS if action in str(response or "").lower()]
+        normalized_actions = _extract_label_hits_from_text(
+            response,
+            known=KNOWN_NEXT_ACTIONS,
+            aliases=NEXT_ACTION_ALIASES,
+        )
     decision = str(payload.get("decision") or "").strip().lower()
     if decision not in {"allow", "block", "escalate", "modify"}:
         decision = _infer_decision_from_text(response)
