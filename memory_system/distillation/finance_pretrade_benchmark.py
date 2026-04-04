@@ -790,6 +790,8 @@ def run_finance_pretrade_benchmark(
     *,
     cases_path: str,
     repo_root: str = "",
+    case_ids: list[str] | None = None,
+    limit: int | None = None,
     raw_model: str,
     memla_model: str,
     raw_iterations: int = 1,
@@ -804,6 +806,11 @@ def run_finance_pretrade_benchmark(
     disable_memla_finance_policy: bool = False,
 ) -> dict[str, Any]:
     cases = load_finance_pretrade_cases(cases_path)
+    if case_ids:
+        wanted = {str(case_id).strip().lower() for case_id in case_ids if str(case_id).strip()}
+        cases = [case for case in cases if case.case_id.strip().lower() in wanted]
+    if limit is not None and int(limit) >= 0:
+        cases = cases[: int(limit)]
     raw_client = _build_llm_client(provider=raw_provider or None, base_url=raw_base_url or None)
     memla_client = _build_llm_client(provider=memla_provider or None, base_url=memla_base_url or None)
     rows: list[FinancePretradeBenchmarkRow] = []
@@ -925,6 +932,8 @@ def run_finance_pretrade_benchmark(
     return {
         "generated_ts": int(time.time()),
         "cases_path": str(Path(cases_path).resolve()),
+        "case_ids": list(case_ids or []),
+        "limit": limit,
         "raw_model": raw_model,
         "memla_model": memla_model,
         "raw_provider": raw_client.provider,

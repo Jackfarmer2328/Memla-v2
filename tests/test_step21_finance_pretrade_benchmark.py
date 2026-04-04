@@ -270,3 +270,84 @@ def test_run_finance_pretrade_benchmark_scores_alias_labels_as_matches(monkeypat
     assert row["raw_action_recall"] == 1.0
     assert row["memla_rule_recall"] == 1.0
     assert row["memla_action_recall"] == 1.0
+
+
+def test_run_finance_pretrade_benchmark_can_filter_case_ids(monkeypatch, tmp_path):
+    cases_path = tmp_path / "finance_cases.jsonl"
+    cases_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "case_id": "keep_me",
+                        "prompt": "Block the restricted symbol.",
+                        "order": {"symbol": "MEMX", "side": "buy", "quantity": 10, "price": 100.0, "route": "NYSE", "ts": 1},
+                        "account": {"current_position": 0},
+                        "market": {"reference_price": 100.0},
+                        "controls": {
+                            "restricted_symbols": ["MEMX"],
+                            "allowed_routes": ["NYSE"],
+                        },
+                        "recent_orders": [],
+                        "expected_outcome": "block",
+                        "expected_rule_hits": ["restricted_symbol"],
+                        "expected_actions": ["block_order"],
+                        "expected_rewrite": {},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "case_id": "skip_me",
+                        "prompt": "Escalate the approval threshold case.",
+                        "order": {"symbol": "AAPL", "side": "buy", "quantity": 3000, "price": 100.0, "route": "NYSE", "ts": 2},
+                        "account": {"current_position": 0},
+                        "market": {"reference_price": 100.0},
+                        "controls": {
+                            "approval_notional": 250000.0,
+                            "allowed_routes": ["NYSE"],
+                        },
+                        "recent_orders": [],
+                        "expected_outcome": "escalate",
+                        "expected_rule_hits": ["approval_required_notional"],
+                        "expected_actions": ["request_supervisor_approval"],
+                        "expected_rewrite": {},
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class DummyClient:
+        def __init__(self, provider: str):
+            self.provider = provider
+
+        def chat(self, **kwargs):
+            return json.dumps(
+                {
+                    "decision": "block",
+                    "predicted_rule_hits": ["restricted_symbol"],
+                    "next_actions": ["block_order"],
+                    "rewrite": {},
+                    "rationale": "Block the restricted symbol.",
+                }
+            )
+
+    monkeypatch.setattr(
+        "memory_system.distillation.finance_pretrade_benchmark._build_llm_client",
+        lambda provider=None, base_url=None, api_key=None: DummyClient(provider or "ollama"),
+    )
+
+    report = run_finance_pretrade_benchmark(
+        cases_path=str(cases_path),
+        case_ids=["keep_me"],
+        raw_model="meta/Llama-3.3-70B-Instruct",
+        memla_model="qwen3.5:9b",
+        raw_provider="github_models",
+        memla_provider="ollama",
+    )
+
+    assert report["cases_requested"] == 1
+    assert report["cases"] == 1
+    assert report["rows"][0]["case_id"] == "keep_me"

@@ -497,6 +497,8 @@ def _handle_finance_pretrade_benchmark(args: argparse.Namespace) -> int:
     report = run_finance_pretrade_benchmark(
         cases_path=args.cases,
         repo_root=str(_resolve_repo_root(args.repo_root)),
+        case_ids=list(args.case_id or []),
+        limit=args.limit,
         raw_model=args.raw_model,
         memla_model=args.memla_model,
         raw_iterations=args.raw_iterations,
@@ -879,6 +881,8 @@ def _build_parser() -> argparse.ArgumentParser:
     finance_bench = finance_sub.add_parser("benchmark-pretrade", help="Run a pre-trade compliance replay benchmark.")
     finance_bench.add_argument("--cases", required=True, help="Finance pre-trade case JSONL path.")
     finance_bench.add_argument("--repo-root", default=".", help="Repository root used for local finance policy banks.")
+    finance_bench.add_argument("--case-id", action="append", default=[], help="Optional case id filter. Repeat to run only specific finance cases.")
+    finance_bench.add_argument("--limit", type=int, default=None, help="Optional max number of finance cases to run after filtering.")
     finance_bench.add_argument("--raw-model", required=True, help="Baseline raw model.")
     finance_bench.add_argument("--memla-model", required=True, help="Memla repair-loop model.")
     finance_bench.add_argument("--raw-iterations", type=int, default=1, help="How many attempts the raw lane gets.")
