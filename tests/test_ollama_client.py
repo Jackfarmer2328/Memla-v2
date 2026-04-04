@@ -105,6 +105,53 @@ def test_github_models_uses_expected_endpoint_and_headers(monkeypatch):
     assert headers["X-GitHub-Api-Version"] == "2022-11-28"
 
 
+def test_github_models_retries_without_temperature_when_model_rejects_it(monkeypatch):
+    calls: list[dict[str, object]] = []
+    responses = [
+        _DummyResponse(
+            400,
+            {
+                "error": {
+                    "message": "Unsupported value: 'temperature' does not support 0 with this model. Only the default (1) value is supported.",
+                    "type": "invalid_request_error",
+                    "param": "temperature",
+                    "code": "unsupported_value",
+                }
+            },
+        ),
+        _DummyResponse(200, {"choices": [{"message": {"content": "ok"}}]}),
+    ]
+
+    def fake_post(url, *, json, timeout, headers):
+        calls.append({"url": url, "json": json, "headers": headers})
+        return responses[len(calls) - 1]
+
+    monkeypatch.setattr("memory_system.ollama_client.requests.post", fake_post)
+
+    client = UniversalLLMClient(
+        provider="github_models",
+        base_url="https://models.github.ai/inference",
+        api_key="gh-token",
+    )
+    out = client.chat(
+        model="openai/gpt-5",
+        messages=[ChatMessage(role="user", content="hello")],
+        temperature=0.0,
+    )
+
+    assert out == "ok"
+    assert len(calls) == 2
+    assert calls[0]["json"] == {
+        "model": "openai/gpt-5",
+        "messages": [{"role": "user", "content": "hello"}],
+        "temperature": 0.0,
+    }
+    assert calls[1]["json"] == {
+        "model": "openai/gpt-5",
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+
 def test_github_models_from_env_uses_github_token_fallback(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "github_models")
     monkeypatch.delenv("LLM_BASE_URL", raising=False)

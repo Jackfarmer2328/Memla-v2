@@ -133,9 +133,11 @@ class UniversalLLMClient:
             "temperature": float(temperature),
         }
 
-        resp = requests.post(url, json=payload, timeout=600, headers=hdrs)
-        resp.raise_for_status()
-        data = resp.json()
+        data = self._post_chat_json_with_temperature_retry(
+            url=url,
+            headers=hdrs,
+            payload=payload,
+        )
 
         try:
             content = data["choices"][0]["message"]["content"]
@@ -177,9 +179,11 @@ class UniversalLLMClient:
             "temperature": float(temperature),
         }
 
-        resp = requests.post(url, json=payload, timeout=600, headers=hdrs)
-        resp.raise_for_status()
-        data = resp.json()
+        data = self._post_chat_json_with_temperature_retry(
+            url=url,
+            headers=hdrs,
+            payload=payload,
+        )
 
         try:
             content = data["choices"][0]["message"]["content"]
@@ -188,6 +192,46 @@ class UniversalLLMClient:
         if not isinstance(content, str):
             raise RuntimeError(f"Unexpected GitHub Models response: {json.dumps(data)[:500]}")
         return content
+
+    def _post_chat_json_with_temperature_retry(
+        self,
+        *,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            resp = requests.post(url, json=payload, timeout=600, headers=headers)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.HTTPError as exc:
+            if "temperature" not in payload or not self._response_requires_default_temperature(exc.response):
+                raise
+            retry_payload = dict(payload)
+            retry_payload.pop("temperature", None)
+            retry_resp = requests.post(url, json=retry_payload, timeout=600, headers=headers)
+            retry_resp.raise_for_status()
+            return retry_resp.json()
+
+    @staticmethod
+    def _response_requires_default_temperature(response: Any) -> bool:
+        if response is None:
+            return False
+        try:
+            payload = response.json()
+        except Exception:
+            return False
+        error = payload.get("error")
+        if not isinstance(error, dict):
+            return False
+        param = str(error.get("param") or "").strip().lower()
+        code = str(error.get("code") or "").strip().lower()
+        message = str(error.get("message") or "").strip().lower()
+        if param != "temperature":
+            return False
+        if code == "unsupported_value":
+            return True
+        return "temperature" in message and ("default" in message or "does not support" in message)
 
     def _chat_anthropic(
         self,
