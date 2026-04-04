@@ -1,0 +1,258 @@
+from __future__ import annotations
+
+import json
+import tomllib
+from pathlib import Path
+
+from memory_system.cli import main
+from memory_system.distillation.coding_proxy import ProxyResult
+from memory_system.distillation.workflow_planner import WorkflowPlan
+
+
+def test_memla_coding_plan_renders_workflow_block(monkeypatch, capsys, tmp_path):
+    class DummySession:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def build_plan(self, prompt: str):
+            assert prompt == "Fix the auth regression"
+            return WorkflowPlan(
+                likely_files=["src/auth.py", "tests/test_auth.py"],
+                likely_commands=["pytest -q"],
+                likely_tests=["pytest -q"],
+                patch_steps=["Update the auth helper and refresh the failing test."],
+                source_trace_ids=[11, 12],
+                predicted_constraints=["ownership_resolution_gap"],
+                transmutations=["Trade ambiguous ownership for a single source of truth"],
+            )
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("memory_system.cli.CodingSession", DummySession)
+
+    rc = main(
+        [
+            "coding",
+            "plan",
+            "--prompt",
+            "Fix the auth regression",
+            "--repo-root",
+            str(tmp_path),
+            "--db",
+            str(tmp_path / "memory.sqlite"),
+        ]
+    )
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "=== MEMLA WORKFLOW PLAN ===" in out
+    assert "Likely files: src/auth.py, tests/test_auth.py" in out
+    assert "Predicted constraints: ownership_resolution_gap" in out
+
+
+def test_memla_coding_run_json_outputs_structured_proxy_result(monkeypatch, capsys, tmp_path):
+    class DummySession:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def ask(self, prompt: str, *, test_command: str | None = None):
+            assert prompt == "Repair the auth regression"
+            assert test_command == "pytest -q"
+            return ProxyResult(
+                answer="Update `src/auth.py` and rerun `pytest -q`.",
+                trace_id=7,
+                trajectory_id=None,
+                retrieved_chunk_ids=[1, 2],
+                test_result={"command": "pytest -q", "status": "passed"},
+                prior_trace_ids=[5],
+                suggested_files=["src/auth.py", "tests/test_auth.py"],
+                suggested_commands=["pytest -q"],
+                likely_tests=["pytest -q"],
+                patch_steps=["Update the auth guard."],
+                predicted_constraints=["ownership_resolution_gap"],
+                transmutations=["Trade ambiguity for a single auth path"],
+                validated_trade_path={
+                    "supporting_files": ["src/auth.py"],
+                    "supporting_commands": ["pytest -q"],
+                },
+                residual_constraints=["missing_import_or_dependency"],
+            )
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("memory_system.cli.CodingSession", DummySession)
+
+    rc = main(
+        [
+            "coding",
+            "run",
+            "--prompt",
+            "Repair the auth regression",
+            "--repo-root",
+            str(tmp_path),
+            "--db",
+            str(tmp_path / "memory.sqlite"),
+            "--test-command",
+            "pytest -q",
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["suggested_files"] == ["src/auth.py", "tests/test_auth.py"]
+    assert payload["validated_trade_path"]["supporting_commands"] == ["pytest -q"]
+    assert payload["residual_constraints"] == ["missing_import_or_dependency"]
+
+
+def test_memla_patch_benchmark_writes_report_bundle(monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(
+        "memory_system.cli.run_patch_execution_benchmark",
+        lambda **kwargs: {
+            "raw_apply_rate": 0.0,
+            "memla_apply_rate": 0.6667,
+            "avg_raw_semantic_command_success_rate": 0.0,
+            "avg_memla_semantic_command_success_rate": 0.6667,
+            "rows": [],
+        },
+    )
+    monkeypatch.setattr(
+        "memory_system.cli.render_patch_execution_markdown",
+        lambda report: "# Patch Execution Report\n",
+    )
+
+    out_dir = tmp_path / "patch_report"
+    rc = main(
+        [
+            "coding",
+            "benchmark-patch",
+            "--pack",
+            "cases.json",
+            "--raw-model",
+            "qwen2.5:32b",
+            "--memla-model",
+            "qwen3.5:9b",
+            "--db",
+            str(tmp_path / "bench.sqlite"),
+            "--out-dir",
+            str(out_dir),
+        ]
+    )
+
+    assert rc == 0
+    assert (out_dir / "patch_execution_report.json").exists()
+    assert (out_dir / "patch_execution_report.md").exists()
+    out = capsys.readouterr().out
+    assert "Wrote patch benchmark JSON" in out
+    assert "memla apply 0.6667" in out
+
+
+def test_memla_pack_thesis_routes_to_builder(monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(
+        "memory_system.cli.build_thesis_pack",
+        lambda **kwargs: {
+            "out_dir": kwargs["out_dir"],
+            "frozen_coding": str(tmp_path / "coding.json"),
+            "frozen_rerank": str(tmp_path / "rerank.json"),
+            "frozen_progress": str(tmp_path / "progress.json"),
+        },
+    )
+
+    rc = main(
+        [
+            "pack",
+            "thesis",
+            "--coding",
+            "coding.json",
+            "--math-rerank",
+            "math_rerank.json",
+            "--math-progress",
+            "math_progress.json",
+            "--out-dir",
+            str(tmp_path / "pack"),
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["out_dir"] == str((tmp_path / "pack").resolve())
+
+
+def test_memla_pack_publish_site_copies_pack_files(capsys, tmp_path):
+    source = tmp_path / "source_pack"
+    frozen = source / "frozen"
+    frozen.mkdir(parents=True)
+    (source / "index.html").write_text("<html>site</html>", encoding="utf-8")
+    (source / "vercel.json").write_text('{"cleanUrls": true}', encoding="utf-8")
+    (source / "og-card.svg").write_text("<svg></svg>", encoding="utf-8")
+    (source / "one_sentence_pitch.txt").write_text("pitch", encoding="utf-8")
+    (source / "90_second_demo.md").write_text("# demo", encoding="utf-8")
+    (source / "strategic_memo.md").write_text("# memo", encoding="utf-8")
+    (frozen / "report.json").write_text('{"ok": true}', encoding="utf-8")
+
+    target = tmp_path / "site_root"
+    rc = main(
+        [
+            "pack",
+            "publish-site",
+            "--source",
+            str(source),
+            "--out-dir",
+            str(target),
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["site_ready"] is True
+    assert (target / "index.html").read_text(encoding="utf-8") == "<html>site</html>"
+    assert (target / "frozen" / "report.json").exists()
+
+
+def test_memla_doctor_reports_status_with_json(monkeypatch, capsys, tmp_path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+
+    monkeypatch.setattr(
+        "memory_system.cli._probe_ollama",
+        lambda url, timeout=2.0: {
+            "reachable": True,
+            "url": url,
+            "model_count": 2,
+            "models": ["qwen3.5:9b", "qwen2.5:32b"],
+        },
+    )
+
+    rc = main(
+        [
+            "doctor",
+            "--repo-root",
+            str(repo_root),
+            "--db",
+            str(repo_root / ".memla" / "memory.sqlite"),
+            "--model",
+            "qwen3.5:9b",
+            "--ollama-url",
+            "http://127.0.0.1:11435",
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["repo_root"]["git_repo"] is True
+    assert payload["ollama"]["reachable"] is True
+    assert payload["ollama"]["model_present"] is True
+
+
+def test_pyproject_exposes_memla_console_script():
+    repo_root = Path(__file__).resolve().parents[1]
+    pyproject = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert pyproject["project"]["name"] == "memla"
+    assert pyproject["project"]["scripts"]["memla"] == "memory_system.cli:main"
+    assert any(dep.startswith("sympy>=") for dep in pyproject["project"]["dependencies"])

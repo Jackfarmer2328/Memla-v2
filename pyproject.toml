@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memla"
+version = "0.1.0"
+description = "Memla CLI for bounded coding and math runtimes."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "Jackfarmer2328", email = "samatarsalahudeen@gmail.com" }
+]
+dependencies = [
+  "requests>=2.31,<3",
+  "torch>=2.1",
+  "transformers>=4.40",
+  "peft>=0.7",
+  "safetensors>=0.4",
+  "sentence-transformers>=2.2",
+  "fastapi>=0.100",
+  "uvicorn>=0.20",
+  "fastmcp>=2.0",
+  "bitsandbytes>=0.41",
+  "accelerate>=0.25",
+  "sympy>=1.12",
+]
+
+[project.scripts]
+memla = "memory_system.cli:main"
+
+[tool.setuptools]
+include-package-data = false
+
+[tool.setuptools.packages.find]
+include = ["memory_system", "memory_system.*"]
