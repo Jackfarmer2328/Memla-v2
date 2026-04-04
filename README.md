@@ -9,7 +9,7 @@ pip install memla
 ```
 
 PyPI:
-- [memla 0.1.0](https://pypi.org/project/memla/0.1.0/)
+- [memla on PyPI](https://pypi.org/project/memla/)
 
 This repo is the public, CLI-first version of Memla. It is intentionally narrower than the internal research repo and keeps the public snapshot focused on the tool, not every generated artifact.
 

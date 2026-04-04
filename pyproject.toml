@@ -4,12 +4,21 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memla"
-version = "0.1.0"
-description = "Memla CLI for bounded coding and math runtimes."
-readme = "README.md"
+version = "0.1.1"
+description = "Local CLI runtime that helps smaller Ollama models make better technical decisions in verifier-backed loops."
+readme = { file = "PYPI_README.md", content-type = "text/markdown" }
 requires-python = ">=3.11"
 authors = [
   { name = "Jackfarmer2328", email = "samatarsalahudeen@gmail.com" }
+]
+license = "MIT"
+keywords = ["ollama", "llm", "cli", "coding", "local-llm"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Operating System :: OS Independent",
+  "Topic :: Software Development",
 ]
 dependencies = [
   "requests>=2.31,<3",
@@ -25,6 +34,12 @@ dependencies = [
   "accelerate>=0.25",
   "sympy>=1.12",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Jackfarmer2328/Memla-v2"
+Repository = "https://github.com/Jackfarmer2328/Memla-v2"
+Issues = "https://github.com/Jackfarmer2328/Memla-v2/issues"
+Documentation = "https://memla.vercel.app"
 
 [project.scripts]
 memla = "memory_system.cli:main"

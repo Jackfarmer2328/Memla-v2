@@ -254,5 +254,7 @@ def test_pyproject_exposes_memla_console_script():
     pyproject = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
 
     assert pyproject["project"]["name"] == "memla"
+    assert pyproject["project"]["version"] == "0.1.1"
     assert pyproject["project"]["scripts"]["memla"] == "memory_system.cli:main"
+    assert pyproject["project"]["readme"]["file"] == "PYPI_README.md"
     assert any(dep.startswith("sympy>=") for dep in pyproject["project"]["dependencies"])
