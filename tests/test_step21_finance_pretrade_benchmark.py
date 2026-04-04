@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from memory_system.cli import main
 from memory_system.distillation.finance_pretrade_benchmark import (
@@ -433,3 +434,32 @@ def test_backtest_finance_decision_prefers_escalation_for_soft_duplicate_control
     assert "soft_review_prefers_escalation:duplicate_order_window" in blocked.residual_constraints
     assert escalated.compliance_passed is True
     assert escalated.final_status == "escalate_ok"
+
+
+def test_public_finance_pack_loads_and_covers_expected_rule_families():
+    cases_path = Path("cases/finance_pretrade_public_eval_cases.jsonl")
+    cases = load_finance_pretrade_cases(str(cases_path))
+
+    case_ids = {case.case_id for case in cases}
+    assert case_ids == {
+        "public_credit_limit_reduce",
+        "public_restricted_symbol_block",
+        "public_duplicate_soft_review_escalate",
+        "public_price_band_reprice",
+        "public_approval_threshold_escalate",
+        "public_unsupported_route_block",
+        "public_projected_long_position_block",
+        "public_projected_short_position_block",
+    }
+
+    expected_rules = {rule for case in cases for rule in case.expected_rule_hits}
+    assert expected_rules == {
+        "max_order_notional",
+        "restricted_symbol",
+        "duplicate_order_window",
+        "price_deviation_limit",
+        "approval_required_notional",
+        "unsupported_route",
+        "projected_long_position_limit",
+        "projected_short_position_limit",
+    }

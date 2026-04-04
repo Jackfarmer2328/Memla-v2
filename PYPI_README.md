@@ -54,6 +54,7 @@ memla coding run --prompt "Repair the failing auth tests" --repo-root . --test-c
 memla coding benchmark-compile --cases cases/coding_eval_cases.jsonl --repo-root . --model qwen3.5:9b
 memla coding benchmark-c2a --cases cases/coding_eval_cases.jsonl --repo-root . --raw-model qwen3.5:9b --memla-model qwen3.5:9b
 memla finance benchmark-pretrade --cases cases/finance_pretrade_eval_cases.jsonl --raw-model meta/Llama-3.3-70B-Instruct --memla-model qwen3.5:9b
+memla finance benchmark-pretrade --cases cases/finance_pretrade_public_eval_cases.jsonl --raw-model qwen3.5:9b --memla-model qwen3.5:9b --raw-provider ollama --raw-base-url http://127.0.0.1:11435 --memla-provider ollama --memla-base-url http://127.0.0.1:11435
 memla finance extract-pretrade --report memla_reports/finance_pretrade_benchmark_20260404_161024/finance_pretrade_benchmark_report.json
 memla finance distill-pretrade --trace-bank memla_reports/finance_pretrade_extract/finance_trace_bank_summary.json --repo-root .
 memla coding extract-c2a --report memla_reports/coding_c2a_9braw_vs_9bmemla/coding_c2a_benchmark_report.json --report memla_reports/coding_c2a_405braw_vs_9bmemla/coding_c2a_benchmark_report.json
@@ -61,6 +62,8 @@ memla coding distill-c2a --trace-bank memla_reports/c2a_trace_bank_seed/c2a_trac
 memla coding benchmark-c2a --cases cases/coding_eval_cases.jsonl --repo-root . --raw-model qwen3.5:9b --memla-model qwen3.5:9b --raw-provider ollama --raw-base-url http://127.0.0.1:11435 --memla-provider ollama --memla-base-url http://127.0.0.1:11435
 memla math benchmark --cases cases/math_linear_c2a_v2_harder.jsonl --teacher-model qwen2.5:32b --student-models qwen3.5:4b qwen3.5:9b --executor-mode stepwise_rerank --teacher-trace-source hybrid
 ```
+
+Public provenance for the bundled finance demo pack lives in `cases/finance_pretrade_public_sources.md`.
 
 Project links:
 - GitHub: [Jackfarmer2328/Memla-v2](https://github.com/Jackfarmer2328/Memla-v2)

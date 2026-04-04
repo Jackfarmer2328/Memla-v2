@@ -130,6 +130,15 @@ Run the finance pre-trade compliance backtester:
 memla finance benchmark-pretrade --cases cases\\finance_pretrade_eval_cases.jsonl --raw-model meta/Llama-3.3-70B-Instruct --memla-model qwen3.5:9b
 ```
 
+Run the public-rule-grounded finance pack built from SEC and FINRA control categories:
+
+```bash
+memla finance benchmark-pretrade --cases cases\\finance_pretrade_public_eval_cases.jsonl --raw-model qwen3.5:9b --memla-model qwen3.5:9b --raw-provider ollama --raw-base-url http://127.0.0.1:11435 --memla-provider ollama --memla-base-url http://127.0.0.1:11435
+```
+
+Public provenance for that pack:
+- `cases/finance_pretrade_public_sources.md`
+
 Extract a normalized finance trace bank from one or more pre-trade benchmark reports:
 
 ```bash
