@@ -28,7 +28,7 @@ memla coding run --prompt "Repair the failing auth tests" --repo-root . --model 
 
 Core use cases:
 - local coding workflow planning and repair
-- coding patch-execution and compile-loop benchmarks
+- coding patch-execution, compile-loop, and pure coding C2A benchmarks
 - bounded math benchmarks for decision-layer evaluation
 - proof-pack generation for static report sites
 
@@ -49,6 +49,10 @@ Useful commands:
 memla coding plan --prompt "Fix the auth regression" --repo-root .
 memla coding run --prompt "Repair the failing auth tests" --repo-root . --test-command "pytest -q"
 memla coding benchmark-compile --cases cases/coding_eval_cases.jsonl --repo-root . --model qwen3.5:9b
+memla coding benchmark-c2a --cases cases/coding_eval_cases.jsonl --repo-root . --raw-model qwen3.5:9b --memla-model qwen3.5:9b
+memla coding extract-c2a --report memla_reports/coding_c2a_9braw_vs_9bmemla/coding_c2a_benchmark_report.json --report memla_reports/coding_c2a_405braw_vs_9bmemla/coding_c2a_benchmark_report.json
+memla coding distill-c2a --trace-bank memla_reports/c2a_trace_bank_seed/c2a_trace_bank_summary.json --repo-root .
+memla coding benchmark-c2a --cases cases/coding_eval_cases.jsonl --repo-root . --raw-model qwen3.5:9b --memla-model qwen3.5:9b --raw-provider ollama --raw-base-url http://127.0.0.1:11435 --memla-provider ollama --memla-base-url http://127.0.0.1:11435
 memla math benchmark --cases cases/math_linear_c2a_v2_harder.jsonl --teacher-model qwen2.5:32b --student-models qwen3.5:4b qwen3.5:9b --executor-mode stepwise_rerank --teacher-trace-source hybrid
 ```
 

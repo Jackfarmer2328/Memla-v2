@@ -167,6 +167,65 @@ def test_memla_patch_benchmark_writes_report_bundle(monkeypatch, capsys, tmp_pat
     assert captured["memla_base_url"] == "http://127.0.0.1:11435"
 
 
+def test_memla_coding_c2a_benchmark_writes_report_bundle(monkeypatch, capsys, tmp_path):
+    captured: dict[str, object] = {}
+
+    def _fake_c2a_benchmark(**kwargs):
+        captured.update(kwargs)
+        return {
+            "avg_raw_c2a_utility": 0.42,
+            "avg_memla_c2a_utility": 0.81,
+            "memla_vs_raw_c2a_utility_index": 1.9286,
+            "rows": [],
+        }
+
+    monkeypatch.setattr(
+        "memory_system.cli.run_coding_c2a_benchmark",
+        _fake_c2a_benchmark,
+    )
+    monkeypatch.setattr(
+        "memory_system.cli.render_coding_c2a_markdown",
+        lambda report: "# Coding C2A Benchmark\n",
+    )
+
+    out_dir = tmp_path / "c2a_report"
+    rc = main(
+        [
+            "coding",
+            "benchmark-c2a",
+            "--cases",
+            "cases.jsonl",
+            "--repo-root",
+            str(tmp_path),
+            "--raw-model",
+            "meta/Llama-3.1-405B-Instruct",
+            "--memla-model",
+            "qwen3.5:9b",
+            "--raw-provider",
+            "github_models",
+            "--raw-base-url",
+            "https://models.github.ai/inference",
+            "--memla-provider",
+            "ollama",
+            "--memla-base-url",
+            "http://127.0.0.1:11435",
+            "--db",
+            str(tmp_path / "bench.sqlite"),
+            "--out-dir",
+            str(out_dir),
+        ]
+    )
+
+    assert rc == 0
+    assert (out_dir / "coding_c2a_benchmark_report.json").exists()
+    assert (out_dir / "coding_c2a_benchmark_report.md").exists()
+    out = capsys.readouterr().out
+    assert "Wrote coding C2A benchmark JSON" in out
+    assert "memla utility 0.81" in out
+    assert captured["raw_provider"] == "github_models"
+    assert captured["memla_provider"] == "ollama"
+
+
 def test_memla_pack_thesis_routes_to_builder(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(
         "memory_system.cli.build_thesis_pack",

@@ -1638,6 +1638,10 @@ def build_repo_topology_graph(
         ".git",
         "dist",
         "build",
+        "memla_reports",
+        ".memla",
+        "proof",
+        "frozen",
         ".next",
         ".turbo",
         ".venv",
@@ -2126,6 +2130,10 @@ def build_repo_map(
         ".git",
         "dist",
         "build",
+        "memla_reports",
+        ".memla",
+        "proof",
+        "frozen",
         ".next",
         ".turbo",
         ".venv",
@@ -3106,7 +3114,23 @@ def scan_repo_role_matches(repo_root: str, prompt: str, desired_roles: set[str],
         return []
     prompt_tokens = tokenize_text(prompt)
     candidates: list[RepoRoleCandidate] = []
-    ignored_dirs = {"node_modules", ".git", "dist", "build", ".next", ".turbo", ".venv", "venv", ".pytest_cache", "coverage", "logs"}
+    ignored_dirs = {
+        "node_modules",
+        ".git",
+        "dist",
+        "build",
+        "memla_reports",
+        ".memla",
+        "proof",
+        "frozen",
+        ".next",
+        ".turbo",
+        ".venv",
+        "venv",
+        ".pytest_cache",
+        "coverage",
+        "logs",
+    }
     asset_words = {"image", "icon", "logo", "asset", "photo", "picture", "tracking", "script"}
 
     for path in repo.rglob("*"):

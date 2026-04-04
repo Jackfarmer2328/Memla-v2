@@ -18,7 +18,7 @@ This repo is the public, CLI-first version of Memla. It is intentionally narrowe
 - `memla.py`
   - thin top-level entry point
 - `memory_system/`
-  - CLI runtime, coding loop, math benchmark, and pack builder
+  - CLI runtime, coding loop, pure coding C2A benchmark, math benchmark, and pack builder
 - `cases/`
   - bundled case files for quick local runs
 - `proof/`
@@ -34,6 +34,7 @@ Public proof summary:
 Current strongest public result:
 - on coding, local `qwen3.5:9b + Memla` beat hosted `Meta-Llama-3.1-405B-Instruct` raw on execution outcome in the primary patch benchmark
 - on coding, the same `qwen3.5:9b` base model moved from `0.0` apply / `0.0` semantic success raw to `1.0` apply / `0.6667` semantic success with Memla on the same OAuth slice
+- on pure coding C2A, a `405b`-only self-transmutation bank lifted same-model `qwen3.5:9b + Memla` utility from the earlier `0.4908` baseline to `0.5058`, and that repeated across `3` runs with average uplift `+0.015`
 - on coding, hosted `Grok-3` raw also stayed at `0.0` apply / `0.0` semantic success on the OAuth slice while local `qwen3.5:9b + Memla` reached `0.6667` apply / `0.6667` semantic success
 - on a second repo family, hosted `meta/Llama-3.3-70B-Instruct` raw again stayed at `0.0` apply while local `qwen3.5:9b + Memla` reached `0.3333` apply on the FastAPI slice
 - on a second repo family against hosted `Grok-3` raw, local `qwen3.5:9b + Memla` reached `0.5` apply on `2` completed FastAPI cases while the raw lane stayed at `0.0` apply and one raw-lane case failed with `HTTPError`
@@ -114,6 +115,30 @@ Run the compile-loop benchmark:
 
 ```bash
 memla coding benchmark-compile --cases cases\\coding_eval_cases.jsonl --repo-root . --model qwen3.5:9b
+```
+
+Run the pure next-move coding C2A benchmark:
+
+```bash
+memla coding benchmark-c2a --cases cases\\coding_eval_cases.jsonl --repo-root . --raw-model qwen3.5:9b --memla-model qwen3.5:9b
+```
+
+Extract a normalized C2A trace bank from one or more benchmark reports:
+
+```bash
+memla coding extract-c2a --report memla_reports\\coding_c2a_9braw_vs_9bmemla\\coding_c2a_benchmark_report.json --report memla_reports\\coding_c2a_405braw_vs_9bmemla\\coding_c2a_benchmark_report.json
+```
+
+Distill a self-transmutation policy bank Memla can load from `.memla`:
+
+```bash
+memla coding distill-c2a --trace-bank memla_reports\\c2a_trace_bank_seed\\c2a_trace_bank_summary.json --repo-root .
+```
+
+Validate the current self-transmutation bank against the same-model C2A harness:
+
+```bash
+memla coding benchmark-c2a --cases cases\\coding_eval_cases.jsonl --repo-root . --raw-model qwen3.5:9b --memla-model qwen3.5:9b --raw-provider ollama --raw-base-url http://127.0.0.1:11435 --memla-provider ollama --memla-base-url http://127.0.0.1:11435
 ```
 
 Run the bounded math benchmark:

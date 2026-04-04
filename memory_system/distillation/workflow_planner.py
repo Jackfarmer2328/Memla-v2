@@ -29,6 +29,7 @@ from .constraint_graph import (
 )
 from .coding_compile_loop import compile_coding_hypotheses
 from .coding_log import SimilarCodingTrace, WorkflowPriorSummary
+from .c2a_policy_bank import suggest_c2a_policy_priors
 from ..reasoning.trajectory import extract_output_text
 
 
@@ -53,6 +54,7 @@ class WorkflowPlan:
     repo_map_regions: list[dict[str, Any]] = field(default_factory=list)
     selected_search_regions: list[str] = field(default_factory=list)
     topology_anchor_files: list[str] = field(default_factory=list)
+    self_transmutation_boosts: dict[str, Any] = field(default_factory=dict)
 
 
 def _split_steps(text: str) -> list[str]:
@@ -84,6 +86,21 @@ def _merge_preferred_items(primary: list[str], secondary: list[str], *, limit: i
             seen.add(key)
             merged.append(clean)
     return merged[: max(int(limit), 0)]
+
+
+def _boost_repo_map_regions(regions: list[dict[str, Any]], preferred_regions: list[str]) -> list[dict[str, Any]]:
+    if not regions or not preferred_regions:
+        return list(regions)
+    preferred_keys = {str(region).strip().lower() for region in preferred_regions if str(region).strip()}
+    boosted: list[dict[str, Any]] = []
+    for item in regions:
+        region = str(item.get("region") or "").strip()
+        score = float(item.get("score") or 0.0)
+        if region.lower() in preferred_keys:
+            score += 1.1
+        boosted.append({**item, "score": score})
+    boosted.sort(key=lambda item: (float(item.get("score") or 0.0), str(item.get("region") or "")), reverse=True)
+    return boosted
 
 
 def _normalize_token(token: str) -> str:
@@ -1063,6 +1080,7 @@ def build_workflow_plan(
     enable_compile_loop: bool = True,
 ) -> WorkflowPlan:
     prompt_tokens = _tokenize(prompt)
+    policy_priors = suggest_c2a_policy_priors(prompt=prompt, repo_root=repo_root)
     desired_roles = infer_prompt_roles(prompt)
     current_family = infer_repo_family(repo_root) if repo_root else "unknown"
     family_candidates = [candidate for candidate in candidates if candidate.same_repo or candidate.repo_family_match]
@@ -1076,6 +1094,13 @@ def build_workflow_plan(
         paths=summary.suggested_files,
         commands=summary.suggested_commands,
         candidate_constraints=candidate_constraint_votes,
+    )
+    predicted_constraints = list(
+        dict.fromkeys(
+            list(predicted_constraints)
+            + list(policy_priors.get("constraints") or [])
+            + list(policy_priors.get("teacher_rescue_constraints") or [])
+        )
     )
     hypothesis_swarm = build_hypothesis_swarm(
         prompt,
@@ -1119,10 +1144,16 @@ def build_workflow_plan(
     ruled_out_constraints = [
         tag for tag in dict.fromkeys(swarm_negative_constraints) if tag and tag not in predicted_constraints
     ]
-    predicted_roles = infer_roles_from_constraints(predicted_constraints) | swarm_roles
+    predicted_roles = infer_roles_from_constraints(predicted_constraints) | swarm_roles | set(
+        policy_priors.get("roles") or []
+    )
     ruled_out_roles = sorted(role for role in swarm_negative_roles if role and role not in predicted_roles)
     constraint_tags = list(predicted_constraints)
-    ranked_files = list(summary.suggested_files)
+    ranked_files = _merge_preferred_items(
+        list(policy_priors.get("preferred_files") or []),
+        list(summary.suggested_files),
+        limit=10,
+    )
     repo_role_candidates: list[RepoRoleCandidate] = []
     repo_map_regions: list[dict[str, Any]] = []
     repo_topology_graph: list[dict[str, Any]] = []
@@ -1141,6 +1172,7 @@ def build_workflow_plan(
             desired_roles=file_routing_roles,
             limit=6,
         )
+        repo_map_regions = _boost_repo_map_regions(repo_map_regions, list(policy_priors.get("preferred_regions") or []))
         repo_topology_graph = build_repo_topology_graph(
             repo_root,
             prompt=prompt,
@@ -1150,6 +1182,17 @@ def build_workflow_plan(
         )
     if repo_root and file_routing_roles:
         repo_role_candidates = scan_repo_role_matches(repo_root, prompt, file_routing_roles, limit=8)
+    if policy_priors.get("preferred_files"):
+        policy_candidates = [
+            RepoRoleCandidate(
+                path=str(path),
+                roles=list(policy_priors.get("roles") or []),
+                score=max(1.45 - (index * 0.08), 0.7),
+            )
+            for index, path in enumerate(list(policy_priors.get("preferred_files") or [])[:6])
+            if str(path).strip()
+        ]
+        repo_role_candidates = list(policy_candidates) + list(repo_role_candidates)
     ranked_files = _merge_file_candidates(ranked_files, repo_role_candidates)
     candidate_topology_walk_candidates = _collect_candidate_topology_walk_candidates(
         active_candidates,
@@ -1261,6 +1304,12 @@ def build_workflow_plan(
             if tag not in constraint_tags:
                 constraint_tags.append(tag)
     transmutations = summarize_transmutations(constraint_tags)
+    for transmutation in list(policy_priors.get("transmutations") or []) + list(
+        policy_priors.get("teacher_rescue_transmutations") or []
+    ):
+        clean_transmutation = str(transmutation).strip()
+        if clean_transmutation and clean_transmutation not in transmutations:
+            transmutations.append(clean_transmutation)
     for candidate in active_candidates:
         for transmutation in candidate.matched_transmutations:
             if transmutation not in transmutations:
@@ -1351,6 +1400,16 @@ def build_workflow_plan(
             if str(item.get("region") or "").strip()
         ],
         topology_anchor_files=topology_anchor_files[:4],
+        self_transmutation_boosts={
+            "matched_tokens": list(policy_priors.get("matched_tokens") or []),
+            "constraints": list(policy_priors.get("constraints") or []),
+            "teacher_rescue_constraints": list(policy_priors.get("teacher_rescue_constraints") or []),
+            "roles": list(policy_priors.get("roles") or []),
+            "transmutations": list(policy_priors.get("transmutations") or []),
+            "teacher_rescue_transmutations": list(policy_priors.get("teacher_rescue_transmutations") or []),
+            "preferred_files": list(policy_priors.get("preferred_files") or []),
+            "preferred_regions": list(policy_priors.get("preferred_regions") or []),
+        },
     )
 
 
@@ -1372,6 +1431,11 @@ def render_workflow_plan_block(plan: WorkflowPlan) -> str:
         lines.append(f"Role targets: {', '.join(plan.role_targets[:4])}")
     if plan.predicted_constraints:
         lines.append(f"Predicted constraints: {', '.join(plan.predicted_constraints[:6])}")
+    if plan.self_transmutation_boosts.get("matched_tokens"):
+        lines.append(
+            "Self-transmutation tokens: "
+            + ", ".join(list(plan.self_transmutation_boosts.get("matched_tokens") or [])[:6])
+        )
     if plan.ruled_out_constraints:
         lines.append(f"Ruled-out constraints: {', '.join(plan.ruled_out_constraints[:6])}")
     if plan.topology_anchor_files:
@@ -1401,6 +1465,9 @@ def render_workflow_plan_block(plan: WorkflowPlan) -> str:
             lines.append(f"Validated commands: {', '.join(supporting_commands[:4])}")
     if plan.selected_search_regions:
         lines.append(f"Search regions: {', '.join(plan.selected_search_regions[:4])}")
+    boosted_files = list(plan.self_transmutation_boosts.get("preferred_files") or [])
+    if boosted_files:
+        lines.append(f"Self-transmutation files: {', '.join(boosted_files[:4])}")
     if plan.constraint_tags:
         lines.append(f"Constraint tags: {', '.join(plan.constraint_tags[:6])}")
     if plan.residual_constraints:

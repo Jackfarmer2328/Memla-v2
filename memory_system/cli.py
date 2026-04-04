@@ -17,6 +17,18 @@ from .distillation.compile_loop_benchmark import (
     render_compile_loop_benchmark_markdown,
     run_compile_loop_benchmark,
 )
+from .distillation.coding_c2a_benchmark import (
+    render_coding_c2a_markdown,
+    run_coding_c2a_benchmark,
+)
+from .distillation.c2a_trace_bank import (
+    extract_c2a_trace_bank,
+    render_c2a_trace_bank_markdown,
+)
+from .distillation.c2a_policy_bank import (
+    distill_c2a_policy_bank,
+    render_c2a_policy_bank_markdown,
+)
 from .distillation.math_c2a_benchmark import (
     render_math_c2a_teacher_student_markdown,
     run_math_c2a_teacher_student_benchmark,
@@ -311,6 +323,116 @@ def _handle_compile_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_c2a_benchmark(args: argparse.Namespace) -> int:
+    repo_root = _resolve_repo_root(args.repo_root)
+    db_path = _resolve_db_path(args.db, repo_root)
+    report = run_coding_c2a_benchmark(
+        db_path=str(db_path),
+        repo_root=str(repo_root),
+        user_id=args.user_id,
+        cases_path=args.cases,
+        raw_model=args.raw_model,
+        memla_model=args.memla_model,
+        temperature=args.temperature,
+        top_k=args.top_k,
+        num_ctx=args.num_ctx,
+        raw_provider=args.raw_provider,
+        raw_base_url=args.raw_base_url,
+        memla_provider=args.memla_provider,
+        memla_base_url=args.memla_base_url,
+    )
+    markdown = render_coding_c2a_markdown(report)
+    out_dir = Path(args.out_dir).resolve() if args.out_dir else _default_report_dir("coding_c2a_benchmark")
+    json_path, md_path = _write_report_bundle(
+        report=report,
+        markdown=markdown,
+        out_dir=out_dir,
+        stem="coding_c2a_benchmark_report",
+    )
+    print(f"Wrote coding C2A benchmark JSON: {json_path}")
+    print(f"Wrote coding C2A benchmark Markdown: {md_path}")
+    utility_index = report.get("memla_vs_raw_c2a_utility_index")
+    utility_text = utility_index if utility_index is not None else "n/a"
+    print(
+        "Summary: "
+        f"raw utility {report.get('avg_raw_c2a_utility', 0.0)} | "
+        f"memla utility {report.get('avg_memla_c2a_utility', 0.0)} | "
+        f"utility index {utility_text}"
+    )
+    return 0
+
+
+def _handle_extract_c2a(args: argparse.Namespace) -> int:
+    report = extract_c2a_trace_bank(
+        report_paths=list(args.report or []),
+        min_utility_delta=args.min_delta,
+    )
+    markdown = render_c2a_trace_bank_markdown(report)
+    out_dir = Path(args.out_dir).resolve() if args.out_dir else _default_report_dir("coding_c2a_extract")
+    json_path, md_path = _write_report_bundle(
+        report=report,
+        markdown=markdown,
+        out_dir=out_dir,
+        stem="c2a_trace_bank_summary",
+    )
+    jsonl_path = out_dir / "c2a_trace_bank.jsonl"
+    jsonl_lines = [json.dumps(row, ensure_ascii=True) for row in report.get("rows", [])]
+    jsonl_path.write_text("\n".join(jsonl_lines) + ("\n" if jsonl_lines else ""), encoding="utf-8")
+    if args.json:
+        _print_json(
+            {
+                "json_summary": str(json_path),
+                "markdown_summary": str(md_path),
+                "jsonl_bank": str(jsonl_path),
+                "rows_extracted": report.get("rows_extracted", 0),
+                "winner_counts": report.get("winner_counts", {}),
+                "teacher_signal_class_counts": report.get("teacher_signal_class_counts", {}),
+            }
+        )
+    else:
+        print(f"Wrote C2A trace bank JSON summary: {json_path}")
+        print(f"Wrote C2A trace bank Markdown summary: {md_path}")
+        print(f"Wrote C2A trace bank JSONL: {jsonl_path}")
+        print(
+            "Summary: "
+            f"rows {report.get('rows_extracted', 0)} | "
+            f"winner counts {report.get('winner_counts', {})} | "
+            f"teacher signals {report.get('teacher_signal_class_counts', {})}"
+        )
+    return 0
+
+
+def _handle_distill_c2a(args: argparse.Namespace) -> int:
+    repo_root = _resolve_repo_root(args.repo_root)
+    out_path = Path(args.out).resolve() if args.out else (repo_root / ".memla" / "c2a_policy_bank.json").resolve()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    report = distill_c2a_policy_bank(
+        trace_bank_path=args.trace_bank,
+        min_priority=args.min_priority,
+    )
+    out_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    md_path = out_path.with_suffix(".md")
+    md_path.write_text(render_c2a_policy_bank_markdown(report), encoding="utf-8")
+    if args.json:
+        _print_json(
+            {
+                "policy_bank": str(out_path),
+                "markdown_summary": str(md_path),
+                "rows_used": report.get("rows_used", 0),
+                "source_models": report.get("source_models", {}),
+            }
+        )
+    else:
+        print(f"Wrote C2A policy bank JSON: {out_path}")
+        print(f"Wrote C2A policy bank Markdown: {md_path}")
+        print(
+            "Summary: "
+            f"rows used {report.get('rows_used', 0)} | "
+            f"source models {report.get('source_models', {})}"
+        )
+    return 0
+
+
 def _handle_math_benchmark(args: argparse.Namespace) -> int:
     report = run_math_c2a_teacher_student_benchmark(
         cases_path=args.cases,
@@ -533,6 +655,53 @@ def _build_parser() -> argparse.ArgumentParser:
     compile_parser.add_argument("--num-ctx", type=int, default=None)
     compile_parser.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
     compile_parser.set_defaults(func=_handle_compile_benchmark)
+
+    c2a_parser = coding_sub.add_parser("benchmark-c2a", help="Run a pure next-move coding C2A benchmark.")
+    c2a_parser.add_argument("--cases", required=True, help="Coding C2A case JSONL path.")
+    c2a_parser.add_argument("--repo-root", required=True, help="Repository root under test.")
+    c2a_parser.add_argument("--raw-model", required=True, help="Baseline raw model.")
+    c2a_parser.add_argument("--memla-model", required=True, help="Memla-assisted planning model.")
+    c2a_parser.add_argument("--db", default="", help="SQLite path for Memla memory. Defaults to <repo>/.memla/memory.sqlite.")
+    c2a_parser.add_argument("--user-id", default=_user_id_default(), help="User or tenant identifier for memory retrieval.")
+    c2a_parser.add_argument("--temperature", type=float, default=0.1)
+    c2a_parser.add_argument("--top-k", type=int, default=12)
+    c2a_parser.add_argument("--num-ctx", type=int, default=None)
+    c2a_parser.add_argument("--raw-provider", default="", help="Optional provider override for the raw lane.")
+    c2a_parser.add_argument("--raw-base-url", default="", help="Optional base URL override for the raw lane.")
+    c2a_parser.add_argument("--memla-provider", default="", help="Optional provider override for the Memla lane.")
+    c2a_parser.add_argument("--memla-base-url", default="", help="Optional base URL override for the Memla lane.")
+    c2a_parser.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
+    c2a_parser.set_defaults(func=_handle_c2a_benchmark)
+
+    extract_parser = coding_sub.add_parser("extract-c2a", help="Extract normalized teacher-vs-Memla rows from coding C2A benchmark reports.")
+    extract_parser.add_argument(
+        "--report",
+        action="append",
+        required=True,
+        help="Path to a coding_c2a_benchmark_report.json file. Repeat for multiple reports.",
+    )
+    extract_parser.add_argument(
+        "--min-delta",
+        type=float,
+        default=None,
+        help="Optional minimum Memla-minus-raw utility delta required to keep a row.",
+    )
+    extract_parser.add_argument("--out-dir", default="", help="Directory for extracted trace-bank artifacts. Defaults to ./memla_reports/<timestamp>.")
+    extract_parser.add_argument("--json", action="store_true", help="Print the extraction summary as JSON.")
+    extract_parser.set_defaults(func=_handle_extract_c2a)
+
+    distill_parser = coding_sub.add_parser("distill-c2a", help="Distill a self-transmutation policy bank from an extracted C2A trace bank.")
+    distill_parser.add_argument("--trace-bank", required=True, help="Path to a c2a_trace_bank summary JSON or JSONL file.")
+    distill_parser.add_argument("--repo-root", default=".", help="Repository root where the policy bank should live. Defaults to the current directory.")
+    distill_parser.add_argument("--out", default="", help="Optional explicit output JSON path. Defaults to <repo>/.memla/c2a_policy_bank.json.")
+    distill_parser.add_argument(
+        "--min-priority",
+        default="medium",
+        choices=["low", "medium", "high"],
+        help="Minimum teaching priority a row must have to influence the distilled bank.",
+    )
+    distill_parser.add_argument("--json", action="store_true", help="Print the distillation summary as JSON.")
+    distill_parser.set_defaults(func=_handle_distill_c2a)
 
     math_parser = subparsers.add_parser("math", help="Run bounded math teacher-student benchmarks.")
     math_sub = math_parser.add_subparsers(dest="math_command")
