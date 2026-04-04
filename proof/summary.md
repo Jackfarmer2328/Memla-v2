@@ -25,8 +25,8 @@ Same-model control on the same OAuth slice:
 | Semantic success | `0.0` | `0.6667` |
 
 Additional support:
+- second repo family against hosted `70b` raw: apply `0.0 -> 0.3333`
 - earlier larger-local baseline: `qwen2.5:32b` raw apply `0.0` -> `qwen3.5:9b + Memla` apply `0.6667`
-- second repo family: apply `0.0 -> 0.3333`
 
 ## Math
 
