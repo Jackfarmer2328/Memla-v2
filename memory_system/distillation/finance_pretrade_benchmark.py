@@ -649,6 +649,18 @@ def _render_finance_policy_block(priors: dict[str, Any]) -> str:
     matched_tokens = list(priors.get("matched_tokens") or [])
     if matched_tokens:
         lines.append(f"Matched prompt tokens: {', '.join(matched_tokens[:8])}")
+    rescue_decisions = list(priors.get("teacher_rescue_decisions") or [])
+    rescue_rules = list(priors.get("teacher_rescue_rules") or [])
+    rescue_actions = list(priors.get("teacher_rescue_actions") or [])
+    if rescue_decisions:
+        lines.append(
+            "Teacher rescue decisions (prefer these over weaker defaults when they fit the current state): "
+            + ", ".join(rescue_decisions[:3])
+        )
+    if rescue_rules:
+        lines.append(f"Teacher rescue rules: {', '.join(rescue_rules[:4])}")
+    if rescue_actions:
+        lines.append(f"Teacher rescue actions: {', '.join(rescue_actions[:4])}")
     decisions = list(priors.get("decisions") or [])
     if decisions:
         lines.append(f"Preferred decisions: {', '.join(decisions[:3])}")
@@ -658,15 +670,6 @@ def _render_finance_policy_block(priors: dict[str, Any]) -> str:
     actions = list(priors.get("actions") or [])
     if actions:
         lines.append(f"Likely actions: {', '.join(actions[:4])}")
-    rescue_decisions = list(priors.get("teacher_rescue_decisions") or [])
-    if rescue_decisions:
-        lines.append(f"Teacher rescue decisions: {', '.join(rescue_decisions[:3])}")
-    rescue_rules = list(priors.get("teacher_rescue_rules") or [])
-    if rescue_rules:
-        lines.append(f"Teacher rescue rules: {', '.join(rescue_rules[:4])}")
-    rescue_actions = list(priors.get("teacher_rescue_actions") or [])
-    if rescue_actions:
-        lines.append(f"Teacher rescue actions: {', '.join(rescue_actions[:4])}")
     lines.append("Use these priors only if they fit the current state and preserve direct control.")
     return "\n".join(lines)
 

@@ -130,6 +130,9 @@ def distill_finance_policy_bank(*, trace_bank_path: str, min_priority: str = "me
         teacher_weight = _priority_weight(priority) * (
             0.3 + float(row.get("raw_finance_utility", 0.0)) + (0.35 if winner == "raw" else 0.0)
         )
+        if winner == "raw":
+            memla_weight *= 0.15
+            teacher_weight *= 1.35
 
         memla_decision = str(row.get("memla_decision") or "").strip().lower()
         raw_decision = str(row.get("raw_decision") or "").strip().lower()
@@ -140,11 +143,13 @@ def distill_finance_policy_bank(*, trace_bank_path: str, min_priority: str = "me
 
         for token in tokens:
             token_counts[token] += 1
-            if memla_decision:
+            if memla_decision and winner != "raw":
                 token_decision_weights[token][memla_decision] += memla_weight
             for item in memla_rules:
                 token_rule_weights[token][item] += memla_weight
             for item in memla_actions:
+                if winner == "raw":
+                    continue
                 token_action_weights[token][item] += memla_weight
             if raw_decision:
                 token_teacher_decision_weights[token][raw_decision] += teacher_weight

@@ -98,7 +98,7 @@ def test_distill_finance_policy_bank_aggregates_teacher_rescue_priors(tmp_path):
     assert bank["rows_used"] == 1
     assert bank["token_teacher_decision_weights"]["duplicate"]["escalate"] > 0
     assert bank["token_teacher_action_weights"]["review"]["request_supervisor_approval"] > 0
-    assert bank["token_decision_weights"]["duplicate"]["block"] > 0
+    assert bank["token_decision_weights"].get("duplicate", {}).get("block", 0.0) == 0.0
 
 
 def test_suggest_finance_policy_priors_reads_local_bank(tmp_path):
@@ -127,6 +127,119 @@ def test_suggest_finance_policy_priors_reads_local_bank(tmp_path):
     assert priors["decisions"] == ["block"]
     assert priors["teacher_rescue_decisions"] == ["escalate"]
     assert "request_supervisor_approval" in priors["teacher_rescue_actions"]
+
+
+def test_run_finance_benchmark_uses_teacher_rescue_override_wording(monkeypatch, tmp_path):
+    (tmp_path / ".memla").mkdir(parents=True)
+    (tmp_path / ".memla" / "finance_policy_bank.json").write_text(
+        json.dumps(
+            {
+                "token_counts": {"duplicate": 1},
+                "token_decision_weights": {},
+                "token_rule_weights": {"duplicate": {"duplicate_order_window": 1.0}},
+                "token_action_weights": {},
+                "token_teacher_decision_weights": {"duplicate": {"escalate": 2.5}},
+                "token_teacher_rule_weights": {"duplicate": {"duplicate_order_window": 2.0}},
+                "token_teacher_action_weights": {"duplicate": {"request_supervisor_approval": 2.0}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    cases_path = tmp_path / "finance_case.jsonl"
+    cases_path.write_text(
+        json.dumps(
+            {
+                "case_id": "duplicate_window_escalate",
+                "prompt": "A matching order reappears inside the duplicate-order review window.",
+                "order": {
+                    "symbol": "MSFT",
+                    "side": "buy",
+                    "quantity": 100,
+                    "price": 412.5,
+                    "route": "ARCA",
+                    "ts": 1712251320,
+                },
+                "account": {"current_position": 0},
+                "market": {"reference_price": 412.5},
+                "controls": {
+                    "max_order_notional": 1000000.0,
+                    "approval_notional": 800000.0,
+                    "max_long_position": 5000,
+                    "max_short_position": 5000,
+                    "max_price_deviation_pct": 0.05,
+                    "duplicate_window_seconds": 5,
+                    "allowed_routes": ["ARCA"],
+                },
+                "recent_orders": [
+                    {
+                        "symbol": "MSFT",
+                        "side": "buy",
+                        "quantity": 100,
+                        "price": 412.5,
+                        "route": "ARCA",
+                        "ts": 1712251317,
+                    }
+                ],
+                "expected_outcome": "escalate",
+                "expected_rule_hits": ["duplicate_order_window"],
+                "expected_actions": ["request_supervisor_approval"],
+                "expected_rewrite": {},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class DummyClient:
+        def __init__(self, provider: str):
+            self.provider = provider
+            self.messages: list[str] = []
+
+        def chat(self, **kwargs):
+            content = str(kwargs["messages"][-1].content)
+            self.messages.append(content)
+            return json.dumps(
+                {
+                    "decision": "escalate" if "prefer these over weaker defaults" in content else "block",
+                    "predicted_rule_hits": ["duplicate_order_window"],
+                    "next_actions": ["request_supervisor_approval"],
+                    "rewrite": {},
+                    "rationale": "Teacher rescue override should be visible.",
+                }
+            )
+
+    client = DummyClient("ollama")
+
+    monkeypatch.setattr(
+        "memory_system.distillation.finance_pretrade_benchmark._build_llm_client",
+        lambda provider=None, base_url=None, api_key=None: client,
+    )
+
+    rc = main(
+        [
+            "finance",
+            "benchmark-pretrade",
+            "--cases",
+            str(cases_path),
+            "--repo-root",
+            str(tmp_path),
+            "--case-id",
+            "duplicate_window_escalate",
+            "--raw-model",
+            "meta/Llama-3.3-70B-Instruct",
+            "--memla-model",
+            "qwen3.5:9b",
+            "--raw-provider",
+            "ollama",
+            "--memla-provider",
+            "ollama",
+            "--out-dir",
+            str(tmp_path / "finance_report"),
+        ]
+    )
+
+    assert rc == 0
+    assert any("Teacher rescue decisions (prefer these over weaker defaults" in message for message in client.messages)
 
 
 def test_run_finance_benchmark_uses_finance_policy_bank_for_memla_lane(monkeypatch, tmp_path):
@@ -255,7 +368,7 @@ def test_run_finance_benchmark_uses_finance_policy_bank_for_memla_lane(monkeypat
     )
 
     assert rc == 0
-    assert "Teacher rescue decisions: escalate" in clients["ollama"].messages[0]
+    assert "Teacher rescue decisions (prefer these over weaker defaults" in clients["ollama"].messages[0]
 
 
 def test_memla_finance_extract_and_distill_write_bundles(monkeypatch, capsys, tmp_path):
