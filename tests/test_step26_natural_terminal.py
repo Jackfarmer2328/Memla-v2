@@ -132,6 +132,26 @@ def test_terminal_step_report_includes_prompt_and_state_candidates():
     assert "Open search result #2" in labels
 
 
+def test_terminal_step_report_ignores_stale_state_candidates_for_new_search():
+    browser_state = BrowserSessionState(
+        current_url="https://www.youtube.com/results?search_query=old+query",
+        page_kind="search_results",
+        search_engine="youtube",
+        search_query="old query",
+    )
+
+    report = build_terminal_step_report(
+        prompt="open github and search llama.cpp",
+        heuristic_only=True,
+        browser_state=browser_state,
+    )
+
+    assert report.candidates[0].label == 'Open github search for "llama cpp"'
+    labels = [candidate.label for candidate in report.candidates]
+    assert "Open search result #1" not in labels
+    assert "Go back" not in labels
+
+
 def test_raw_terminal_plan_receives_browser_context():
     captured_messages = {}
 

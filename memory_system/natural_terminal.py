@@ -1721,6 +1721,15 @@ def _contextual_terminal_candidates(browser_state: BrowserSessionState, prompt: 
     return candidates
 
 
+def _plan_starts_new_terminal_branch(plan: TerminalPlan) -> bool:
+    if not plan.actions:
+        return False
+    return any(
+        action.kind in {"open_url", "launch_app", "open_path", "list_directory", "system_info"}
+        for action in plan.actions
+    )
+
+
 def build_terminal_step_report(
     *,
     prompt: str,
@@ -1756,12 +1765,13 @@ def build_terminal_step_report(
             seen.add(signature)
             candidates.append(prompt_candidate)
 
-    for candidate in _contextual_terminal_candidates(current_state, prompt):
-        signature = _plan_signature(candidate.plan)
-        if not signature or signature in seen:
-            continue
-        seen.add(signature)
-        candidates.append(candidate)
+    if not _plan_starts_new_terminal_branch(prompt_plan):
+        for candidate in _contextual_terminal_candidates(current_state, prompt):
+            signature = _plan_signature(candidate.plan)
+            if not signature or signature in seen:
+                continue
+            seen.add(signature)
+            candidates.append(candidate)
 
     return TerminalStepReport(
         prompt=prompt,
