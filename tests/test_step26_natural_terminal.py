@@ -116,6 +116,7 @@ def test_terminal_step_report_includes_prompt_and_state_candidates():
         page_kind="search_results",
         search_engine="youtube",
         search_query="lo fi hip hop",
+        result_urls=["https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
     )
 
     report = build_terminal_step_report(
@@ -128,6 +129,8 @@ def test_terminal_step_report_includes_prompt_and_state_candidates():
     assert report.constraints["search_engine"] == "youtube"
     assert report.candidates[0].recommended is True
     assert report.candidates[0].plan.actions[0].kind == "open_search_result"
+    assert "YouTube video" in report.candidates[0].target_preview
+    assert "Open result #1 from the current youtube search." == report.candidates[0].expected_outcome
     labels = [candidate.label for candidate in report.candidates]
     assert "Open search result #2" in labels
 
@@ -150,6 +153,25 @@ def test_terminal_step_report_ignores_stale_state_candidates_for_new_search():
     labels = [candidate.label for candidate in report.candidates]
     assert "Open search result #1" not in labels
     assert "Go back" not in labels
+    assert report.candidates[0].target_preview == 'Github search results for "llama cpp"'
+
+
+def test_terminal_step_report_shows_read_page_extraction_fields():
+    browser_state = BrowserSessionState(
+        current_url="https://github.com/ggml-org/llama.cpp",
+        page_kind="repo_page",
+    )
+
+    report = build_terminal_step_report(
+        prompt="what is this repo",
+        heuristic_only=True,
+        browser_state=browser_state,
+    )
+
+    candidate = report.candidates[0]
+    assert candidate.target_preview == "ggml-org/llama.cpp"
+    assert candidate.expected_outcome == "Extract a structured repo summary from the current GitHub repository page."
+    assert candidate.expected_fields == ["repo", "description", "stars", "forks", "language", "topics"]
 
 
 def test_raw_terminal_plan_receives_browser_context():
@@ -244,6 +266,34 @@ def test_terminal_execute_plan_opens_first_search_result(monkeypatch, tmp_path):
     assert launched == [["xdg-open", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"]]
     assert result.browser_state["page_kind"] == "video_page"
     assert result.browser_state["current_url"] == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+
+def test_terminal_execute_search_primes_result_cache(monkeypatch):
+    launched: list[list[str]] = []
+
+    class DummyProcess:
+        def __init__(self, command, **kwargs):
+            launched.append(list(command))
+
+    monkeypatch.setattr("memory_system.natural_terminal.subprocess.Popen", DummyProcess)
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._fetch_search_result_urls",
+        lambda engine, query, limit=5: [
+            "https://github.com/ggml-org/llama.cpp",
+            "https://github.com/oobabooga/text-generation-webui",
+        ],
+    )
+
+    plan = build_terminal_plan(prompt="open github and search llama.cpp", heuristic_only=True)
+    result = execute_terminal_plan(plan, platform_name="linux", browser_state=BrowserSessionState())
+
+    assert result.ok is True
+    assert launched == [["xdg-open", "https://github.com/search?q=llama+cpp&type=repositories"]]
+    assert result.browser_state["page_kind"] == "search_results"
+    assert result.browser_state["result_urls"] == [
+        "https://github.com/ggml-org/llama.cpp",
+        "https://github.com/oobabooga/text-generation-webui",
+    ]
 
 
 def test_fetch_search_result_urls_uses_github_api_first(monkeypatch):

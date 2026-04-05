@@ -122,6 +122,9 @@ class TerminalTransmutationCandidate:
     origin: str
     recommended: bool = False
     plan: TerminalPlan = field(default_factory=lambda: TerminalPlan(prompt="", source="candidate"))
+    target_preview: str = ""
+    expected_outcome: str = ""
+    expected_fields: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -1315,10 +1318,16 @@ def execute_terminal_plan(
             search_engine = str(note_payload.get("search_engine") or "").strip()
             search_query = str(note_payload.get("search_query") or "").strip()
             if search_engine and search_query:
+                result_urls: list[str] = []
+                try:
+                    result_urls = _fetch_search_result_urls(search_engine, search_query, limit=5)
+                except Exception:
+                    result_urls = []
                 current_browser_state = _browser_state_for_url(
                     target,
                     search_engine=search_engine,
                     search_query=search_query,
+                    result_urls=result_urls,
                 )
             else:
                 current_browser_state = _browser_state_for_url(target)
@@ -1625,6 +1634,96 @@ def _plan_label(plan: TerminalPlan) -> str:
     return f"{action.kind}: {target}"
 
 
+def _preview_label_for_url(url: str) -> str:
+    clean = str(url or "").strip()
+    if not clean:
+        return ""
+    repo_match = re.match(r"^https?://github\.com/([^/\s]+)/([^/\s?#]+)", clean, flags=re.IGNORECASE)
+    if repo_match:
+        return f"{repo_match.group(1)}/{repo_match.group(2)}"
+    if "youtube.com/watch" in clean.lower():
+        return f"YouTube video ({clean})"
+    if "reddit.com/" in clean.lower():
+        return f"Reddit post ({clean})"
+    return clean
+
+
+def _preview_result_url(browser_state: BrowserSessionState, index: int) -> str:
+    result_urls = list(browser_state.result_urls or [])
+    return result_urls[index - 1] if len(result_urls) >= index else ""
+
+
+def _read_page_expected_fields(browser_state: BrowserSessionState) -> list[str]:
+    if browser_state.page_kind == "repo_page":
+        return ["repo", "description", "stars", "forks", "language", "topics"]
+    if browser_state.page_kind == "video_page":
+        return ["title", "summary", "channel", "url"]
+    if browser_state.page_kind == "post_page":
+        return ["title", "summary", "url"]
+    if browser_state.page_kind == "search_results":
+        return ["title", "summary", "url"]
+    return ["title", "summary", "url"]
+
+
+def _candidate_preview_from_plan(plan: TerminalPlan, browser_state: BrowserSessionState) -> tuple[str, str, list[str]]:
+    if not plan.actions:
+        return "", "", []
+    if len(plan.actions) > 1:
+        labels = [_plan_label(TerminalPlan(prompt=plan.prompt, source=plan.source, actions=[action])) for action in plan.actions]
+        return ", then ".join(labels[:2]), "Run the first two transmutations in sequence.", []
+    action = plan.actions[0]
+    target = str(action.resolved_target or action.target).strip()
+    if action.kind == "open_url":
+        note = _decode_action_note(action.note)
+        engine = str(note.get("search_engine") or "").strip()
+        query = str(note.get("search_query") or "").strip()
+        if engine and query:
+            return (
+                f"{engine.title()} search results for \"{query}\"",
+                "Open a fresh browser search-results page for this query.",
+                [],
+            )
+        return target, "Open the target URL in the browser.", []
+    if action.kind == "open_search_result":
+        try:
+            index = max(int(target or "1"), 1)
+        except ValueError:
+            index = 1
+        target_url = _preview_result_url(browser_state, index)
+        target_preview = _preview_label_for_url(target_url) or f"Search result #{index}"
+        search_engine = str(browser_state.search_engine or "").strip()
+        outcome = "Open the selected search result in the browser."
+        if search_engine:
+            outcome = f"Open result #{index} from the current {search_engine} search."
+        return target_preview, outcome, []
+    if action.kind == "browser_read_page":
+        page_kind = str(browser_state.page_kind or "web_page").strip()
+        current_target = browser_state.current_url or "current page"
+        target_preview = _preview_label_for_url(current_target) or current_target
+        if page_kind == "repo_page":
+            outcome = "Extract a structured repo summary from the current GitHub repository page."
+        elif page_kind == "video_page":
+            outcome = "Extract structured metadata from the current video page."
+        else:
+            outcome = "Read the current page and build a concise structured summary."
+        return target_preview, outcome, _read_page_expected_fields(browser_state)
+    if action.kind == "browser_back":
+        return browser_state.current_url or "browser history", "Return to the previous browser page.", []
+    if action.kind == "browser_media_pause":
+        return browser_state.current_url or "current media page", "Pause the current browser media playback.", []
+    if action.kind == "browser_media_play":
+        return browser_state.current_url or "current media page", "Resume the current browser media playback.", []
+    if action.kind == "launch_app":
+        return target, f"Launch the {target} application.", []
+    if action.kind == "open_path":
+        return target, "Open this folder or file path in the system file browser.", []
+    if action.kind == "list_directory":
+        return target, "List the visible entries in this directory.", ["entries"]
+    if action.kind == "system_info":
+        return target, f"Read the current {target} status from the local machine.", [target]
+    return target, "", []
+
+
 def _candidate_from_plan(
     *,
     candidate_id: str,
@@ -1632,9 +1731,11 @@ def _candidate_from_plan(
     origin: str,
     rationale: str,
     recommended: bool = False,
+    browser_state: BrowserSessionState | None = None,
 ) -> TerminalTransmutationCandidate | None:
     if not plan.actions:
         return None
+    target_preview, expected_outcome, expected_fields = _candidate_preview_from_plan(plan, browser_state or BrowserSessionState())
     return TerminalTransmutationCandidate(
         candidate_id=candidate_id,
         label=_plan_label(plan),
@@ -1642,6 +1743,9 @@ def _candidate_from_plan(
         origin=origin,
         recommended=recommended,
         plan=plan,
+        target_preview=target_preview,
+        expected_outcome=expected_outcome,
+        expected_fields=expected_fields,
     )
 
 
@@ -1651,73 +1755,73 @@ def _contextual_terminal_candidates(browser_state: BrowserSessionState, prompt: 
     prompt_text = str(prompt or "").strip()
     candidates: list[TerminalTransmutationCandidate] = []
     if browser_state.page_kind == "search_results":
-        candidates.append(
-            TerminalTransmutationCandidate(
-                candidate_id="result_1",
-                label="Open search result #1",
-                rationale="The current page is a search-results page, so opening the first result is a strong next transmutation.",
-                origin="browser_state",
-                plan=TerminalPlan(
-                    prompt=prompt_text,
-                    source="state_candidate",
-                    actions=[TerminalAction(kind="open_search_result", target="1", resolved_target="1")],
-                ),
-            )
+        first = _candidate_from_plan(
+            candidate_id="result_1",
+            plan=TerminalPlan(
+                prompt=prompt_text,
+                source="state_candidate",
+                actions=[TerminalAction(kind="open_search_result", target="1", resolved_target="1")],
+            ),
+            rationale="The current page is a search-results page, so opening the first result is a strong next transmutation.",
+            origin="browser_state",
+            browser_state=browser_state,
         )
-        candidates.append(
-            TerminalTransmutationCandidate(
-                candidate_id="result_2",
-                label="Open search result #2",
-                rationale="Opening the second result is a useful alternate branch when the first result is not ideal.",
-                origin="browser_state",
-                plan=TerminalPlan(
-                    prompt=prompt_text,
-                    source="state_candidate",
-                    actions=[TerminalAction(kind="open_search_result", target="2", resolved_target="2")],
-                ),
-            )
+        if first is not None:
+            candidates.append(first)
+        second = _candidate_from_plan(
+            candidate_id="result_2",
+            plan=TerminalPlan(
+                prompt=prompt_text,
+                source="state_candidate",
+                actions=[TerminalAction(kind="open_search_result", target="2", resolved_target="2")],
+            ),
+            rationale="Opening the second result is a useful alternate branch when the first result is not ideal.",
+            origin="browser_state",
+            browser_state=browser_state,
         )
+        if second is not None:
+            candidates.append(second)
     if browser_state.current_url:
-        candidates.append(
-            TerminalTransmutationCandidate(
-                candidate_id="read_page",
-                label="Read the current page",
-                rationale="Reading the current page extracts structured evidence before another navigation step.",
-                origin="browser_state",
-                plan=TerminalPlan(
-                    prompt=prompt_text,
-                    source="state_candidate",
-                    actions=[TerminalAction(kind="browser_read_page", target="current_page", resolved_target="current_page")],
-                ),
-            )
+        read_page = _candidate_from_plan(
+            candidate_id="read_page",
+            plan=TerminalPlan(
+                prompt=prompt_text,
+                source="state_candidate",
+                actions=[TerminalAction(kind="browser_read_page", target="current_page", resolved_target="current_page")],
+            ),
+            rationale="Reading the current page extracts structured evidence before another navigation step.",
+            origin="browser_state",
+            browser_state=browser_state,
         )
-        candidates.append(
-            TerminalTransmutationCandidate(
-                candidate_id="go_back",
-                label="Go back",
-                rationale="Going back is a safe recovery transmutation when you want to explore a different branch.",
-                origin="browser_state",
-                plan=TerminalPlan(
-                    prompt=prompt_text,
-                    source="state_candidate",
-                    actions=[TerminalAction(kind="browser_back", target="back", resolved_target="back")],
-                ),
-            )
+        if read_page is not None:
+            candidates.append(read_page)
+        go_back = _candidate_from_plan(
+            candidate_id="go_back",
+            plan=TerminalPlan(
+                prompt=prompt_text,
+                source="state_candidate",
+                actions=[TerminalAction(kind="browser_back", target="back", resolved_target="back")],
+            ),
+            rationale="Going back is a safe recovery transmutation when you want to explore a different branch.",
+            origin="browser_state",
+            browser_state=browser_state,
         )
+        if go_back is not None:
+            candidates.append(go_back)
     if browser_state.page_kind == "video_page":
-        candidates.append(
-            TerminalTransmutationCandidate(
-                candidate_id="pause_media",
-                label="Pause media",
-                rationale="The current page looks like a video page, so pausing media is a relevant continuation.",
-                origin="browser_state",
-                plan=TerminalPlan(
-                    prompt=prompt_text,
-                    source="state_candidate",
-                    actions=[TerminalAction(kind="browser_media_pause", target="media", resolved_target="media")],
-                ),
-            )
+        pause_media = _candidate_from_plan(
+            candidate_id="pause_media",
+            plan=TerminalPlan(
+                prompt=prompt_text,
+                source="state_candidate",
+                actions=[TerminalAction(kind="browser_media_pause", target="media", resolved_target="media")],
+            ),
+            rationale="The current page looks like a video page, so pausing media is a relevant continuation.",
+            origin="browser_state",
+            browser_state=browser_state,
         )
+        if pause_media is not None:
+            candidates.append(pause_media)
     return candidates
 
 
@@ -1758,6 +1862,7 @@ def build_terminal_step_report(
         origin=prompt_plan.source,
         rationale="Best next transmutation inferred from your prompt under the current browser and terminal constraints.",
         recommended=True,
+        browser_state=current_state,
     )
     if prompt_candidate is not None:
         signature = _plan_signature(prompt_candidate.plan)
@@ -2053,6 +2158,12 @@ def render_terminal_step_report_text(report: TerminalStepReport) -> str:
             lines.append(f"{idx}. {candidate.label}{marker}")
             lines.append(f"   rationale: {candidate.rationale}")
             lines.append(f"   origin: {candidate.origin}")
+            if candidate.target_preview:
+                lines.append(f"   will act on: {candidate.target_preview}")
+            if candidate.expected_outcome:
+                lines.append(f"   expected outcome: {candidate.expected_outcome}")
+            if candidate.expected_fields:
+                lines.append(f"   will extract: {', '.join(candidate.expected_fields)}")
             plan_actions = ", ".join(_action_signature(action) for action in candidate.plan.actions)
             if plan_actions:
                 lines.append(f"   actions: {plan_actions}")
