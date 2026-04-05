@@ -29,6 +29,14 @@ from .distillation.healthcare_denial_benchmark import (
     render_healthcare_denial_markdown,
     run_healthcare_denial_benchmark,
 )
+from .distillation.policy_authz_policy_bank import (
+    distill_policy_authz_policy_bank,
+    render_policy_authz_policy_bank_markdown,
+)
+from .distillation.policy_trace_bank import (
+    extract_policy_trace_bank,
+    render_policy_trace_bank_markdown,
+)
 from .distillation.finance_policy_bank import (
     distill_finance_policy_bank,
     render_finance_policy_bank_markdown,
@@ -652,6 +660,7 @@ def _handle_healthcare_denial_benchmark(args: argparse.Namespace) -> int:
 def _handle_policy_authz_benchmark(args: argparse.Namespace) -> int:
     report = run_policy_authz_benchmark(
         cases_path=args.cases,
+        repo_root=str(_resolve_repo_root(args.repo_root)),
         case_ids=list(args.case_id or []),
         limit=args.limit,
         raw_model=args.raw_model,
@@ -664,6 +673,8 @@ def _handle_policy_authz_benchmark(args: argparse.Namespace) -> int:
         raw_base_url=args.raw_base_url,
         memla_provider=args.memla_provider,
         memla_base_url=args.memla_base_url,
+        memla_policy_bank_path=args.memla_policy_bank_path,
+        disable_memla_policy_bank=args.disable_memla_policy_bank,
     )
     markdown = render_policy_authz_markdown(report)
     out_dir = Path(args.out_dir).resolve() if args.out_dir else _default_report_dir("policy_authz_benchmark")
@@ -683,6 +694,77 @@ def _handle_policy_authz_benchmark(args: argparse.Namespace) -> int:
         f"memla utility {report.get('avg_memla_policy_utility', 0.0)} | "
         f"utility index {utility_text}"
     )
+    return 0
+
+
+def _handle_extract_policy_authz(args: argparse.Namespace) -> int:
+    report = extract_policy_trace_bank(
+        report_paths=list(args.report or []),
+        min_utility_delta=args.min_delta,
+    )
+    markdown = render_policy_trace_bank_markdown(report)
+    out_dir = Path(args.out_dir).resolve() if args.out_dir else _default_report_dir("policy_trace_bank")
+    json_path, md_path = _write_report_bundle(
+        report=report,
+        markdown=markdown,
+        out_dir=out_dir,
+        stem="policy_trace_bank_summary",
+    )
+    jsonl_path = out_dir / "policy_trace_bank.jsonl"
+    jsonl_lines = [json.dumps(row, ensure_ascii=True) for row in report.get("rows", [])]
+    jsonl_path.write_text("\n".join(jsonl_lines) + ("\n" if jsonl_lines else ""), encoding="utf-8")
+    if args.json:
+        _print_json(
+            {
+                "json_summary": str(json_path),
+                "markdown_summary": str(md_path),
+                "jsonl_bank": str(jsonl_path),
+                "rows_extracted": report.get("rows_extracted", 0),
+                "winner_counts": report.get("winner_counts", {}),
+                "teacher_signal_class_counts": report.get("teacher_signal_class_counts", {}),
+            }
+        )
+    else:
+        print(f"Wrote policy trace bank JSON summary: {json_path}")
+        print(f"Wrote policy trace bank Markdown summary: {md_path}")
+        print(f"Wrote policy trace bank JSONL: {jsonl_path}")
+        print(
+            "Summary: "
+            f"rows {report.get('rows_extracted', 0)} | "
+            f"winner counts {report.get('winner_counts', {})} | "
+            f"teacher signals {report.get('teacher_signal_class_counts', {})}"
+        )
+    return 0
+
+
+def _handle_distill_policy_authz(args: argparse.Namespace) -> int:
+    repo_root = _resolve_repo_root(args.repo_root)
+    out_path = Path(args.out).resolve() if args.out else (repo_root / ".memla" / "policy_authz_policy_bank.json").resolve()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    report = distill_policy_authz_policy_bank(
+        trace_bank_path=args.trace_bank,
+        min_priority=args.min_priority,
+    )
+    out_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    md_path = out_path.with_suffix(".md")
+    md_path.write_text(render_policy_authz_policy_bank_markdown(report), encoding="utf-8")
+    if args.json:
+        _print_json(
+            {
+                "policy_bank": str(out_path),
+                "markdown_summary": str(md_path),
+                "rows_used": report.get("rows_used", 0),
+                "source_models": report.get("source_models", {}),
+            }
+        )
+    else:
+        print(f"Wrote policy bank JSON: {out_path}")
+        print(f"Wrote policy bank Markdown: {md_path}")
+        print(
+            "Summary: "
+            f"rows used {report.get('rows_used', 0)} | "
+            f"source models {report.get('source_models', {})}"
+        )
     return 0
 
 
@@ -1033,6 +1115,7 @@ def _build_parser() -> argparse.ArgumentParser:
     policy_sub = policy_parser.add_subparsers(dest="policy_command")
     policy_bench = policy_sub.add_parser("benchmark-authz", help="Run a bounded policy authorization replay benchmark.")
     policy_bench.add_argument("--cases", required=True, help="Policy authz case JSONL path.")
+    policy_bench.add_argument("--repo-root", default=".", help="Repository root used for local policy banks.")
     policy_bench.add_argument("--case-id", action="append", default=[], help="Optional case id filter. Repeat to run only specific policy cases.")
     policy_bench.add_argument("--limit", type=int, default=None, help="Optional max number of policy cases to run after filtering.")
     policy_bench.add_argument("--raw-model", required=True, help="Baseline raw model.")
@@ -1045,8 +1128,40 @@ def _build_parser() -> argparse.ArgumentParser:
     policy_bench.add_argument("--raw-base-url", default="", help="Optional base URL override for the raw lane.")
     policy_bench.add_argument("--memla-provider", default="", help="Optional provider override for the Memla lane.")
     policy_bench.add_argument("--memla-base-url", default="", help="Optional base URL override for the Memla lane.")
+    policy_bench.add_argument("--memla-policy-bank-path", default="", help="Optional explicit policy bank JSON path for the Memla lane.")
+    policy_bench.add_argument("--disable-memla-policy-bank", action="store_true", help="Disable policy self-transmutation priors for the Memla lane.")
     policy_bench.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
     policy_bench.set_defaults(func=_handle_policy_authz_benchmark)
+
+    policy_extract = policy_sub.add_parser("extract-authz", help="Extract normalized teacher-vs-Memla rows from policy authz benchmark reports.")
+    policy_extract.add_argument(
+        "--report",
+        action="append",
+        required=True,
+        help="Path to a policy_authz_benchmark_report.json file. Repeat for multiple reports.",
+    )
+    policy_extract.add_argument(
+        "--min-delta",
+        type=float,
+        default=None,
+        help="Optional minimum Memla-minus-raw utility delta required to keep a row.",
+    )
+    policy_extract.add_argument("--out-dir", default="", help="Directory for extracted policy trace-bank artifacts. Defaults to ./memla_reports/<timestamp>.")
+    policy_extract.add_argument("--json", action="store_true", help="Print the extraction summary as JSON.")
+    policy_extract.set_defaults(func=_handle_extract_policy_authz)
+
+    policy_distill = policy_sub.add_parser("distill-authz", help="Distill a policy self-transmutation bank from extracted policy traces.")
+    policy_distill.add_argument("--trace-bank", required=True, help="Path to a policy trace-bank summary JSON or JSONL file.")
+    policy_distill.add_argument("--repo-root", default=".", help="Repository root where the policy bank should live. Defaults to the current directory.")
+    policy_distill.add_argument("--out", default="", help="Optional explicit output JSON path. Defaults to <repo>/.memla/policy_authz_policy_bank.json.")
+    policy_distill.add_argument(
+        "--min-priority",
+        default="medium",
+        choices=["low", "medium", "high"],
+        help="Minimum teaching priority a row must have to influence the distilled policy bank.",
+    )
+    policy_distill.add_argument("--json", action="store_true", help="Print the distillation summary as JSON.")
+    policy_distill.set_defaults(func=_handle_distill_policy_authz)
 
     pack_parser = subparsers.add_parser("pack", help="Build Memla proof and buyer packs.")
     pack_sub = pack_parser.add_subparsers(dest="pack_command")

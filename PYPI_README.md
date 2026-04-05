@@ -57,6 +57,8 @@ memla finance benchmark-pretrade --cases cases/finance_pretrade_eval_cases.jsonl
 memla finance benchmark-pretrade --cases cases/finance_pretrade_public_eval_cases.jsonl --raw-model qwen3.5:9b --memla-model qwen3.5:9b --raw-provider ollama --raw-base-url http://127.0.0.1:11435 --memla-provider ollama --memla-base-url http://127.0.0.1:11435
 memla healthcare benchmark-denials --cases cases/healthcare_denial_eval_cases.jsonl --raw-model qwen3.5:9b --memla-model qwen3.5:9b --raw-provider ollama --raw-base-url http://127.0.0.1:11435 --memla-provider ollama --memla-base-url http://127.0.0.1:11435
 memla policy benchmark-authz --cases cases/policy_authz_eval_cases.jsonl --raw-model qwen3.5:9b --memla-model qwen3.5:9b --raw-provider ollama --raw-base-url http://127.0.0.1:11435 --memla-provider ollama --memla-base-url http://127.0.0.1:11435
+memla policy extract-authz --report memla_reports/policy_deepseek_change_window_vs_9bmemla/policy_authz_benchmark_report.json
+memla policy distill-authz --trace-bank memla_reports/policy_trace_bank_deepseek_change_window/policy_trace_bank_summary.json --repo-root .
 memla finance extract-pretrade --report memla_reports/finance_pretrade_benchmark_20260404_161024/finance_pretrade_benchmark_report.json
 memla finance distill-pretrade --trace-bank memla_reports/finance_pretrade_extract/finance_trace_bank_summary.json --repo-root .
 memla coding extract-c2a --report memla_reports/coding_c2a_9braw_vs_9bmemla/coding_c2a_benchmark_report.json --report memla_reports/coding_c2a_405braw_vs_9bmemla/coding_c2a_benchmark_report.json

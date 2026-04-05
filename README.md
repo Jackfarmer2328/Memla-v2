@@ -156,6 +156,13 @@ Run the policy-as-code authz replay benchmark:
 memla policy benchmark-authz --cases cases\\policy_authz_eval_cases.jsonl --raw-model qwen3.5:9b --memla-model qwen3.5:9b --raw-provider ollama --raw-base-url http://127.0.0.1:11435 --memla-provider ollama --memla-base-url http://127.0.0.1:11435
 ```
 
+Extract a policy teacher trace bank and distill it into the live primitive-aware policy bank:
+
+```bash
+memla policy extract-authz --report memla_reports\\policy_deepseek_change_window_vs_9bmemla\\policy_authz_benchmark_report.json
+memla policy distill-authz --trace-bank memla_reports\\policy_trace_bank_deepseek_change_window\\policy_trace_bank_summary.json --repo-root .
+```
+
 Public provenance for the bundled policy pack:
 - `cases/policy_authz_public_sources.md`
 
