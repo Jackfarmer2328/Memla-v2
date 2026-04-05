@@ -31,6 +31,14 @@ def test_terminal_heuristic_plan_maps_downloads_folder():
     assert plan.actions[0].resolved_target.endswith("Downloads")
 
 
+def test_terminal_heuristic_plan_builds_search_urls():
+    plan = build_terminal_plan(prompt="open youtube and search lo fi hip hop", heuristic_only=True)
+
+    assert plan.source == "heuristic"
+    assert [action.kind for action in plan.actions] == ["open_url"]
+    assert plan.actions[0].resolved_target == "https://www.youtube.com/results?search_query=lo+fi+hip+hop"
+
+
 def test_terminal_execute_plan_launches_linux_apps(monkeypatch):
     launched: list[list[str]] = []
 
@@ -287,6 +295,9 @@ def test_terminal_benchmark_pack_loads_expected_cases():
         "open_chrome_and_spotify",
         "open_downloads",
         "open_github",
+        "search_youtube_lofi",
+        "search_github_llamacpp",
+        "search_reddit_local_llm",
         "list_documents",
         "check_disk_usage",
         "show_battery",

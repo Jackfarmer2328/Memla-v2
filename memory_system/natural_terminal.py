@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from typing import Any
+from urllib.parse import quote_plus
 
 from .ollama_client import ChatMessage, UniversalLLMClient
 
@@ -160,6 +161,22 @@ PATH_ALIASES = {
 }
 
 
+SEARCH_ENGINE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(r"\bsearch\s+(?P<engine>google|web|youtube|github|reddit|amazon)\s+for\s+(?P<query>.+)$", flags=re.IGNORECASE),
+        "engine_first",
+    ),
+    (
+        re.compile(r"\b(?:search|find)\s+(?P<query>.+?)\s+on\s+(?P<engine>google|web|youtube|github|reddit|amazon)\b", flags=re.IGNORECASE),
+        "query_first",
+    ),
+    (
+        re.compile(r"\bopen\s+(?P<engine>youtube|github|google|reddit|amazon)\s+and\s+search\s+(?P<query>.+)$", flags=re.IGNORECASE),
+        "engine_first",
+    ),
+)
+
+
 def terminal_model_default() -> str:
     return os.environ.get("MEMLA_TERMINAL_MODEL") or os.environ.get("OLLAMA_MODEL") or "phi3:mini"
 
@@ -209,6 +226,40 @@ def _contains_risky_intent(prompt: str) -> bool:
     return any(token in lower for token in RISKY_TOKENS)
 
 
+def _search_url(engine: str, query: str) -> str:
+    clean_engine = _normalize_label(engine)
+    clean_query = " ".join(str(query or "").strip().split())
+    if not clean_query:
+        return ""
+    encoded = quote_plus(clean_query)
+    if clean_engine in {"google", "web"}:
+        return f"https://www.google.com/search?q={encoded}"
+    if clean_engine == "youtube":
+        return f"https://www.youtube.com/results?search_query={encoded}"
+    if clean_engine == "github":
+        return f"https://github.com/search?q={encoded}&type=repositories"
+    if clean_engine == "reddit":
+        return f"https://www.reddit.com/search/?q={encoded}"
+    if clean_engine == "amazon":
+        return f"https://www.amazon.com/s?k={encoded}"
+    return ""
+
+
+def _search_hits(prompt: str) -> list[str]:
+    hits: list[str] = []
+    seen: set[str] = set()
+    for pattern, _ordering in SEARCH_ENGINE_PATTERNS:
+        for match in pattern.finditer(prompt):
+            engine = str(match.groupdict().get("engine") or "").strip()
+            query = str(match.groupdict().get("query") or "").strip().rstrip(".!?")
+            url = _search_url(engine, query)
+            if not url or url.lower() in seen:
+                continue
+            seen.add(url.lower())
+            hits.append(url)
+    return hits
+
+
 def _heuristic_plan(prompt: str) -> TerminalPlan | None:
     if _contains_risky_intent(prompt):
         return TerminalPlan(
@@ -221,10 +272,13 @@ def _heuristic_plan(prompt: str) -> TerminalPlan | None:
     path_alias_map = {key: (key,) for key in PATH_ALIASES}
     app_hits = _alias_hits(prompt, app_alias_map)
     path_hits = _alias_hits(prompt, path_alias_map)
+    search_hits = _search_hits(prompt)
     url_hits = _url_hits(prompt)
     normalized = _normalize_label(prompt)
 
     actions: list[TerminalAction] = []
+    if search_hits:
+        actions.extend(TerminalAction(kind="open_url", target=url, resolved_target=url) for url in search_hits)
     if url_hits:
         actions.extend(TerminalAction(kind="open_url", target=url, resolved_target=url) for url in url_hits)
     if app_hits:
