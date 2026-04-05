@@ -5,13 +5,16 @@ from pathlib import Path
 
 from memory_system.cli import main
 from memory_system.natural_terminal import (
+    BrowserSessionState,
     TerminalExecutionRecord,
     TerminalExecutionResult,
     TerminalPlan,
     TerminalAction,
+    build_raw_terminal_plan,
     build_terminal_plan,
     execute_terminal_plan,
     load_terminal_benchmark_cases,
+    save_browser_session_state,
     run_terminal_benchmark,
 )
 
@@ -39,6 +42,56 @@ def test_terminal_heuristic_plan_builds_search_urls():
     assert plan.actions[0].resolved_target == "https://www.youtube.com/results?search_query=lo+fi+hip+hop"
 
 
+def test_terminal_heuristic_plan_uses_browser_state_for_follow_up():
+    browser_state = BrowserSessionState(
+        current_url="https://www.youtube.com/results?search_query=lo+fi+hip+hop",
+        page_kind="search_results",
+        search_engine="youtube",
+        search_query="lo fi hip hop",
+    )
+
+    plan = build_terminal_plan(
+        prompt="now press on the video so i can listen",
+        heuristic_only=True,
+        browser_state=browser_state,
+    )
+
+    assert plan.source == "heuristic"
+    assert [action.kind for action in plan.actions] == ["open_search_result"]
+    assert plan.actions[0].resolved_target == "1"
+
+
+def test_raw_terminal_plan_receives_browser_context():
+    captured_messages = {}
+
+    class DummyClient:
+        def chat(self, *, model, messages, temperature):
+            captured_messages["messages"] = messages
+            return json.dumps({"actions": [{"kind": "open_search_result", "target": "1"}]})
+
+    browser_state = BrowserSessionState(
+        current_url="https://www.youtube.com/results?search_query=lo+fi+hip+hop",
+        page_kind="search_results",
+        search_engine="youtube",
+        search_query="lo fi hip hop",
+        result_urls=["https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
+    )
+
+    plan = build_raw_terminal_plan(
+        prompt="click the first video",
+        model="phi3:mini",
+        client=DummyClient(),
+        browser_state=browser_state,
+    )
+
+    assert plan.source == "raw_model"
+    assert plan.actions[0].kind == "open_search_result"
+    system_message = captured_messages["messages"][0].content
+    assert "Current browser URL" in system_message
+    assert "youtube" in system_message
+    assert "Cached browser results: 1" in system_message
+
+
 def test_terminal_execute_plan_launches_linux_apps(monkeypatch):
     launched: list[list[str]] = []
 
@@ -64,6 +117,42 @@ def test_terminal_execute_plan_launches_linux_apps(monkeypatch):
         ["/usr/bin/google-chrome-stable"],
         ["/usr/bin/spotify"],
     ]
+
+
+def test_terminal_execute_plan_opens_first_search_result(monkeypatch, tmp_path):
+    launched: list[list[str]] = []
+
+    class DummyProcess:
+        def __init__(self, command, **kwargs):
+            launched.append(list(command))
+
+    state_path = tmp_path / "browser_state.json"
+    save_browser_session_state(
+        BrowserSessionState(
+            current_url="https://www.youtube.com/results?search_query=lo+fi+hip+hop",
+            page_kind="search_results",
+            search_engine="youtube",
+            search_query="lo fi hip hop",
+        ),
+        state_path,
+    )
+    monkeypatch.setattr("memory_system.natural_terminal.subprocess.Popen", DummyProcess)
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._fetch_search_result_urls",
+        lambda engine, query, limit=5: ["https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
+    )
+
+    plan = TerminalPlan(
+        prompt="click the first video",
+        source="heuristic",
+        actions=[TerminalAction(kind="open_search_result", target="1", resolved_target="1")],
+    )
+    result = execute_terminal_plan(plan, platform_name="linux", state_path=state_path)
+
+    assert result.ok is True
+    assert launched == [["xdg-open", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"]]
+    assert result.browser_state["page_kind"] == "video_page"
+    assert result.browser_state["current_url"] == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
 
 def test_memla_terminal_plan_json_outputs_structured_plan(monkeypatch, capsys):
@@ -126,7 +215,7 @@ def test_memla_terminal_run_json_outputs_execution(monkeypatch, capsys):
     monkeypatch.setattr("memory_system.cli.time.perf_counter", lambda: next(timeline))
     monkeypatch.setattr(
         "memory_system.cli.execute_terminal_plan",
-        lambda current_plan: TerminalExecutionResult(
+        lambda current_plan, **kwargs: TerminalExecutionResult(
             prompt=current_plan.prompt,
             plan_source=current_plan.source,
             ok=True,
@@ -176,7 +265,7 @@ def test_memla_terminal_run_without_memla_executes_raw_plan(monkeypatch, capsys)
     )
     monkeypatch.setattr(
         "memory_system.cli.execute_terminal_plan",
-        lambda current_plan: TerminalExecutionResult(
+        lambda current_plan, **kwargs: TerminalExecutionResult(
             prompt=current_plan.prompt,
             plan_source=current_plan.source,
             ok=True,

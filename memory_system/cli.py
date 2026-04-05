@@ -72,6 +72,7 @@ from .natural_terminal import (
     build_raw_terminal_plan,
     build_terminal_plan,
     execute_terminal_plan,
+    load_browser_session_state,
     render_terminal_benchmark_markdown,
     render_terminal_execution_text,
     render_terminal_plan_text,
@@ -155,7 +156,7 @@ def _format_terminal_duration(seconds: float) -> str:
     return f"{max(float(seconds), 0.0):.3f}s"
 
 
-def _build_terminal_request_plan(args: argparse.Namespace, prompt: str):
+def _build_terminal_request_plan(args: argparse.Namespace, prompt: str, browser_state=None):
     if getattr(args, "without_memla", False):
         if getattr(args, "heuristic_only", False):
             raise SystemExit("--without-memla cannot be combined with --heuristic-only")
@@ -165,6 +166,7 @@ def _build_terminal_request_plan(args: argparse.Namespace, prompt: str):
             model=args.model,
             client=client,
             temperature=args.temperature,
+            browser_state=browser_state,
         )
     client = None if args.heuristic_only else build_terminal_llm_client(provider=args.provider or None, base_url=args.base_url or None)
     return build_terminal_plan(
@@ -173,6 +175,7 @@ def _build_terminal_request_plan(args: argparse.Namespace, prompt: str):
         client=client,
         heuristic_only=args.heuristic_only,
         temperature=args.temperature,
+        browser_state=browser_state,
     )
 
 
@@ -832,8 +835,9 @@ def _handle_distill_policy_authz(args: argparse.Namespace) -> int:
 
 def _handle_terminal_plan(args: argparse.Namespace) -> int:
     prompt = _resolve_terminal_prompt(args)
+    browser_state = load_browser_session_state()
     started = time.perf_counter()
-    plan = _build_terminal_request_plan(args, prompt)
+    plan = _build_terminal_request_plan(args, prompt, browser_state=browser_state)
     planning_seconds = round(time.perf_counter() - started, 4)
     if args.json:
         payload = terminal_plan_to_dict(plan)
@@ -847,8 +851,9 @@ def _handle_terminal_plan(args: argparse.Namespace) -> int:
 
 def _handle_terminal_run(args: argparse.Namespace) -> int:
     prompt = _resolve_terminal_prompt(args)
+    browser_state = load_browser_session_state()
     plan_started = time.perf_counter()
-    plan = _build_terminal_request_plan(args, prompt)
+    plan = _build_terminal_request_plan(args, prompt, browser_state=browser_state)
     planning_seconds = round(time.perf_counter() - plan_started, 4)
     if not plan.actions:
         if args.json:
@@ -860,7 +865,7 @@ def _handle_terminal_run(args: argparse.Namespace) -> int:
             print(f"Planning time: {_format_terminal_duration(planning_seconds)}")
         return 1
     run_started = time.perf_counter()
-    result = execute_terminal_plan(plan)
+    result = execute_terminal_plan(plan, browser_state=browser_state)
     execution_seconds = round(time.perf_counter() - run_started, 4)
     total_seconds = round(planning_seconds + execution_seconds, 4)
     if args.json:
@@ -883,12 +888,14 @@ def _handle_terminal_compare(args: argparse.Namespace) -> int:
     memla_model = _resolve_shared_terminal_model(args, "memla_model")
     raw_client = build_terminal_llm_client(provider=args.raw_provider or None, base_url=args.raw_base_url or None)
     memla_client = build_terminal_llm_client(provider=args.memla_provider or None, base_url=args.memla_base_url or None)
+    browser_state = load_browser_session_state()
     raw_started = time.perf_counter()
     raw_plan = build_raw_terminal_plan(
         prompt=prompt,
         model=raw_model,
         client=raw_client,
         temperature=args.temperature,
+        browser_state=browser_state,
     )
     raw_seconds = round(time.perf_counter() - raw_started, 4)
     memla_started = time.perf_counter()
@@ -898,6 +905,7 @@ def _handle_terminal_compare(args: argparse.Namespace) -> int:
         client=memla_client,
         heuristic_only=args.heuristic_only,
         temperature=args.temperature,
+        browser_state=browser_state,
     )
     memla_seconds = round(time.perf_counter() - memla_started, 4)
     speedup = round(raw_seconds / memla_seconds, 4) if memla_seconds > 0 else None
