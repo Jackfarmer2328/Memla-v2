@@ -72,8 +72,10 @@ from .natural_terminal import (
     build_raw_terminal_plan,
     build_terminal_plan,
     execute_terminal_plan,
+    render_terminal_benchmark_markdown,
     render_terminal_execution_text,
     render_terminal_plan_text,
+    run_terminal_benchmark,
     terminal_execution_to_dict,
     terminal_model_default,
     terminal_plan_to_dict,
@@ -86,6 +88,10 @@ def _coding_model_default() -> str:
 
 def _terminal_model_default() -> str:
     return terminal_model_default()
+
+
+def _terminal_cases_default() -> str:
+    return "cases/terminal_eval_cases.jsonl"
 
 
 def _user_id_default() -> str:
@@ -137,6 +143,12 @@ def _resolve_terminal_prompt(args: argparse.Namespace) -> str:
     if prompt_parts:
         return " ".join(prompt_parts).strip()
     raise SystemExit("terminal prompt is required: pass --prompt \"...\" or plain text after the subcommand")
+
+
+def _resolve_shared_terminal_model(args: argparse.Namespace, lane_name: str) -> str:
+    shared_model = str(getattr(args, "model", "") or "").strip()
+    lane_value = str(getattr(args, lane_name, "") or "").strip()
+    return lane_value or shared_model or _terminal_model_default()
 
 
 _PUBLIC_SITE_VERCEL_CONFIG = {
@@ -836,17 +848,19 @@ def _handle_terminal_run(args: argparse.Namespace) -> int:
 
 def _handle_terminal_compare(args: argparse.Namespace) -> int:
     prompt = _resolve_terminal_prompt(args)
+    raw_model = _resolve_shared_terminal_model(args, "raw_model")
+    memla_model = _resolve_shared_terminal_model(args, "memla_model")
     raw_client = build_terminal_llm_client(provider=args.raw_provider or None, base_url=args.raw_base_url or None)
     memla_client = build_terminal_llm_client(provider=args.memla_provider or None, base_url=args.memla_base_url or None)
     raw_plan = build_raw_terminal_plan(
         prompt=prompt,
-        model=args.raw_model,
+        model=raw_model,
         client=raw_client,
         temperature=args.temperature,
     )
     memla_plan = build_terminal_plan(
         prompt=prompt,
-        model=args.memla_model,
+        model=memla_model,
         client=memla_client,
         heuristic_only=args.heuristic_only,
         temperature=args.temperature,
@@ -864,6 +878,43 @@ def _handle_terminal_compare(args: argparse.Namespace) -> int:
         print("")
         print("=== MEMLA ===")
         print(render_terminal_plan_text(memla_plan))
+    return 0
+
+
+def _handle_terminal_benchmark(args: argparse.Namespace) -> int:
+    raw_model = _resolve_shared_terminal_model(args, "raw_model")
+    memla_model = _resolve_shared_terminal_model(args, "memla_model")
+    report = run_terminal_benchmark(
+        cases_path=args.cases,
+        raw_model=raw_model,
+        memla_model=memla_model,
+        raw_provider=args.raw_provider,
+        raw_base_url=args.raw_base_url,
+        memla_provider=args.memla_provider,
+        memla_base_url=args.memla_base_url,
+        temperature=args.temperature,
+        case_ids=args.case_id,
+        limit=args.limit,
+        heuristic_only=args.heuristic_only,
+    )
+    markdown = render_terminal_benchmark_markdown(report)
+    out_dir = Path(args.out_dir).resolve() if args.out_dir else _default_report_dir("terminal_benchmark")
+    json_path, md_path = _write_report_bundle(
+        out_dir=out_dir,
+        stem="terminal_benchmark_report",
+        report=report,
+        markdown=markdown,
+    )
+    print(f"Wrote terminal benchmark JSON: {json_path}")
+    print(f"Wrote terminal benchmark Markdown: {md_path}")
+    speedup = report.get("memla_vs_raw_speedup")
+    speedup_text = f"{speedup}x" if speedup else "n/a"
+    print(
+        "Summary: "
+        f"raw latency {report.get('avg_raw_latency_ms', 0.0)} ms | "
+        f"memla latency {report.get('avg_memla_latency_ms', 0.0)} ms | "
+        f"speedup {speedup_text}"
+    )
     return 0
 
 
@@ -1289,8 +1340,9 @@ def _build_parser() -> argparse.ArgumentParser:
     terminal_compare = terminal_sub.add_parser("compare", help="Compare a raw small-model terminal plan against Memla on the same prompt.")
     terminal_compare.add_argument("--prompt", "-p", default="", help="Natural-language terminal request.")
     terminal_compare.add_argument("prompt_text", nargs="*", help="Prompt words if you want to skip --prompt.")
-    terminal_compare.add_argument("--raw-model", default=_terminal_model_default(), help="Raw baseline model.")
-    terminal_compare.add_argument("--memla-model", default=_terminal_model_default(), help="Memla model.")
+    terminal_compare.add_argument("--model", default="", help="Shared model for both lanes.")
+    terminal_compare.add_argument("--raw-model", default="", help="Raw baseline model. Defaults to --model or the small terminal default.")
+    terminal_compare.add_argument("--memla-model", default="", help="Memla model. Defaults to --model or the small terminal default.")
     terminal_compare.add_argument("--raw-provider", default="ollama", help="Provider override for the raw lane.")
     terminal_compare.add_argument("--raw-base-url", default="", help="Optional base URL override for the raw lane.")
     terminal_compare.add_argument("--memla-provider", default="ollama", help="Provider override for the Memla lane.")
@@ -1299,6 +1351,22 @@ def _build_parser() -> argparse.ArgumentParser:
     terminal_compare.add_argument("--heuristic-only", action="store_true", help="Keep the Memla lane heuristic-first. Raw still uses the model directly.")
     terminal_compare.add_argument("--json", action="store_true", help="Emit structured JSON instead of readable text.")
     terminal_compare.set_defaults(func=_handle_terminal_compare)
+
+    terminal_bench = terminal_sub.add_parser("benchmark", help="Benchmark raw terminal planning latency versus Memla on a bundled prompt pack.")
+    terminal_bench.add_argument("--cases", default=_terminal_cases_default(), help="Terminal benchmark case JSONL path.")
+    terminal_bench.add_argument("--case-id", action="append", default=[], help="Optional case id filter. Repeat to benchmark only specific prompts.")
+    terminal_bench.add_argument("--limit", type=int, default=None, help="Optional max number of benchmark prompts to run after filtering.")
+    terminal_bench.add_argument("--model", default="", help="Shared model for both lanes.")
+    terminal_bench.add_argument("--raw-model", default="", help="Raw baseline model. Defaults to --model or the small terminal default.")
+    terminal_bench.add_argument("--memla-model", default="", help="Memla model. Defaults to --model or the small terminal default.")
+    terminal_bench.add_argument("--raw-provider", default="ollama", help="Provider override for the raw lane.")
+    terminal_bench.add_argument("--raw-base-url", default="", help="Optional base URL override for the raw lane.")
+    terminal_bench.add_argument("--memla-provider", default="ollama", help="Provider override for the Memla lane.")
+    terminal_bench.add_argument("--memla-base-url", default="", help="Optional base URL override for the Memla lane.")
+    terminal_bench.add_argument("--temperature", type=float, default=0.1)
+    terminal_bench.add_argument("--heuristic-only", action="store_true", help="Force the Memla lane to stay heuristic-only.")
+    terminal_bench.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
+    terminal_bench.set_defaults(func=_handle_terminal_benchmark)
 
     pack_parser = subparsers.add_parser("pack", help="Build Memla proof and buyer packs.")
     pack_sub = pack_parser.add_subparsers(dest="pack_command")

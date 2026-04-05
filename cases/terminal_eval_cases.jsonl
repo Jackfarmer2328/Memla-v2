@@ -1,0 +1,8 @@
+{"case_id":"open_chrome","prompt":"open chrome","expected_actions":["launch_app:chrome"]}
+{"case_id":"open_chrome_and_spotify","prompt":"open chrome and spotify","expected_actions":["launch_app:chrome","launch_app:spotify"]}
+{"case_id":"open_downloads","prompt":"open downloads folder","expected_actions":["open_path:downloads"]}
+{"case_id":"open_github","prompt":"open github.com","expected_actions":["open_url:https://github.com"]}
+{"case_id":"list_documents","prompt":"list documents","expected_actions":["list_directory:documents"]}
+{"case_id":"check_disk_usage","prompt":"check disk usage","expected_actions":["system_info:disk"]}
+{"case_id":"show_battery","prompt":"show battery status","expected_actions":["system_info:battery"]}
+{"case_id":"open_vscode","prompt":"open vscode","expected_actions":["launch_app:vscode"]}

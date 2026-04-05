@@ -169,6 +169,7 @@ Public provenance for the bundled policy pack:
 Run the bounded natural-language terminal assistant on a weak local machine:
 
 ```bash
+memla terminal benchmark --model phi3
 memla terminal compare "open chrome and spotify"
 memla terminal plan "open chrome and spotify" --heuristic-only
 memla terminal run "open chrome and spotify" --heuristic-only

@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from typing import Any
 
 from .ollama_client import ChatMessage, UniversalLLMClient
@@ -81,6 +82,13 @@ class TerminalExecutionResult:
     ok: bool
     records: list[TerminalExecutionRecord] = field(default_factory=list)
     residual_constraints: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class TerminalBenchmarkCase:
+    case_id: str
+    prompt: str
+    expected_actions: list[str] = field(default_factory=list)
 
 
 APP_SPECS: dict[str, dict[str, Any]] = {
@@ -374,6 +382,68 @@ def _normalize_url(raw: str) -> str:
     return ""
 
 
+def _canonical_expected_action(value: str) -> str:
+    text = str(value or "").strip()
+    if not text or ":" not in text:
+        return _normalize_label(text)
+    kind, target = text.split(":", 1)
+    normalized_kind = str(kind or "").strip().lower().replace(" ", "_")
+    normalized_target = str(target or "").strip()
+    if normalized_kind == "open_url":
+        normalized_target = _normalize_url(normalized_target)
+    else:
+        normalized_target = _normalize_label(normalized_target)
+    return f"{normalized_kind}:{normalized_target}"
+
+
+def _action_signature(action: TerminalAction) -> str:
+    kind = str(action.kind or "").strip().lower().replace(" ", "_")
+    if kind in {"open_path", "list_directory"}:
+        alias_key = _normalize_label(action.target)
+        if alias_key in PATH_ALIASES:
+            return f"{kind}:{alias_key}"
+        return f"{kind}:{_normalize_label(action.resolved_target or action.target)}"
+    if kind == "launch_app":
+        app_key = _resolve_app_key(action.resolved_target or action.target)
+        return f"{kind}:{app_key or _normalize_label(action.resolved_target or action.target)}"
+    if kind == "open_url":
+        return f"{kind}:{_normalize_url(action.resolved_target or action.target)}"
+    if kind == "system_info":
+        return f"{kind}:{_normalize_label(action.resolved_target or action.target)}"
+    return f"{kind}:{_normalize_label(action.resolved_target or action.target)}"
+
+
+def _action_recall(plan: TerminalPlan, expected_actions: list[str]) -> float:
+    expected = [_canonical_expected_action(item) for item in expected_actions if str(item or "").strip()]
+    if not expected:
+        return 1.0 if not plan.actions else 0.0
+    predicted = {_action_signature(action) for action in plan.actions}
+    hits = sum(1 for item in expected if item in predicted)
+    return round(hits / len(expected), 4)
+
+
+def _terminal_utility(plan: TerminalPlan, expected_actions: list[str]) -> float:
+    recall = _action_recall(plan, expected_actions)
+    support = 1.0 if plan.actions else 0.0
+    return round((0.3 * support) + (0.7 * recall), 4)
+
+
+def load_terminal_benchmark_cases(path: str) -> list[TerminalBenchmarkCase]:
+    cases: list[TerminalBenchmarkCase] = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        clean = line.strip()
+        if not clean:
+            continue
+        payload = json.loads(clean)
+        case_id = str(payload.get("case_id") or "").strip()
+        prompt = str(payload.get("prompt") or "").strip()
+        if not case_id or not prompt:
+            continue
+        expected_actions = [str(item).strip() for item in list(payload.get("expected_actions") or []) if str(item).strip()]
+        cases.append(TerminalBenchmarkCase(case_id=case_id, prompt=prompt, expected_actions=expected_actions))
+    return cases
+
+
 def build_terminal_plan(
     *,
     prompt: str,
@@ -624,6 +694,185 @@ def execute_terminal_plan(plan: TerminalPlan, *, platform_name: str | None = Non
     )
 
 
+def run_terminal_benchmark(
+    *,
+    cases_path: str,
+    raw_model: str,
+    memla_model: str,
+    raw_provider: str = "",
+    raw_base_url: str = "",
+    memla_provider: str = "",
+    memla_base_url: str = "",
+    temperature: float = 0.1,
+    case_ids: list[str] | None = None,
+    limit: int | None = None,
+    heuristic_only: bool = False,
+) -> dict[str, Any]:
+    cases = load_terminal_benchmark_cases(cases_path)
+    selected_ids = {str(item).strip() for item in list(case_ids or []) if str(item).strip()}
+    if selected_ids:
+        cases = [case for case in cases if case.case_id in selected_ids]
+    if limit is not None:
+        cases = cases[: max(int(limit), 0)]
+
+    raw_client = build_llm_client(provider=raw_provider or None, base_url=raw_base_url or None)
+    memla_client = build_llm_client(provider=memla_provider or None, base_url=memla_base_url or None)
+
+    rows: list[dict[str, Any]] = []
+    failed_cases: list[dict[str, Any]] = []
+    raw_model_calls = 0
+    memla_model_calls = 0
+    memla_heuristic_hits = 0
+
+    for case in cases:
+        try:
+            raw_start = time.perf_counter()
+            raw_plan = build_raw_terminal_plan(
+                prompt=case.prompt,
+                model=raw_model,
+                client=raw_client,
+                temperature=temperature,
+            )
+            raw_latency_ms = round((time.perf_counter() - raw_start) * 1000.0, 2)
+
+            memla_start = time.perf_counter()
+            memla_plan = build_terminal_plan(
+                prompt=case.prompt,
+                model=memla_model,
+                client=memla_client,
+                heuristic_only=heuristic_only,
+                temperature=temperature,
+            )
+            memla_latency_ms = round((time.perf_counter() - memla_start) * 1000.0, 2)
+        except Exception as exc:
+            failed_cases.append({"case_id": case.case_id, "error_type": type(exc).__name__, "message": str(exc)})
+            continue
+
+        if raw_plan.source == "raw_model":
+            raw_model_calls += 1
+        if memla_plan.source == "model":
+            memla_model_calls += 1
+        if memla_plan.source == "heuristic":
+            memla_heuristic_hits += 1
+
+        raw_recall = _action_recall(raw_plan, case.expected_actions)
+        memla_recall = _action_recall(memla_plan, case.expected_actions)
+        raw_utility = _terminal_utility(raw_plan, case.expected_actions)
+        memla_utility = _terminal_utility(memla_plan, case.expected_actions)
+
+        rows.append(
+            {
+                "case_id": case.case_id,
+                "prompt": case.prompt,
+                "expected_actions": list(case.expected_actions),
+                "raw_source": raw_plan.source,
+                "raw_latency_ms": raw_latency_ms,
+                "raw_actions": [_action_signature(action) for action in raw_plan.actions],
+                "raw_action_recall": raw_recall,
+                "raw_supported": bool(raw_plan.actions),
+                "raw_terminal_utility": raw_utility,
+                "raw_residual_constraints": list(raw_plan.residual_constraints),
+                "memla_source": memla_plan.source,
+                "memla_latency_ms": memla_latency_ms,
+                "memla_actions": [_action_signature(action) for action in memla_plan.actions],
+                "memla_action_recall": memla_recall,
+                "memla_supported": bool(memla_plan.actions),
+                "memla_terminal_utility": memla_utility,
+                "memla_residual_constraints": list(memla_plan.residual_constraints),
+                "latency_delta_ms": round(raw_latency_ms - memla_latency_ms, 2),
+            }
+        )
+
+    count = len(rows) or 1
+    avg_raw_latency_ms = round(sum(float(row["raw_latency_ms"]) for row in rows) / count, 2)
+    avg_memla_latency_ms = round(sum(float(row["memla_latency_ms"]) for row in rows) / count, 2)
+    avg_raw_recall = round(sum(float(row["raw_action_recall"]) for row in rows) / count, 4)
+    avg_memla_recall = round(sum(float(row["memla_action_recall"]) for row in rows) / count, 4)
+    avg_raw_utility = round(sum(float(row["raw_terminal_utility"]) for row in rows) / count, 4)
+    avg_memla_utility = round(sum(float(row["memla_terminal_utility"]) for row in rows) / count, 4)
+    raw_support_rate = round(sum(1.0 for row in rows if row["raw_supported"]) / count, 4)
+    memla_support_rate = round(sum(1.0 for row in rows if row["memla_supported"]) / count, 4)
+    speedup = round(avg_raw_latency_ms / avg_memla_latency_ms, 4) if avg_memla_latency_ms > 0 else None
+
+    return {
+        "generated_ts": int(time.time()),
+        "cases_path": str(Path(cases_path).resolve()),
+        "case_ids": [case.case_id for case in cases],
+        "limit": limit,
+        "raw_model": raw_model,
+        "memla_model": memla_model,
+        "raw_provider": raw_client.provider,
+        "memla_provider": memla_client.provider,
+        "cases": len(rows),
+        "cases_requested": len(cases),
+        "failed_case_count": len(failed_cases),
+        "avg_raw_latency_ms": avg_raw_latency_ms,
+        "avg_memla_latency_ms": avg_memla_latency_ms,
+        "memla_vs_raw_speedup": speedup,
+        "avg_raw_action_recall": avg_raw_recall,
+        "avg_memla_action_recall": avg_memla_recall,
+        "avg_raw_terminal_utility": avg_raw_utility,
+        "avg_memla_terminal_utility": avg_memla_utility,
+        "raw_support_rate": raw_support_rate,
+        "memla_support_rate": memla_support_rate,
+        "raw_model_call_count": raw_model_calls,
+        "memla_model_call_count": memla_model_calls,
+        "memla_heuristic_hit_count": memla_heuristic_hits,
+        "rows": rows,
+        "failed_cases": failed_cases,
+    }
+
+
+def render_terminal_benchmark_markdown(report: dict[str, Any]) -> str:
+    lines = [
+        "# Terminal Benchmark",
+        "",
+        f"- Raw provider: `{report.get('raw_provider', '')}`",
+        f"- Memla provider: `{report.get('memla_provider', '')}`",
+        f"- Raw model: `{report.get('raw_model', '')}`",
+        f"- Memla model: `{report.get('memla_model', '')}`",
+        f"- Cases completed: `{report.get('cases', 0)}` / `{report.get('cases_requested', 0)}`",
+        "",
+        "## Lane summary",
+        "",
+        "| Metric | Raw | Memla |",
+        "| --- | --- | --- |",
+        f"| Avg latency (ms) | `{report.get('avg_raw_latency_ms', 0.0)}` | `{report.get('avg_memla_latency_ms', 0.0)}` |",
+        f"| Action recall | `{report.get('avg_raw_action_recall', 0.0)}` | `{report.get('avg_memla_action_recall', 0.0)}` |",
+        f"| Support rate | `{report.get('raw_support_rate', 0.0)}` | `{report.get('memla_support_rate', 0.0)}` |",
+        f"| Terminal utility | `{report.get('avg_raw_terminal_utility', 0.0)}` | `{report.get('avg_memla_terminal_utility', 0.0)}` |",
+        "",
+        f"- Raw model calls: `{report.get('raw_model_call_count', 0)}`",
+        f"- Memla model calls: `{report.get('memla_model_call_count', 0)}`",
+        f"- Memla heuristic hits: `{report.get('memla_heuristic_hit_count', 0)}`",
+    ]
+    speedup = report.get("memla_vs_raw_speedup")
+    if speedup:
+        lines.extend(["", f"- Raw-vs-Memla latency speedup: `{speedup}x`"])
+    if report.get("failed_cases"):
+        lines.extend(["", "## Failed cases", ""])
+        for failure in report["failed_cases"]:
+            lines.append(f"- `{failure.get('case_id', '')}` [{failure.get('error_type', '')}] {failure.get('message', '')}".rstrip())
+    lines.extend(["", "## Case rows", ""])
+    for row in report.get("rows", []):
+        lines.extend(
+            [
+                f"### {row.get('case_id', '')}",
+                "",
+                f"- Prompt: `{row.get('prompt', '')}`",
+                f"- Expected actions: `{', '.join(row.get('expected_actions', []))}`",
+                f"- Raw source/actions: `{row.get('raw_source', '')}` / `{', '.join(row.get('raw_actions', []))}`",
+                f"- Memla source/actions: `{row.get('memla_source', '')}` / `{', '.join(row.get('memla_actions', []))}`",
+                f"- Raw latency: `{row.get('raw_latency_ms', 0.0)} ms`",
+                f"- Memla latency: `{row.get('memla_latency_ms', 0.0)} ms`",
+                f"- Raw utility: `{row.get('raw_terminal_utility', 0.0)}`",
+                f"- Memla utility: `{row.get('memla_terminal_utility', 0.0)}`",
+                "",
+            ]
+        )
+    return "\n".join(lines).strip() + "\n"
+
+
 def render_terminal_plan_text(plan: TerminalPlan) -> str:
     lines = [f"Prompt: {plan.prompt}", f"Plan source: {plan.source}"]
     if plan.actions:
@@ -689,8 +938,11 @@ __all__ = [
     "build_raw_terminal_plan",
     "build_terminal_plan",
     "execute_terminal_plan",
+    "load_terminal_benchmark_cases",
+    "render_terminal_benchmark_markdown",
     "render_terminal_execution_text",
     "render_terminal_plan_text",
+    "run_terminal_benchmark",
     "terminal_execution_to_dict",
     "terminal_model_default",
     "terminal_plan_to_dict",

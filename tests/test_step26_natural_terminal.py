@@ -11,6 +11,8 @@ from memory_system.natural_terminal import (
     TerminalAction,
     build_terminal_plan,
     execute_terminal_plan,
+    load_terminal_benchmark_cases,
+    run_terminal_benchmark,
 )
 
 
@@ -183,3 +185,106 @@ def test_memla_terminal_compare_accepts_positional_prompt(monkeypatch, capsys):
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["prompt"] == "open chrome and spotify"
+
+
+def test_terminal_benchmark_pack_loads_expected_cases():
+    cases = load_terminal_benchmark_cases("cases/terminal_eval_cases.jsonl")
+
+    assert {case.case_id for case in cases} == {
+        "open_chrome",
+        "open_chrome_and_spotify",
+        "open_downloads",
+        "open_github",
+        "list_documents",
+        "check_disk_usage",
+        "show_battery",
+        "open_vscode",
+    }
+
+
+def test_terminal_benchmark_reports_latency_and_heuristic_hits(monkeypatch, tmp_path):
+    cases_path = tmp_path / "terminal_cases.jsonl"
+    cases_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"case_id": "a", "prompt": "open chrome", "expected_actions": ["launch_app:chrome"]}),
+                json.dumps({"case_id": "b", "prompt": "open downloads folder", "expected_actions": ["open_path:downloads"]}),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    class DummyClient:
+        provider = "ollama"
+
+    monkeypatch.setattr("memory_system.natural_terminal.build_llm_client", lambda **kwargs: DummyClient())
+    monkeypatch.setattr(
+        "memory_system.natural_terminal.build_raw_terminal_plan",
+        lambda **kwargs: TerminalPlan(
+            prompt=kwargs["prompt"],
+            source="raw_model",
+            actions=[TerminalAction(kind="launch_app", target="chrome", resolved_target="chrome")]
+            if "chrome" in kwargs["prompt"]
+            else [TerminalAction(kind="open_path", target="downloads", resolved_target="/tmp/Downloads")],
+        ),
+    )
+    monkeypatch.setattr(
+        "memory_system.natural_terminal.build_terminal_plan",
+        lambda **kwargs: TerminalPlan(
+            prompt=kwargs["prompt"],
+            source="heuristic",
+            actions=[TerminalAction(kind="launch_app", target="chrome", resolved_target="chrome")]
+            if "chrome" in kwargs["prompt"]
+            else [TerminalAction(kind="open_path", target="downloads", resolved_target="/tmp/Downloads")],
+        ),
+    )
+    timeline = iter([0.0, 1.0, 1.0, 1.1, 2.0, 2.8, 2.8, 2.9])
+    monkeypatch.setattr("memory_system.natural_terminal.time.perf_counter", lambda: next(timeline))
+
+    report = run_terminal_benchmark(
+        cases_path=str(cases_path),
+        raw_model="phi3",
+        memla_model="phi3",
+    )
+
+    assert report["cases"] == 2
+    assert report["avg_raw_latency_ms"] == 900.0
+    assert report["avg_memla_latency_ms"] == 100.0
+    assert report["memla_vs_raw_speedup"] == 9.0
+    assert report["memla_heuristic_hit_count"] == 2
+    assert report["avg_memla_terminal_utility"] == 1.0
+
+
+def test_memla_terminal_benchmark_writes_report_bundle(monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(
+        "memory_system.cli.run_terminal_benchmark",
+        lambda **kwargs: {
+            "avg_raw_latency_ms": 950.0,
+            "avg_memla_latency_ms": 25.0,
+            "memla_vs_raw_speedup": 38.0,
+            "rows": [],
+        },
+    )
+    monkeypatch.setattr(
+        "memory_system.cli.render_terminal_benchmark_markdown",
+        lambda report: "# Terminal Benchmark\n",
+    )
+
+    out_dir = tmp_path / "terminal_benchmark"
+    rc = main(
+        [
+            "terminal",
+            "benchmark",
+            "--model",
+            "phi3",
+            "--out-dir",
+            str(out_dir),
+        ]
+    )
+
+    assert rc == 0
+    assert (out_dir / "terminal_benchmark_report.json").exists()
+    assert (out_dir / "terminal_benchmark_report.md").exists()
+    out = capsys.readouterr().out
+    assert "Wrote terminal benchmark JSON" in out
+    assert "speedup 38.0x" in out
