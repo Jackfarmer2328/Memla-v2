@@ -129,6 +129,16 @@ def _default_report_dir(kind: str) -> Path:
     return out_dir
 
 
+def _resolve_terminal_prompt(args: argparse.Namespace) -> str:
+    direct = str(getattr(args, "prompt", "") or "").strip()
+    if direct:
+        return direct
+    prompt_parts = [str(part).strip() for part in list(getattr(args, "prompt_text", []) or []) if str(part).strip()]
+    if prompt_parts:
+        return " ".join(prompt_parts).strip()
+    raise SystemExit("terminal prompt is required: pass --prompt \"...\" or plain text after the subcommand")
+
+
 _PUBLIC_SITE_VERCEL_CONFIG = {
     "$schema": "https://openapi.vercel.sh/vercel.json",
     "cleanUrls": True,
@@ -784,9 +794,10 @@ def _handle_distill_policy_authz(args: argparse.Namespace) -> int:
 
 
 def _handle_terminal_plan(args: argparse.Namespace) -> int:
+    prompt = _resolve_terminal_prompt(args)
     client = None if args.heuristic_only else build_terminal_llm_client(provider=args.provider or None, base_url=args.base_url or None)
     plan = build_terminal_plan(
-        prompt=args.prompt,
+        prompt=prompt,
         model=args.model,
         client=client,
         heuristic_only=args.heuristic_only,
@@ -800,9 +811,10 @@ def _handle_terminal_plan(args: argparse.Namespace) -> int:
 
 
 def _handle_terminal_run(args: argparse.Namespace) -> int:
+    prompt = _resolve_terminal_prompt(args)
     client = None if args.heuristic_only else build_terminal_llm_client(provider=args.provider or None, base_url=args.base_url or None)
     plan = build_terminal_plan(
-        prompt=args.prompt,
+        prompt=prompt,
         model=args.model,
         client=client,
         heuristic_only=args.heuristic_only,
@@ -823,23 +835,24 @@ def _handle_terminal_run(args: argparse.Namespace) -> int:
 
 
 def _handle_terminal_compare(args: argparse.Namespace) -> int:
+    prompt = _resolve_terminal_prompt(args)
     raw_client = build_terminal_llm_client(provider=args.raw_provider or None, base_url=args.raw_base_url or None)
     memla_client = build_terminal_llm_client(provider=args.memla_provider or None, base_url=args.memla_base_url or None)
     raw_plan = build_raw_terminal_plan(
-        prompt=args.prompt,
+        prompt=prompt,
         model=args.raw_model,
         client=raw_client,
         temperature=args.temperature,
     )
     memla_plan = build_terminal_plan(
-        prompt=args.prompt,
+        prompt=prompt,
         model=args.memla_model,
         client=memla_client,
         heuristic_only=args.heuristic_only,
         temperature=args.temperature,
     )
     payload = {
-        "prompt": args.prompt,
+        "prompt": prompt,
         "raw": terminal_plan_to_dict(raw_plan),
         "memla": terminal_plan_to_dict(memla_plan),
     }
@@ -1252,7 +1265,8 @@ def _build_parser() -> argparse.ArgumentParser:
     terminal_parser = subparsers.add_parser("terminal", help="Run a bounded natural-language terminal assistant.")
     terminal_sub = terminal_parser.add_subparsers(dest="terminal_command")
     terminal_plan = terminal_sub.add_parser("plan", help="Build a safe action plan from a natural-language terminal request.")
-    terminal_plan.add_argument("--prompt", required=True, help="Natural-language terminal request.")
+    terminal_plan.add_argument("--prompt", "-p", default="", help="Natural-language terminal request.")
+    terminal_plan.add_argument("prompt_text", nargs="*", help="Prompt words if you want to skip --prompt.")
     terminal_plan.add_argument("--model", default=_terminal_model_default(), help="Fallback local model name. Defaults to a small Phi-3 tag.")
     terminal_plan.add_argument("--provider", default="ollama", help="Provider override for model fallback.")
     terminal_plan.add_argument("--base-url", default="", help="Optional base URL override for the terminal planner.")
@@ -1262,7 +1276,8 @@ def _build_parser() -> argparse.ArgumentParser:
     terminal_plan.set_defaults(func=_handle_terminal_plan)
 
     terminal_run = terminal_sub.add_parser("run", help="Execute a safe bounded natural-language terminal request.")
-    terminal_run.add_argument("--prompt", required=True, help="Natural-language terminal request.")
+    terminal_run.add_argument("--prompt", "-p", default="", help="Natural-language terminal request.")
+    terminal_run.add_argument("prompt_text", nargs="*", help="Prompt words if you want to skip --prompt.")
     terminal_run.add_argument("--model", default=_terminal_model_default(), help="Fallback local model name. Defaults to a small Phi-3 tag.")
     terminal_run.add_argument("--provider", default="ollama", help="Provider override for model fallback.")
     terminal_run.add_argument("--base-url", default="", help="Optional base URL override for the terminal planner.")
@@ -1272,7 +1287,8 @@ def _build_parser() -> argparse.ArgumentParser:
     terminal_run.set_defaults(func=_handle_terminal_run)
 
     terminal_compare = terminal_sub.add_parser("compare", help="Compare a raw small-model terminal plan against Memla on the same prompt.")
-    terminal_compare.add_argument("--prompt", required=True, help="Natural-language terminal request.")
+    terminal_compare.add_argument("--prompt", "-p", default="", help="Natural-language terminal request.")
+    terminal_compare.add_argument("prompt_text", nargs="*", help="Prompt words if you want to skip --prompt.")
     terminal_compare.add_argument("--raw-model", default=_terminal_model_default(), help="Raw baseline model.")
     terminal_compare.add_argument("--memla-model", default=_terminal_model_default(), help="Memla model.")
     terminal_compare.add_argument("--raw-provider", default="ollama", help="Provider override for the raw lane.")
