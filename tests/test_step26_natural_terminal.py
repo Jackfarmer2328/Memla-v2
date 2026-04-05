@@ -91,6 +91,22 @@ def test_terminal_heuristic_plan_handles_click_first_vid_follow_up():
     assert plan.actions[0].resolved_target == "1"
 
 
+def test_terminal_heuristic_plan_reads_current_repo_page():
+    browser_state = BrowserSessionState(
+        current_url="https://github.com/ggml-org/llama.cpp",
+        page_kind="repo_page",
+    )
+
+    plan = build_terminal_plan(
+        prompt="what is this repo",
+        heuristic_only=True,
+        browser_state=browser_state,
+    )
+
+    assert plan.source == "heuristic"
+    assert [action.kind for action in plan.actions] == ["browser_read_page"]
+
+
 def test_raw_terminal_plan_receives_browser_context():
     captured_messages = {}
 
@@ -183,6 +199,43 @@ def test_terminal_execute_plan_opens_first_search_result(monkeypatch, tmp_path):
     assert launched == [["xdg-open", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"]]
     assert result.browser_state["page_kind"] == "video_page"
     assert result.browser_state["current_url"] == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+
+def test_terminal_execute_plan_reads_current_repo_page(monkeypatch, tmp_path):
+    state_path = tmp_path / "browser_state.json"
+    save_browser_session_state(
+        BrowserSessionState(
+            current_url="https://github.com/ggml-org/llama.cpp",
+            page_kind="repo_page",
+        ),
+        state_path,
+    )
+    html = """
+    <html>
+      <head>
+        <title>ggml-org/llama.cpp: LLM inference in C/C++</title>
+        <meta property="og:description" content="Inference of LLaMA models in pure C/C++." />
+      </head>
+      <body>
+        <a href="/ggml-org/llama.cpp/stargazers"><span>77.7k</span></a>
+        <a href="/ggml-org/llama.cpp/forks"><span>11.2k</span></a>
+      </body>
+    </html>
+    """
+    monkeypatch.setattr("memory_system.natural_terminal._fetch_page_html", lambda url: html)
+
+    plan = TerminalPlan(
+        prompt="what is this repo",
+        source="heuristic",
+        actions=[TerminalAction(kind="browser_read_page", target="current_page", resolved_target="current_page")],
+    )
+    result = execute_terminal_plan(plan, platform_name="linux", state_path=state_path)
+
+    assert result.ok is True
+    assert result.records[0].details["repo"] == "ggml-org/llama.cpp"
+    assert result.records[0].details["stars"] == "77.7k"
+    assert result.records[0].details["forks"] == "11.2k"
+    assert "Inference of LLaMA models" in result.records[0].message
 
 
 def test_memla_terminal_plan_json_outputs_structured_plan(monkeypatch, capsys):

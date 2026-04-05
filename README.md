@@ -176,6 +176,9 @@ memla terminal run "open chrome and spotify" --heuristic-only
 memla terminal run "open chrome" --without-memla --model phi3:mini
 memla terminal run "open youtube and search lo fi hip hop"
 memla terminal run "click the first video"
+memla terminal run "open github and search llama.cpp"
+memla terminal run "click the first repo"
+memla terminal run "what is this repo"
 memla terminal run "open youtube and search lo fi hip hop" --without-memla --model phi3:mini
 memla terminal run "open downloads folder" --model phi3:mini
 ```

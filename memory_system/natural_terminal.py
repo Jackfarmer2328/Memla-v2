@@ -20,6 +20,7 @@ SUPPORTED_ACTION_KINDS = {
     "launch_app",
     "open_url",
     "open_search_result",
+    "browser_read_page",
     "open_path",
     "browser_back",
     "browser_media_pause",
@@ -82,6 +83,7 @@ class TerminalExecutionRecord:
     status: str
     message: str
     command: list[str] = field(default_factory=list)
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -321,6 +323,60 @@ def _search_url(engine: str, query: str) -> str:
     return ""
 
 
+def _html_unescape(text: str) -> str:
+    clean = str(text or "")
+    return (
+        clean.replace("&amp;", "&")
+        .replace("&quot;", '"')
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+    )
+
+
+def _strip_html(text: str) -> str:
+    clean = re.sub(r"(?is)<script.*?>.*?</script>", " ", str(text or ""))
+    clean = re.sub(r"(?is)<style.*?>.*?</style>", " ", clean)
+    clean = re.sub(r"(?s)<[^>]+>", " ", clean)
+    clean = _html_unescape(clean)
+    return " ".join(clean.split())
+
+
+def _meta_content(html: str, key: str, *, attr: str = "name") -> str:
+    pattern = re.compile(
+        rf'<meta[^>]+{attr}=["\']{re.escape(key)}["\'][^>]+content=["\']([^"\']+)["\']',
+        flags=re.IGNORECASE,
+    )
+    match = pattern.search(html)
+    if match:
+        return _html_unescape(match.group(1)).strip()
+    pattern = re.compile(
+        rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+{attr}=["\']{re.escape(key)}["\']',
+        flags=re.IGNORECASE,
+    )
+    match = pattern.search(html)
+    if match:
+        return _html_unescape(match.group(1)).strip()
+    return ""
+
+
+def _title_from_html(html: str) -> str:
+    for key, attr in (("og:title", "property"), ("twitter:title", "name"), ("title", "name")):
+        value = _meta_content(html, key, attr=attr)
+        if value:
+            return value
+    match = re.search(r"(?is)<title[^>]*>(.*?)</title>", html)
+    if match:
+        return _strip_html(match.group(1))
+    return ""
+
+
+def _fetch_page_html(url: str) -> str:
+    req = urllib_request.Request(url, headers={"User-Agent": DEFAULT_USER_AGENT})
+    with urllib_request.urlopen(req, timeout=8.0) as response:
+        return response.read().decode("utf-8", errors="ignore")
+
+
 def _encode_action_note(payload: dict[str, Any]) -> str:
     if not payload:
         return ""
@@ -377,11 +433,38 @@ def _result_index_from_prompt(prompt: str) -> int:
     return 1
 
 
+def _wants_browser_read(prompt: str) -> bool:
+    normalized = _intent_text(prompt)
+    page_phrase_hit = any(
+        token in normalized
+        for token in {
+            "read this page",
+            "summarize this page",
+            "summarise this page",
+            "read this post",
+            "read this repo",
+            "what is this page",
+            "what is this repo",
+            "what is this post",
+            "what is this video",
+            "extract repo info",
+            "extract page info",
+            "repo info",
+        }
+    )
+    verb_hit = any(token in normalized for token in {"read", "summarize", "summarise", "extract"})
+    noun_hit = any(token in normalized for token in {"page", "repo", "repository", "post", "video"})
+    return page_phrase_hit or (verb_hit and noun_hit)
+
+
 def _follow_up_browser_actions(prompt: str, browser_state: BrowserSessionState | None) -> list[TerminalAction]:
     if browser_state is None:
         return []
     normalized = _intent_text(prompt)
     actions: list[TerminalAction] = []
+    if browser_state.current_url and _wants_browser_read(prompt):
+        actions.append(TerminalAction(kind="browser_read_page", target="current_page", resolved_target="current_page"))
+        return actions
     if any(token in normalized for token in {"go back", "back"}):
         actions.append(TerminalAction(kind="browser_back", target="back", resolved_target="back"))
         return actions
@@ -539,7 +622,8 @@ def _llm_prompt(prompt: str, *, browser_state: BrowserSessionState | None = None
         if context_lines:
             context_lines.append(
                 "If the user refers to the current browser page or asks to click a result/video/repo, "
-                "use open_search_result with a 1-based result index or browser_back/browser_media_* when appropriate."
+                "use open_search_result with a 1-based result index, browser_read_page for reading the current page, "
+                "or browser_back/browser_media_* when appropriate."
             )
     context_block = ""
     if context_lines:
@@ -549,7 +633,7 @@ def _llm_prompt(prompt: str, *, browser_state: BrowserSessionState | None = None
             role="system",
             content=(
                 "You translate natural terminal requests into a tiny safe JSON action plan.\n"
-                "Allowed action kinds: launch_app, open_url, open_search_result, open_path, browser_back, browser_media_pause, browser_media_play, list_directory, system_info, unsupported.\n"
+                "Allowed action kinds: launch_app, open_url, open_search_result, browser_read_page, open_path, browser_back, browser_media_pause, browser_media_play, list_directory, system_info, unsupported.\n"
                 f"Allowed app ids: {app_ids}.\n"
                 f"Allowed path ids: {path_ids}.\n"
                 f"Allowed system_info targets: {topics}.\n"
@@ -598,6 +682,9 @@ def _normalize_model_actions(payload: dict[str, Any]) -> list[TerminalAction]:
             app_key = _resolve_app_key(target)
             if app_key:
                 actions.append(TerminalAction(kind=kind, target=target, resolved_target=app_key))
+            continue
+        if kind == "browser_read_page":
+            actions.append(TerminalAction(kind=kind, target=target, resolved_target=target or "current_page"))
             continue
         if kind == "open_search_result":
             if target.isdigit():
@@ -680,6 +767,8 @@ def _action_signature(action: TerminalAction) -> str:
     if kind == "launch_app":
         app_key = _resolve_app_key(action.resolved_target or action.target)
         return f"{kind}:{app_key or _normalize_label(action.resolved_target or action.target)}"
+    if kind == "browser_read_page":
+        return f"{kind}:{_normalize_label(action.resolved_target or action.target or 'current_page')}"
     if kind == "open_search_result":
         return f"{kind}:{_normalize_label(action.resolved_target or action.target)}"
     if kind == "open_url":
@@ -870,8 +959,12 @@ def _browser_state_for_url(url: str, *, search_engine: str = "", search_query: s
         page_kind = "video_page"
     elif "github.com/search" in lower_url:
         page_kind = "search_results"
+    elif re.match(r"^https?://github\.com/[^/\s]+/[^/\s?#]+/?$", lower_url):
+        page_kind = "repo_page"
     elif "reddit.com/search" in lower_url:
         page_kind = "search_results"
+    elif "/comments/" in lower_url and "reddit.com/" in lower_url:
+        page_kind = "post_page"
     elif "amazon.com/s?" in lower_url:
         page_kind = "search_results"
     return BrowserSessionState(
@@ -936,6 +1029,60 @@ def _fetch_search_result_urls(engine: str, query: str, *, limit: int = 5) -> lis
             if len(results) >= limit:
                 break
     return results[:limit]
+
+
+def _github_metric(html: str, owner: str, repo: str, suffix: str) -> str:
+    patterns = (
+        re.compile(
+            rf'href="/{re.escape(owner)}/{re.escape(repo)}/{re.escape(suffix)}"[^>]*>\s*<span[^>]*>([^<]+)</span>',
+            flags=re.IGNORECASE,
+        ),
+        re.compile(
+            rf'href="/{re.escape(owner)}/{re.escape(repo)}/{re.escape(suffix)}"[^>]*aria-label="([^"]+)"',
+            flags=re.IGNORECASE,
+        ),
+    )
+    for pattern in patterns:
+        match = pattern.search(html)
+        if match:
+            raw = _strip_html(match.group(1))
+            if raw:
+                return raw
+    return ""
+
+
+def _extract_page_snapshot(state: BrowserSessionState, html: str) -> dict[str, Any]:
+    url = str(state.current_url or "").strip()
+    title = _title_from_html(html)
+    description = (
+        _meta_content(html, "og:description", attr="property")
+        or _meta_content(html, "twitter:description", attr="name")
+        or _meta_content(html, "description", attr="name")
+    )
+    snapshot: dict[str, Any] = {
+        "url": url,
+        "page_kind": state.page_kind or "web_page",
+        "title": title,
+        "summary": description or title,
+    }
+    if state.page_kind == "repo_page":
+        match = re.match(r"^https?://github\.com/([^/\s]+)/([^/\s?#]+)", url, flags=re.IGNORECASE)
+        if match:
+            owner = match.group(1)
+            repo = match.group(2)
+            snapshot["repo"] = f"{owner}/{repo}"
+            snapshot["stars"] = _github_metric(html, owner, repo, "stargazers")
+            snapshot["forks"] = _github_metric(html, owner, repo, "forks") or _github_metric(html, owner, repo, "network/members")
+            if description:
+                snapshot["summary"] = f"{owner}/{repo}: {description}"
+    elif state.page_kind == "video_page":
+        channel = _meta_content(html, "og:video:tag", attr="property")
+        if channel:
+            snapshot["channel"] = channel
+    elif state.page_kind == "post_page":
+        if description:
+            snapshot["summary"] = description
+    return {key: value for key, value in snapshot.items() if str(value or "").strip()}
 
 
 def _browser_media_command(action_kind: str, *, platform_name: str) -> list[str]:
@@ -1109,6 +1256,43 @@ def execute_terminal_plan(
                     status="ok",
                     message=f"Opened result #{result_index}: {target_url}",
                     command=command,
+                )
+            )
+            continue
+        if action.kind == "browser_read_page":
+            if not current_browser_state.current_url:
+                residuals.append("browser_state_missing_current_url")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message="There is no current browser page to read.",
+                    )
+                )
+                continue
+            try:
+                html = _fetch_page_html(current_browser_state.current_url)
+                details = _extract_page_snapshot(current_browser_state, html)
+            except Exception as exc:
+                residuals.append("browser_page_fetch_failed")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message=f"Could not read the current browser page: {str(exc).strip() or 'unknown error'}.",
+                    )
+                )
+                continue
+            summary = str(details.get("summary") or details.get("title") or current_browser_state.current_url).strip()
+            records.append(
+                TerminalExecutionRecord(
+                    kind=action.kind,
+                    target=action.target,
+                    status="ok",
+                    message=f"Read current page: {summary}",
+                    details=details,
                 )
             )
             continue
@@ -1423,6 +1607,9 @@ def render_terminal_execution_text(result: TerminalExecutionResult) -> str:
     lines = [f"Prompt: {result.prompt}", f"Plan source: {result.plan_source}", f"Execution: {'OK' if result.ok else 'FAILED'}"]
     for record in result.records:
         lines.append(f"- {record.kind} {record.target}: {record.status.upper()} {record.message}".rstrip())
+        if record.details:
+            for key, value in record.details.items():
+                lines.append(f"  {key}: {value}")
     if result.residual_constraints:
         lines.append(f"Residual constraints: {', '.join(result.residual_constraints)}")
     return "\n".join(lines)
