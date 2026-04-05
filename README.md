@@ -173,6 +173,7 @@ memla terminal benchmark --model phi3
 memla terminal compare "open chrome and spotify"
 memla terminal plan "open chrome and spotify" --heuristic-only
 memla terminal run "open chrome and spotify" --heuristic-only
+memla terminal run "open chrome" --without-memla --model phi3:mini
 memla terminal run "open downloads folder" --model phi3:mini
 ```
 

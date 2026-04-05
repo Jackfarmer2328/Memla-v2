@@ -76,6 +76,37 @@ def test_memla_terminal_plan_json_outputs_structured_plan(capsys):
     assert [action["resolved_target"] for action in payload["actions"]] == ["chrome", "spotify"]
 
 
+def test_memla_terminal_plan_without_memla_uses_raw_model(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "memory_system.cli.build_raw_terminal_plan",
+        lambda **kwargs: TerminalPlan(
+            prompt=kwargs["prompt"],
+            source="raw_model",
+            actions=[TerminalAction(kind="launch_app", target="chrome", resolved_target="chrome")],
+        ),
+    )
+    monkeypatch.setattr(
+        "memory_system.cli.build_terminal_plan",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("memla plan path should not run")),
+    )
+
+    rc = main(
+        [
+            "terminal",
+            "plan",
+            "open",
+            "chrome",
+            "--without-memla",
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["source"] == "raw_model"
+    assert payload["actions"][0]["resolved_target"] == "chrome"
+
+
 def test_memla_terminal_run_json_outputs_execution(monkeypatch, capsys):
     plan = TerminalPlan(prompt="open chrome", source="heuristic", actions=build_terminal_plan(prompt="open chrome", heuristic_only=True).actions)
 
@@ -112,6 +143,53 @@ def test_memla_terminal_run_json_outputs_execution(monkeypatch, capsys):
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
+    assert payload["records"][0]["command"] == ["/usr/bin/google-chrome"]
+
+
+def test_memla_terminal_run_without_memla_executes_raw_plan(monkeypatch, capsys):
+    plan = TerminalPlan(
+        prompt="open chrome",
+        source="raw_model",
+        actions=[TerminalAction(kind="launch_app", target="chrome", resolved_target="chrome")],
+    )
+
+    monkeypatch.setattr("memory_system.cli.build_raw_terminal_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        "memory_system.cli.build_terminal_plan",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("memla plan path should not run")),
+    )
+    monkeypatch.setattr(
+        "memory_system.cli.execute_terminal_plan",
+        lambda current_plan: TerminalExecutionResult(
+            prompt=current_plan.prompt,
+            plan_source=current_plan.source,
+            ok=True,
+            records=[
+                TerminalExecutionRecord(
+                    kind="launch_app",
+                    target="chrome",
+                    status="ok",
+                    message="Launched chrome.",
+                    command=["/usr/bin/google-chrome"],
+                )
+            ],
+        ),
+    )
+
+    rc = main(
+        [
+            "terminal",
+            "run",
+            "open",
+            "chrome",
+            "--without-memla",
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["plan_source"] == "raw_model"
     assert payload["records"][0]["command"] == ["/usr/bin/google-chrome"]
 
 

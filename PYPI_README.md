@@ -61,6 +61,7 @@ memla terminal benchmark --model phi3
 memla terminal compare "open chrome and spotify"
 memla terminal plan "open chrome and spotify" --heuristic-only
 memla terminal run "open chrome and spotify" --heuristic-only
+memla terminal run "open chrome" --without-memla --model phi3:mini
 memla terminal run "open downloads folder" --model phi3:mini
 memla policy extract-authz --report memla_reports/policy_deepseek_change_window_vs_9bmemla/policy_authz_benchmark_report.json
 memla policy distill-authz --trace-bank memla_reports/policy_trace_bank_deepseek_change_window/policy_trace_bank_summary.json --repo-root .

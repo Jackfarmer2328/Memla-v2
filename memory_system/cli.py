@@ -151,6 +151,27 @@ def _resolve_shared_terminal_model(args: argparse.Namespace, lane_name: str) -> 
     return lane_value or shared_model or _terminal_model_default()
 
 
+def _build_terminal_request_plan(args: argparse.Namespace, prompt: str):
+    if getattr(args, "without_memla", False):
+        if getattr(args, "heuristic_only", False):
+            raise SystemExit("--without-memla cannot be combined with --heuristic-only")
+        client = build_terminal_llm_client(provider=args.provider or None, base_url=args.base_url or None)
+        return build_raw_terminal_plan(
+            prompt=prompt,
+            model=args.model,
+            client=client,
+            temperature=args.temperature,
+        )
+    client = None if args.heuristic_only else build_terminal_llm_client(provider=args.provider or None, base_url=args.base_url or None)
+    return build_terminal_plan(
+        prompt=prompt,
+        model=args.model,
+        client=client,
+        heuristic_only=args.heuristic_only,
+        temperature=args.temperature,
+    )
+
+
 _PUBLIC_SITE_VERCEL_CONFIG = {
     "$schema": "https://openapi.vercel.sh/vercel.json",
     "cleanUrls": True,
@@ -807,14 +828,7 @@ def _handle_distill_policy_authz(args: argparse.Namespace) -> int:
 
 def _handle_terminal_plan(args: argparse.Namespace) -> int:
     prompt = _resolve_terminal_prompt(args)
-    client = None if args.heuristic_only else build_terminal_llm_client(provider=args.provider or None, base_url=args.base_url or None)
-    plan = build_terminal_plan(
-        prompt=prompt,
-        model=args.model,
-        client=client,
-        heuristic_only=args.heuristic_only,
-        temperature=args.temperature,
-    )
+    plan = _build_terminal_request_plan(args, prompt)
     if args.json:
         _print_json(terminal_plan_to_dict(plan))
     else:
@@ -824,14 +838,7 @@ def _handle_terminal_plan(args: argparse.Namespace) -> int:
 
 def _handle_terminal_run(args: argparse.Namespace) -> int:
     prompt = _resolve_terminal_prompt(args)
-    client = None if args.heuristic_only else build_terminal_llm_client(provider=args.provider or None, base_url=args.base_url or None)
-    plan = build_terminal_plan(
-        prompt=prompt,
-        model=args.model,
-        client=client,
-        heuristic_only=args.heuristic_only,
-        temperature=args.temperature,
-    )
+    plan = _build_terminal_request_plan(args, prompt)
     if not plan.actions:
         if args.json:
             _print_json(terminal_plan_to_dict(plan))
@@ -1323,6 +1330,7 @@ def _build_parser() -> argparse.ArgumentParser:
     terminal_plan.add_argument("--base-url", default="", help="Optional base URL override for the terminal planner.")
     terminal_plan.add_argument("--temperature", type=float, default=0.1)
     terminal_plan.add_argument("--heuristic-only", action="store_true", help="Skip the model fallback and only use the built-in bounded parser.")
+    terminal_plan.add_argument("--without-memla", action="store_true", help="Bypass Memla heuristics and use the raw model-only terminal planner.")
     terminal_plan.add_argument("--json", action="store_true", help="Emit structured JSON instead of readable text.")
     terminal_plan.set_defaults(func=_handle_terminal_plan)
 
@@ -1334,6 +1342,7 @@ def _build_parser() -> argparse.ArgumentParser:
     terminal_run.add_argument("--base-url", default="", help="Optional base URL override for the terminal planner.")
     terminal_run.add_argument("--temperature", type=float, default=0.1)
     terminal_run.add_argument("--heuristic-only", action="store_true", help="Skip the model fallback and only use the built-in bounded parser.")
+    terminal_run.add_argument("--without-memla", action="store_true", help="Bypass Memla heuristics and use the raw model-only terminal planner.")
     terminal_run.add_argument("--json", action="store_true", help="Emit structured JSON instead of readable text.")
     terminal_run.set_defaults(func=_handle_terminal_run)
 
