@@ -288,6 +288,28 @@ def _llm_prompt(prompt: str) -> list[ChatMessage]:
     ]
 
 
+def _plan_from_model_response(*, prompt: str, response: str, source: str) -> TerminalPlan:
+    payload = _extract_json_object(response)
+    actions = _normalize_model_actions(payload)
+    clarification = str(payload.get("clarification") or "").strip()
+    needs_confirmation = bool(payload.get("needs_confirmation"))
+    if not actions:
+        return TerminalPlan(
+            prompt=prompt,
+            source=source,
+            clarification=clarification or "I could not map that request to a safe bounded terminal action.",
+            residual_constraints=["unsupported_or_ambiguous_request"],
+        )
+    return TerminalPlan(
+        prompt=prompt,
+        source=source,
+        actions=actions,
+        needs_confirmation=needs_confirmation,
+        clarification=clarification,
+        residual_constraints=[],
+    )
+
+
 def _normalize_model_actions(payload: dict[str, Any]) -> list[TerminalAction]:
     actions: list[TerminalAction] = []
     for raw in list(payload.get("actions") or []):
@@ -379,25 +401,33 @@ def build_terminal_plan(
             clarification=f"Model fallback unavailable: {str(exc).strip() or 'unknown error'}",
             residual_constraints=["llm_fallback_unavailable"],
         )
-    payload = _extract_json_object(response)
-    actions = _normalize_model_actions(payload)
-    clarification = str(payload.get("clarification") or "").strip()
-    needs_confirmation = bool(payload.get("needs_confirmation"))
-    if not actions:
+    return _plan_from_model_response(prompt=prompt, response=response, source="model")
+
+
+def build_raw_terminal_plan(
+    *,
+    prompt: str,
+    model: str,
+    client: UniversalLLMClient | None,
+    temperature: float = 0.1,
+) -> TerminalPlan:
+    if client is None or not str(model or "").strip():
         return TerminalPlan(
             prompt=prompt,
-            source="model",
-            clarification=clarification or "I could not map that request to a safe bounded terminal action.",
-            residual_constraints=["unsupported_or_ambiguous_request"],
+            source="raw_model",
+            clarification="Raw terminal mode requires a model client.",
+            residual_constraints=["llm_fallback_unavailable"],
         )
-    return TerminalPlan(
-        prompt=prompt,
-        source="model",
-        actions=actions,
-        needs_confirmation=needs_confirmation,
-        clarification=clarification,
-        residual_constraints=[],
-    )
+    try:
+        response = client.chat(model=model, messages=_llm_prompt(prompt), temperature=temperature)
+    except Exception as exc:
+        return TerminalPlan(
+            prompt=prompt,
+            source="raw_model",
+            clarification=f"Raw model unavailable: {str(exc).strip() or 'unknown error'}",
+            residual_constraints=["llm_fallback_unavailable"],
+        )
+    return _plan_from_model_response(prompt=prompt, response=response, source="raw_model")
 
 
 def _platform_key(platform_name: str) -> str:
@@ -656,6 +686,7 @@ __all__ = [
     "TerminalExecutionRecord",
     "TerminalExecutionResult",
     "build_llm_client",
+    "build_raw_terminal_plan",
     "build_terminal_plan",
     "execute_terminal_plan",
     "render_terminal_execution_text",

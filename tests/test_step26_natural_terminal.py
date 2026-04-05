@@ -8,6 +8,7 @@ from memory_system.natural_terminal import (
     TerminalExecutionRecord,
     TerminalExecutionResult,
     TerminalPlan,
+    TerminalAction,
     build_terminal_plan,
     execute_terminal_plan,
 )
@@ -110,3 +111,40 @@ def test_memla_terminal_run_json_outputs_execution(monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert payload["records"][0]["command"] == ["/usr/bin/google-chrome"]
+
+
+def test_memla_terminal_compare_json_outputs_raw_and_memla(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "memory_system.cli.build_raw_terminal_plan",
+        lambda **kwargs: TerminalPlan(
+            prompt=kwargs["prompt"],
+            source="raw_model",
+            actions=[TerminalAction(kind="launch_app", target="chrome", resolved_target="chrome")],
+        ),
+    )
+    monkeypatch.setattr(
+        "memory_system.cli.build_terminal_plan",
+        lambda **kwargs: TerminalPlan(
+            prompt=kwargs["prompt"],
+            source="heuristic",
+            actions=[
+                TerminalAction(kind="launch_app", target="chrome", resolved_target="chrome"),
+                TerminalAction(kind="launch_app", target="spotify", resolved_target="spotify"),
+            ],
+        ),
+    )
+
+    rc = main(
+        [
+            "terminal",
+            "compare",
+            "--prompt",
+            "open chrome and spotify",
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["raw"]["source"] == "raw_model"
+    assert [action["resolved_target"] for action in payload["memla"]["actions"]] == ["chrome", "spotify"]

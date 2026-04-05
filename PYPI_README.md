@@ -57,6 +57,7 @@ memla finance benchmark-pretrade --cases cases/finance_pretrade_eval_cases.jsonl
 memla finance benchmark-pretrade --cases cases/finance_pretrade_public_eval_cases.jsonl --raw-model qwen3.5:9b --memla-model qwen3.5:9b --raw-provider ollama --raw-base-url http://127.0.0.1:11435 --memla-provider ollama --memla-base-url http://127.0.0.1:11435
 memla healthcare benchmark-denials --cases cases/healthcare_denial_eval_cases.jsonl --raw-model qwen3.5:9b --memla-model qwen3.5:9b --raw-provider ollama --raw-base-url http://127.0.0.1:11435 --memla-provider ollama --memla-base-url http://127.0.0.1:11435
 memla policy benchmark-authz --cases cases/policy_authz_eval_cases.jsonl --raw-model qwen3.5:9b --memla-model qwen3.5:9b --raw-provider ollama --raw-base-url http://127.0.0.1:11435 --memla-provider ollama --memla-base-url http://127.0.0.1:11435
+memla terminal compare --prompt "open chrome and spotify" --raw-model phi3:mini --memla-model phi3:mini --raw-provider ollama --raw-base-url http://127.0.0.1:11434 --memla-provider ollama --memla-base-url http://127.0.0.1:11434
 memla terminal plan --prompt "open chrome and spotify" --heuristic-only
 memla terminal run --prompt "open chrome and spotify" --heuristic-only
 memla terminal run --prompt "open downloads folder" --model phi3:mini --provider ollama --base-url http://127.0.0.1:11434

@@ -169,6 +169,7 @@ Public provenance for the bundled policy pack:
 Run the bounded natural-language terminal assistant on a weak local machine:
 
 ```bash
+memla terminal compare --prompt "open chrome and spotify" --raw-model phi3:mini --memla-model phi3:mini --raw-provider ollama --raw-base-url http://127.0.0.1:11434 --memla-provider ollama --memla-base-url http://127.0.0.1:11434
 memla terminal plan --prompt "open chrome and spotify" --heuristic-only
 memla terminal run --prompt "open chrome and spotify" --heuristic-only
 memla terminal run --prompt "open downloads folder" --model phi3:mini --provider ollama --base-url http://127.0.0.1:11434

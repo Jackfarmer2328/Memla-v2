@@ -69,6 +69,7 @@ from .distillation.thesis_pack_builder import build_thesis_pack
 from .distillation.workflow_planner import render_workflow_plan_block
 from .natural_terminal import (
     build_llm_client as build_terminal_llm_client,
+    build_raw_terminal_plan,
     build_terminal_plan,
     execute_terminal_plan,
     render_terminal_execution_text,
@@ -821,6 +822,38 @@ def _handle_terminal_run(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def _handle_terminal_compare(args: argparse.Namespace) -> int:
+    raw_client = build_terminal_llm_client(provider=args.raw_provider or None, base_url=args.raw_base_url or None)
+    memla_client = build_terminal_llm_client(provider=args.memla_provider or None, base_url=args.memla_base_url or None)
+    raw_plan = build_raw_terminal_plan(
+        prompt=args.prompt,
+        model=args.raw_model,
+        client=raw_client,
+        temperature=args.temperature,
+    )
+    memla_plan = build_terminal_plan(
+        prompt=args.prompt,
+        model=args.memla_model,
+        client=memla_client,
+        heuristic_only=args.heuristic_only,
+        temperature=args.temperature,
+    )
+    payload = {
+        "prompt": args.prompt,
+        "raw": terminal_plan_to_dict(raw_plan),
+        "memla": terminal_plan_to_dict(memla_plan),
+    }
+    if args.json:
+        _print_json(payload)
+    else:
+        print("=== RAW ===")
+        print(render_terminal_plan_text(raw_plan))
+        print("")
+        print("=== MEMLA ===")
+        print(render_terminal_plan_text(memla_plan))
+    return 0
+
+
 def _handle_thesis_pack(args: argparse.Namespace) -> int:
     out_dir = Path(args.out_dir).resolve() if args.out_dir else _default_report_dir("thesis_pack")
     result = build_thesis_pack(
@@ -1237,6 +1270,19 @@ def _build_parser() -> argparse.ArgumentParser:
     terminal_run.add_argument("--heuristic-only", action="store_true", help="Skip the model fallback and only use the built-in bounded parser.")
     terminal_run.add_argument("--json", action="store_true", help="Emit structured JSON instead of readable text.")
     terminal_run.set_defaults(func=_handle_terminal_run)
+
+    terminal_compare = terminal_sub.add_parser("compare", help="Compare a raw small-model terminal plan against Memla on the same prompt.")
+    terminal_compare.add_argument("--prompt", required=True, help="Natural-language terminal request.")
+    terminal_compare.add_argument("--raw-model", default=_terminal_model_default(), help="Raw baseline model.")
+    terminal_compare.add_argument("--memla-model", default=_terminal_model_default(), help="Memla model.")
+    terminal_compare.add_argument("--raw-provider", default="ollama", help="Provider override for the raw lane.")
+    terminal_compare.add_argument("--raw-base-url", default="", help="Optional base URL override for the raw lane.")
+    terminal_compare.add_argument("--memla-provider", default="ollama", help="Provider override for the Memla lane.")
+    terminal_compare.add_argument("--memla-base-url", default="", help="Optional base URL override for the Memla lane.")
+    terminal_compare.add_argument("--temperature", type=float, default=0.1)
+    terminal_compare.add_argument("--heuristic-only", action="store_true", help="Keep the Memla lane heuristic-first. Raw still uses the model directly.")
+    terminal_compare.add_argument("--json", action="store_true", help="Emit structured JSON instead of readable text.")
+    terminal_compare.set_defaults(func=_handle_terminal_compare)
 
     pack_parser = subparsers.add_parser("pack", help="Build Memla proof and buyer packs.")
     pack_sub = pack_parser.add_subparsers(dest="pack_command")
