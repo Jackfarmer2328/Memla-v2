@@ -67,10 +67,24 @@ from .distillation.policy_authz_benchmark import (
 )
 from .distillation.thesis_pack_builder import build_thesis_pack
 from .distillation.workflow_planner import render_workflow_plan_block
+from .natural_terminal import (
+    build_llm_client as build_terminal_llm_client,
+    build_terminal_plan,
+    execute_terminal_plan,
+    render_terminal_execution_text,
+    render_terminal_plan_text,
+    terminal_execution_to_dict,
+    terminal_model_default,
+    terminal_plan_to_dict,
+)
 
 
 def _coding_model_default() -> str:
     return os.environ.get("OLLAMA_MODEL", "qwen3.5:9b")
+
+
+def _terminal_model_default() -> str:
+    return terminal_model_default()
 
 
 def _user_id_default() -> str:
@@ -768,6 +782,45 @@ def _handle_distill_policy_authz(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_terminal_plan(args: argparse.Namespace) -> int:
+    client = None if args.heuristic_only else build_terminal_llm_client(provider=args.provider or None, base_url=args.base_url or None)
+    plan = build_terminal_plan(
+        prompt=args.prompt,
+        model=args.model,
+        client=client,
+        heuristic_only=args.heuristic_only,
+        temperature=args.temperature,
+    )
+    if args.json:
+        _print_json(terminal_plan_to_dict(plan))
+    else:
+        print(render_terminal_plan_text(plan))
+    return 0 if plan.actions else 1
+
+
+def _handle_terminal_run(args: argparse.Namespace) -> int:
+    client = None if args.heuristic_only else build_terminal_llm_client(provider=args.provider or None, base_url=args.base_url or None)
+    plan = build_terminal_plan(
+        prompt=args.prompt,
+        model=args.model,
+        client=client,
+        heuristic_only=args.heuristic_only,
+        temperature=args.temperature,
+    )
+    if not plan.actions:
+        if args.json:
+            _print_json(terminal_plan_to_dict(plan))
+        else:
+            print(render_terminal_plan_text(plan))
+        return 1
+    result = execute_terminal_plan(plan)
+    if args.json:
+        _print_json(terminal_execution_to_dict(result))
+    else:
+        print(render_terminal_execution_text(result))
+    return 0 if result.ok else 1
+
+
 def _handle_thesis_pack(args: argparse.Namespace) -> int:
     out_dir = Path(args.out_dir).resolve() if args.out_dir else _default_report_dir("thesis_pack")
     result = build_thesis_pack(
@@ -1162,6 +1215,28 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     policy_distill.add_argument("--json", action="store_true", help="Print the distillation summary as JSON.")
     policy_distill.set_defaults(func=_handle_distill_policy_authz)
+
+    terminal_parser = subparsers.add_parser("terminal", help="Run a bounded natural-language terminal assistant.")
+    terminal_sub = terminal_parser.add_subparsers(dest="terminal_command")
+    terminal_plan = terminal_sub.add_parser("plan", help="Build a safe action plan from a natural-language terminal request.")
+    terminal_plan.add_argument("--prompt", required=True, help="Natural-language terminal request.")
+    terminal_plan.add_argument("--model", default=_terminal_model_default(), help="Fallback local model name. Defaults to a small Phi-3 tag.")
+    terminal_plan.add_argument("--provider", default="ollama", help="Provider override for model fallback.")
+    terminal_plan.add_argument("--base-url", default="", help="Optional base URL override for the terminal planner.")
+    terminal_plan.add_argument("--temperature", type=float, default=0.1)
+    terminal_plan.add_argument("--heuristic-only", action="store_true", help="Skip the model fallback and only use the built-in bounded parser.")
+    terminal_plan.add_argument("--json", action="store_true", help="Emit structured JSON instead of readable text.")
+    terminal_plan.set_defaults(func=_handle_terminal_plan)
+
+    terminal_run = terminal_sub.add_parser("run", help="Execute a safe bounded natural-language terminal request.")
+    terminal_run.add_argument("--prompt", required=True, help="Natural-language terminal request.")
+    terminal_run.add_argument("--model", default=_terminal_model_default(), help="Fallback local model name. Defaults to a small Phi-3 tag.")
+    terminal_run.add_argument("--provider", default="ollama", help="Provider override for model fallback.")
+    terminal_run.add_argument("--base-url", default="", help="Optional base URL override for the terminal planner.")
+    terminal_run.add_argument("--temperature", type=float, default=0.1)
+    terminal_run.add_argument("--heuristic-only", action="store_true", help="Skip the model fallback and only use the built-in bounded parser.")
+    terminal_run.add_argument("--json", action="store_true", help="Emit structured JSON instead of readable text.")
+    terminal_run.set_defaults(func=_handle_terminal_run)
 
     pack_parser = subparsers.add_parser("pack", help="Build Memla proof and buyer packs.")
     pack_sub = pack_parser.add_subparsers(dest="pack_command")

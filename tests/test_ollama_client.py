@@ -6,9 +6,10 @@ from memory_system.ollama_client import ChatMessage, UniversalLLMClient
 
 
 class _DummyResponse:
-    def __init__(self, status_code: int, payload: dict):
+    def __init__(self, status_code: int, payload: dict, headers: dict | None = None):
         self.status_code = status_code
         self._payload = payload
+        self.headers = headers or {}
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
@@ -149,6 +150,40 @@ def test_github_models_retries_without_temperature_when_model_rejects_it(monkeyp
     assert calls[1]["json"] == {
         "model": "openai/gpt-5",
         "messages": [{"role": "user", "content": "hello"}],
+    }
+
+
+def test_github_models_retries_transient_429(monkeypatch):
+    calls: list[dict[str, object]] = []
+    responses = [
+        _DummyResponse(429, {"error": {"message": "rate limited"}}, headers={"Retry-After": "0"}),
+        _DummyResponse(200, {"choices": [{"message": {"content": "ok"}}]}),
+    ]
+
+    def fake_post(url, *, json, timeout, headers):
+        calls.append({"url": url, "json": json, "headers": headers})
+        return responses[len(calls) - 1]
+
+    monkeypatch.setattr("memory_system.ollama_client.requests.post", fake_post)
+    monkeypatch.setattr("memory_system.ollama_client.time.sleep", lambda *_args, **_kwargs: None)
+
+    client = UniversalLLMClient(
+        provider="github_models",
+        base_url="https://models.github.ai/inference",
+        api_key="gh-token",
+    )
+    out = client.chat(
+        model="DeepSeek-R1",
+        messages=[ChatMessage(role="user", content="hello")],
+        temperature=0.7,
+    )
+
+    assert out == "ok"
+    assert len(calls) == 2
+    assert calls[0]["json"] == {
+        "model": "DeepSeek-R1",
+        "messages": [{"role": "user", "content": "hello"}],
+        "temperature": 0.7,
     }
 
 

@@ -54,6 +54,7 @@ KNOWN_NEXT_ACTIONS = (
 
 RULE_ID_ALIASES = {
     "break_glass": "break_glass_required",
+    "change_window_violation": "outside_change_window",
     "change_window": "outside_change_window",
     "missing_role": "role_not_permitted",
     "region_restriction": "region_restricted",
@@ -64,6 +65,8 @@ RULE_ID_ALIASES = {
 NEXT_ACTION_ALIASES = {
     "deny_request": "block_request",
     "enable_mfa": "require_mfa_then_retry",
+    "require_break_glass_approval": "request_break_glass_review",
+    "require_break_glass_approval_then_retry": "request_break_glass_review",
     "queue_change": "queue_for_change_window",
     "request_break_glass": "request_break_glass_review",
     "route_region": "route_to_allowed_region",
@@ -242,6 +245,33 @@ def _extract_label_hits_from_text(
     candidates = list(known) + list(aliases.keys())
     hits = [candidate for candidate in candidates if candidate and candidate in normalized_text]
     return _normalize_label_list(hits, aliases)
+
+
+def _canonicalize_contextual_actions(actions: list[str], rule_hits: list[str], response: str) -> list[str]:
+    normalized_rules = {item.strip().lower() for item in rule_hits if item.strip()}
+    raw_tokens = [_normalize_label_token(item) for item in actions if str(item or "").strip()]
+    inferred: list[str] = []
+    for token in raw_tokens:
+        if not token:
+            continue
+        if token in NEXT_ACTION_ALIASES or token in KNOWN_NEXT_ACTIONS:
+            inferred.append(token)
+            continue
+        if token in {"await_reviewer_approval", "await_approval", "reviewer_approval", "reviewer_review"}:
+            if "outside_change_window" in normalized_rules:
+                inferred.append("queue_for_change_window")
+            elif "break_glass_required" in normalized_rules:
+                inferred.append("request_break_glass_review")
+    normalized_actions = _normalize_action(inferred)
+    if normalized_actions:
+        return normalized_actions
+    lower = str(response or "").strip().lower()
+    if "reviewer approval" in lower or "reviewer review" in lower or "await approval" in lower:
+        if "outside_change_window" in normalized_rules:
+            inferred.append("queue_for_change_window")
+        elif "break_glass_required" in normalized_rules:
+            inferred.append("request_break_glass_review")
+    return _normalize_action(inferred)
 
 
 def _extract_json_object(response: str) -> dict[str, Any]:
@@ -485,9 +515,17 @@ def _normalize_decision_payload(payload: dict[str, Any], response: str) -> Polic
     normalized_rule_hits = _normalize_rule(list(payload.get("predicted_rule_hits") or []))
     if not normalized_rule_hits:
         normalized_rule_hits = _extract_label_hits_from_text(response, known=KNOWN_RULE_IDS, aliases=RULE_ID_ALIASES)
-    normalized_actions = _normalize_action(list(payload.get("next_actions") or []))
+    normalized_actions = _canonicalize_contextual_actions(
+        list(payload.get("next_actions") or []),
+        normalized_rule_hits,
+        response,
+    )
     if not normalized_actions:
-        normalized_actions = _extract_label_hits_from_text(response, known=KNOWN_NEXT_ACTIONS, aliases=NEXT_ACTION_ALIASES)
+        normalized_actions = _canonicalize_contextual_actions(
+            _extract_label_hits_from_text(response, known=KNOWN_NEXT_ACTIONS, aliases=NEXT_ACTION_ALIASES),
+            normalized_rule_hits,
+            response,
+        )
     decision = str(payload.get("decision") or "").strip().lower()
     if decision not in {"allow", "block", "escalate", "modify"}:
         decision = _infer_decision_from_text(response)

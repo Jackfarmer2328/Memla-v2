@@ -10,6 +10,7 @@ from memory_system.distillation.policy_authz_benchmark import (
     load_policy_authz_cases,
     render_policy_authz_markdown,
     run_policy_authz_benchmark,
+    _normalize_decision_payload,
 )
 
 
@@ -164,18 +165,35 @@ def test_memla_policy_authz_benchmark_writes_report_bundle(monkeypatch, capsys, 
 
 
 def test_policy_alias_normalization_maps_common_names():
-    assert _normalize_rule(["requires_mfa", "region_restriction", "change_window", "restricted_role"]) == [
+    assert _normalize_rule(["requires_mfa", "region_restriction", "change_window", "change_window_violation", "restricted_role"]) == [
         "mfa_required",
         "region_restricted",
         "outside_change_window",
         "restricted_resource_role",
     ]
-    assert _normalize_action(["enable_mfa", "route_region", "queue_change", "deny_request"]) == [
+    assert _normalize_action(["enable_mfa", "route_region", "queue_change", "deny_request", "require_break_glass_approval_then_retry"]) == [
         "require_mfa_then_retry",
         "route_to_allowed_region",
         "queue_for_change_window",
         "block_request",
+        "request_break_glass_review",
     ]
+
+
+def test_policy_contextual_action_normalization_maps_generic_review_to_matching_rule():
+    payload = _normalize_decision_payload(
+        {
+            "decision": "escalate",
+            "predicted_rule_hits": ["change_window_violation"],
+            "next_actions": ["await_reviewer_approval"],
+            "rewrite": {},
+            "rationale": "Outside the change window; reviewer approval required.",
+        },
+        '{"decision":"escalate","predicted_rule_hits":["change_window_violation"],"next_actions":["await_reviewer_approval"]}',
+    )
+
+    assert payload.predicted_rule_hits == ["outside_change_window"]
+    assert payload.next_actions == ["queue_for_change_window"]
 
 
 def test_public_policy_pack_loads_and_covers_expected_rule_families():

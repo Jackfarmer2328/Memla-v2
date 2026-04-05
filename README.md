@@ -166,6 +166,19 @@ memla policy distill-authz --trace-bank memla_reports\\policy_trace_bank_deepsee
 Public provenance for the bundled policy pack:
 - `cases/policy_authz_public_sources.md`
 
+Run the bounded natural-language terminal assistant on a weak local machine:
+
+```bash
+memla terminal plan --prompt "open chrome and spotify" --heuristic-only
+memla terminal run --prompt "open chrome and spotify" --heuristic-only
+memla terminal run --prompt "open downloads folder" --model phi3:mini --provider ollama --base-url http://127.0.0.1:11434
+```
+
+The terminal surface is intentionally bounded:
+- it launches known apps, opens URLs or folders, lists directories, and answers a few local status questions
+- it does not generate arbitrary shell or privileged commands
+- for common launch/open prompts, the built-in heuristic parser often avoids the model entirely
+
 Extract a normalized finance trace bank from one or more pre-trade benchmark reports:
 
 ```bash

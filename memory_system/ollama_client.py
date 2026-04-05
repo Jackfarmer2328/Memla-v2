@@ -200,18 +200,35 @@ class UniversalLLMClient:
         headers: dict[str, str],
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        try:
-            resp = requests.post(url, json=payload, timeout=600, headers=headers)
-            resp.raise_for_status()
-            return resp.json()
-        except requests.exceptions.HTTPError as exc:
-            if "temperature" not in payload or not self._response_requires_default_temperature(exc.response):
-                raise
-            retry_payload = dict(payload)
-            retry_payload.pop("temperature", None)
-            retry_resp = requests.post(url, json=retry_payload, timeout=600, headers=headers)
-            retry_resp.raise_for_status()
-            return retry_resp.json()
+        current_payload = dict(payload)
+        last_error: Exception | None = None
+        retry_delays = (5.0, 15.0, 30.0)
+        for attempt in range(len(retry_delays) + 1):
+            try:
+                resp = requests.post(url, json=current_payload, timeout=600, headers=headers)
+                resp.raise_for_status()
+                return resp.json()
+            except requests.exceptions.HTTPError as exc:
+                response = exc.response
+                if "temperature" in current_payload and self._response_requires_default_temperature(response):
+                    current_payload = dict(current_payload)
+                    current_payload.pop("temperature", None)
+                    last_error = exc
+                    continue
+                status = response.status_code if response is not None else None
+                if status not in {429, 500, 502, 503, 504, 529} or attempt >= len(retry_delays):
+                    raise
+                last_error = exc
+                delay = self._response_retry_delay_seconds(response, retry_delays[attempt])
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+                if attempt >= len(retry_delays):
+                    raise
+                last_error = exc
+                delay = retry_delays[attempt]
+            time.sleep(delay)
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Chat request failed without a response payload.")
 
     @staticmethod
     def _response_requires_default_temperature(response: Any) -> bool:
@@ -232,6 +249,19 @@ class UniversalLLMClient:
         if code == "unsupported_value":
             return True
         return "temperature" in message and ("default" in message or "does not support" in message)
+
+    @staticmethod
+    def _response_retry_delay_seconds(response: Any, default_delay: float) -> float:
+        if response is None:
+            return default_delay
+        headers = getattr(response, "headers", {}) or {}
+        retry_after = headers.get("Retry-After") if isinstance(headers, dict) else None
+        if retry_after is None:
+            return default_delay
+        try:
+            return max(float(retry_after), 0.0)
+        except (TypeError, ValueError):
+            return default_delay
 
     def _chat_anthropic(
         self,
