@@ -247,6 +247,18 @@ def test_terminal_execute_plan_reads_current_repo_page(monkeypatch, tmp_path):
     </html>
     """
     monkeypatch.setattr("memory_system.natural_terminal._fetch_page_html", lambda url: html)
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._fetch_github_repo_snapshot",
+        lambda owner, repo: {
+            "repo": "ggml-org/llama.cpp",
+            "description": "Inference of LLaMA models in pure C/C++.",
+            "summary": "ggml-org/llama.cpp: Inference of LLaMA models in pure C/C++.",
+            "stars": "77.7k",
+            "forks": "11.2k",
+            "language": "C++",
+            "topics": "llm, inference, cpp",
+        },
+    )
 
     plan = TerminalPlan(
         prompt="what is this repo",
@@ -259,7 +271,8 @@ def test_terminal_execute_plan_reads_current_repo_page(monkeypatch, tmp_path):
     assert result.records[0].details["repo"] == "ggml-org/llama.cpp"
     assert result.records[0].details["stars"] == "77.7k"
     assert result.records[0].details["forks"] == "11.2k"
-    assert "Inference of LLaMA models" in result.records[0].message
+    assert "Repo summary:" in result.records[0].message
+    assert "language C++" in result.records[0].message
 
 
 def test_memla_terminal_plan_json_outputs_structured_plan(monkeypatch, capsys):

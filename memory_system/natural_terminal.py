@@ -373,9 +373,7 @@ def _title_from_html(html: str) -> str:
 
 
 def _fetch_page_html(url: str) -> str:
-    req = urllib_request.Request(url, headers={"User-Agent": DEFAULT_USER_AGENT})
-    with urllib_request.urlopen(req, timeout=8.0) as response:
-        return response.read().decode("utf-8", errors="ignore")
+    return _fetch_url_text(url)
 
 
 def _fetch_url_text(url: str, *, accept: str = "text/html") -> str:
@@ -1018,6 +1016,56 @@ def _fetch_github_search_result_urls(query: str, *, limit: int = 5) -> list[str]
     return results
 
 
+def _format_compact_count(value: int | float | str) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value or "").strip()
+    if number >= 1_000_000:
+        compact = f"{number / 1_000_000:.1f}".rstrip("0").rstrip(".")
+        return f"{compact}M"
+    if number >= 1_000:
+        compact = f"{number / 1_000:.1f}".rstrip("0").rstrip(".")
+        return f"{compact}k"
+    if number.is_integer():
+        return str(int(number))
+    return str(round(number, 1))
+
+
+def _fetch_github_repo_snapshot(owner: str, repo: str) -> dict[str, Any]:
+    api_url = f"https://api.github.com/repos/{quote_plus(owner)}/{quote_plus(repo)}"
+    try:
+        payload = json.loads(_fetch_url_text(api_url, accept="application/vnd.github+json"))
+    except (OSError, URLError, json.JSONDecodeError, ValueError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    snapshot: dict[str, Any] = {}
+    full_name = str(payload.get("full_name") or f"{owner}/{repo}").strip()
+    if full_name:
+        snapshot["repo"] = full_name
+    description = str(payload.get("description") or "").strip()
+    if description:
+        snapshot["summary"] = f"{full_name}: {description}" if full_name else description
+        snapshot["description"] = description
+    stars = payload.get("stargazers_count")
+    forks = payload.get("forks_count")
+    language = str(payload.get("language") or "").strip()
+    homepage = str(payload.get("homepage") or "").strip()
+    topics = [str(item).strip() for item in list(payload.get("topics") or []) if str(item).strip()]
+    if stars is not None:
+        snapshot["stars"] = _format_compact_count(stars)
+    if forks is not None:
+        snapshot["forks"] = _format_compact_count(forks)
+    if language:
+        snapshot["language"] = language
+    if homepage:
+        snapshot["homepage"] = homepage
+    if topics:
+        snapshot["topics"] = ", ".join(topics[:6])
+    return snapshot
+
+
 def _fetch_search_result_urls(engine: str, query: str, *, limit: int = 5) -> list[str]:
     results: list[str] = []
     seen: set[str] = set()
@@ -1109,11 +1157,12 @@ def _extract_page_snapshot(state: BrowserSessionState, html: str) -> dict[str, A
         if match:
             owner = match.group(1)
             repo = match.group(2)
-            snapshot["repo"] = f"{owner}/{repo}"
-            snapshot["stars"] = _github_metric(html, owner, repo, "stargazers")
-            snapshot["forks"] = _github_metric(html, owner, repo, "forks") or _github_metric(html, owner, repo, "network/members")
+            snapshot.update(_fetch_github_repo_snapshot(owner, repo))
+            snapshot.setdefault("repo", f"{owner}/{repo}")
+            snapshot.setdefault("stars", _github_metric(html, owner, repo, "stargazers"))
+            snapshot.setdefault("forks", _github_metric(html, owner, repo, "forks") or _github_metric(html, owner, repo, "network/members"))
             if description:
-                snapshot["summary"] = f"{owner}/{repo}: {description}"
+                snapshot["summary"] = snapshot.get("summary") or f"{owner}/{repo}: {description}"
     elif state.page_kind == "video_page":
         channel = _meta_content(html, "og:video:tag", attr="property")
         if channel:
@@ -1122,6 +1171,37 @@ def _extract_page_snapshot(state: BrowserSessionState, html: str) -> dict[str, A
         if description:
             snapshot["summary"] = description
     return {key: value for key, value in snapshot.items() if str(value or "").strip()}
+
+
+def _browser_read_message(details: dict[str, Any], current_url: str) -> str:
+    page_kind = str(details.get("page_kind") or "").strip()
+    if page_kind == "repo_page":
+        repo = str(details.get("repo") or "").strip()
+        description = str(details.get("description") or details.get("summary") or "").strip()
+        stars = str(details.get("stars") or "").strip()
+        forks = str(details.get("forks") or "").strip()
+        language = str(details.get("language") or "").strip()
+        topics = str(details.get("topics") or "").strip()
+        parts: list[str] = []
+        if repo:
+            parts.append(repo)
+        if description:
+            parts.append(description)
+        metrics: list[str] = []
+        if stars:
+            metrics.append(f"stars {stars}")
+        if forks:
+            metrics.append(f"forks {forks}")
+        if language:
+            metrics.append(f"language {language}")
+        if metrics:
+            parts.append(", ".join(metrics))
+        if topics:
+            parts.append(f"topics {topics}")
+        if parts:
+            return "Repo summary: " + ". ".join(parts)
+    summary = str(details.get("summary") or details.get("title") or current_url).strip()
+    return f"Read current page: {summary}"
 
 
 def _browser_media_command(action_kind: str, *, platform_name: str) -> list[str]:
@@ -1324,13 +1404,12 @@ def execute_terminal_plan(
                     )
                 )
                 continue
-            summary = str(details.get("summary") or details.get("title") or current_browser_state.current_url).strip()
             records.append(
                 TerminalExecutionRecord(
                     kind=action.kind,
                     target=action.target,
                     status="ok",
-                    message=f"Read current page: {summary}",
+                    message=_browser_read_message(details, current_browser_state.current_url),
                     details=details,
                 )
             )
