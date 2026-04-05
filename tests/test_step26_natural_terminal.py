@@ -58,7 +58,9 @@ def test_terminal_execute_plan_launches_linux_apps(monkeypatch):
     ]
 
 
-def test_memla_terminal_plan_json_outputs_structured_plan(capsys):
+def test_memla_terminal_plan_json_outputs_structured_plan(monkeypatch, capsys):
+    timeline = iter([0.0, 0.25])
+    monkeypatch.setattr("memory_system.cli.time.perf_counter", lambda: next(timeline))
     rc = main(
         [
             "terminal",
@@ -74,6 +76,7 @@ def test_memla_terminal_plan_json_outputs_structured_plan(capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["source"] == "heuristic"
     assert [action["resolved_target"] for action in payload["actions"]] == ["chrome", "spotify"]
+    assert payload["planning_duration_seconds"] == 0.25
 
 
 def test_memla_terminal_plan_without_memla_uses_raw_model(monkeypatch, capsys):
@@ -109,8 +112,10 @@ def test_memla_terminal_plan_without_memla_uses_raw_model(monkeypatch, capsys):
 
 def test_memla_terminal_run_json_outputs_execution(monkeypatch, capsys):
     plan = TerminalPlan(prompt="open chrome", source="heuristic", actions=build_terminal_plan(prompt="open chrome", heuristic_only=True).actions)
+    timeline = iter([1.0, 1.2, 1.2, 1.35])
 
     monkeypatch.setattr("memory_system.cli.build_terminal_plan", lambda **kwargs: plan)
+    monkeypatch.setattr("memory_system.cli.time.perf_counter", lambda: next(timeline))
     monkeypatch.setattr(
         "memory_system.cli.execute_terminal_plan",
         lambda current_plan: TerminalExecutionResult(
@@ -144,6 +149,9 @@ def test_memla_terminal_run_json_outputs_execution(monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert payload["records"][0]["command"] == ["/usr/bin/google-chrome"]
+    assert payload["planning_duration_seconds"] == 0.2
+    assert payload["execution_duration_seconds"] == 0.15
+    assert payload["total_duration_seconds"] == 0.35
 
 
 def test_memla_terminal_run_without_memla_executes_raw_plan(monkeypatch, capsys):
@@ -194,6 +202,8 @@ def test_memla_terminal_run_without_memla_executes_raw_plan(monkeypatch, capsys)
 
 
 def test_memla_terminal_compare_json_outputs_raw_and_memla(monkeypatch, capsys):
+    timeline = iter([2.0, 4.0, 4.0, 4.5])
+
     monkeypatch.setattr(
         "memory_system.cli.build_raw_terminal_plan",
         lambda **kwargs: TerminalPlan(
@@ -213,6 +223,7 @@ def test_memla_terminal_compare_json_outputs_raw_and_memla(monkeypatch, capsys):
             ],
         ),
     )
+    monkeypatch.setattr("memory_system.cli.time.perf_counter", lambda: next(timeline))
 
     rc = main(
         [
@@ -228,6 +239,9 @@ def test_memla_terminal_compare_json_outputs_raw_and_memla(monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["raw"]["source"] == "raw_model"
     assert [action["resolved_target"] for action in payload["memla"]["actions"]] == ["chrome", "spotify"]
+    assert payload["raw_duration_seconds"] == 2.0
+    assert payload["memla_duration_seconds"] == 0.5
+    assert payload["memla_speedup"] == 4.0
 
 
 def test_memla_terminal_compare_accepts_positional_prompt(monkeypatch, capsys):

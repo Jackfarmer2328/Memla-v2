@@ -151,6 +151,10 @@ def _resolve_shared_terminal_model(args: argparse.Namespace, lane_name: str) -> 
     return lane_value or shared_model or _terminal_model_default()
 
 
+def _format_terminal_duration(seconds: float) -> str:
+    return f"{max(float(seconds), 0.0):.3f}s"
+
+
 def _build_terminal_request_plan(args: argparse.Namespace, prompt: str):
     if getattr(args, "without_memla", False):
         if getattr(args, "heuristic_only", False):
@@ -828,28 +832,48 @@ def _handle_distill_policy_authz(args: argparse.Namespace) -> int:
 
 def _handle_terminal_plan(args: argparse.Namespace) -> int:
     prompt = _resolve_terminal_prompt(args)
+    started = time.perf_counter()
     plan = _build_terminal_request_plan(args, prompt)
+    planning_seconds = round(time.perf_counter() - started, 4)
     if args.json:
-        _print_json(terminal_plan_to_dict(plan))
+        payload = terminal_plan_to_dict(plan)
+        payload["planning_duration_seconds"] = planning_seconds
+        _print_json(payload)
     else:
         print(render_terminal_plan_text(plan))
+        print(f"Planning time: {_format_terminal_duration(planning_seconds)}")
     return 0 if plan.actions else 1
 
 
 def _handle_terminal_run(args: argparse.Namespace) -> int:
     prompt = _resolve_terminal_prompt(args)
+    plan_started = time.perf_counter()
     plan = _build_terminal_request_plan(args, prompt)
+    planning_seconds = round(time.perf_counter() - plan_started, 4)
     if not plan.actions:
         if args.json:
-            _print_json(terminal_plan_to_dict(plan))
+            payload = terminal_plan_to_dict(plan)
+            payload["planning_duration_seconds"] = planning_seconds
+            _print_json(payload)
         else:
             print(render_terminal_plan_text(plan))
+            print(f"Planning time: {_format_terminal_duration(planning_seconds)}")
         return 1
+    run_started = time.perf_counter()
     result = execute_terminal_plan(plan)
+    execution_seconds = round(time.perf_counter() - run_started, 4)
+    total_seconds = round(planning_seconds + execution_seconds, 4)
     if args.json:
-        _print_json(terminal_execution_to_dict(result))
+        payload = terminal_execution_to_dict(result)
+        payload["planning_duration_seconds"] = planning_seconds
+        payload["execution_duration_seconds"] = execution_seconds
+        payload["total_duration_seconds"] = total_seconds
+        _print_json(payload)
     else:
         print(render_terminal_execution_text(result))
+        print(f"Planning time: {_format_terminal_duration(planning_seconds)}")
+        print(f"Execution time: {_format_terminal_duration(execution_seconds)}")
+        print(f"Total time: {_format_terminal_duration(total_seconds)}")
     return 0 if result.ok else 1
 
 
@@ -859,12 +883,15 @@ def _handle_terminal_compare(args: argparse.Namespace) -> int:
     memla_model = _resolve_shared_terminal_model(args, "memla_model")
     raw_client = build_terminal_llm_client(provider=args.raw_provider or None, base_url=args.raw_base_url or None)
     memla_client = build_terminal_llm_client(provider=args.memla_provider or None, base_url=args.memla_base_url or None)
+    raw_started = time.perf_counter()
     raw_plan = build_raw_terminal_plan(
         prompt=prompt,
         model=raw_model,
         client=raw_client,
         temperature=args.temperature,
     )
+    raw_seconds = round(time.perf_counter() - raw_started, 4)
+    memla_started = time.perf_counter()
     memla_plan = build_terminal_plan(
         prompt=prompt,
         model=memla_model,
@@ -872,19 +899,29 @@ def _handle_terminal_compare(args: argparse.Namespace) -> int:
         heuristic_only=args.heuristic_only,
         temperature=args.temperature,
     )
+    memla_seconds = round(time.perf_counter() - memla_started, 4)
+    speedup = round(raw_seconds / memla_seconds, 4) if memla_seconds > 0 else None
     payload = {
         "prompt": prompt,
         "raw": terminal_plan_to_dict(raw_plan),
         "memla": terminal_plan_to_dict(memla_plan),
+        "raw_duration_seconds": raw_seconds,
+        "memla_duration_seconds": memla_seconds,
+        "memla_speedup": speedup,
     }
     if args.json:
         _print_json(payload)
     else:
         print("=== RAW ===")
         print(render_terminal_plan_text(raw_plan))
+        print(f"Planning time: {_format_terminal_duration(raw_seconds)}")
         print("")
         print("=== MEMLA ===")
         print(render_terminal_plan_text(memla_plan))
+        print(f"Planning time: {_format_terminal_duration(memla_seconds)}")
+        if speedup is not None:
+            print("")
+            print(f"Speedup: {speedup}x")
     return 0
 
 
