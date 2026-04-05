@@ -192,6 +192,22 @@ SEARCH_ENGINE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
         re.compile(r"\bopen\s+(?P<engine>youtube|github|google|reddit|amazon)\s+and\s+search\s+(?P<query>.+)$", flags=re.IGNORECASE),
         "engine_first",
     ),
+    (
+        re.compile(r"\bopen\s+(?P<engine>youtube|github|google|reddit|amazon)\b(?:.*?\b)?search\s+(?P<query>.+)$", flags=re.IGNORECASE),
+        "engine_first",
+    ),
+)
+
+FILLER_PHRASES: tuple[str, ...] = (
+    "i want you to",
+    "can you",
+    "could you",
+    "would you",
+    "for me",
+    "please",
+    "bro",
+    "now",
+    "just",
 )
 
 
@@ -236,6 +252,14 @@ def save_browser_session_state(state: BrowserSessionState, path: str | Path | No
 def _normalize_label(value: str) -> str:
     text = str(value or "").strip().lower()
     text = re.sub(r"[^a-z0-9]+", " ", text)
+    return " ".join(text.split())
+
+
+def _intent_text(value: str) -> str:
+    text = _normalize_label(value)
+    for phrase in FILLER_PHRASES:
+        text = re.sub(rf"\b{re.escape(phrase)}\b", " ", text)
+    text = re.sub(r"\bthen\b", " ", text)
     return " ".join(text.split())
 
 
@@ -317,8 +341,9 @@ def _decode_action_note(note: str) -> dict[str, Any]:
 def _search_hits(prompt: str) -> list[dict[str, str]]:
     hits: list[dict[str, str]] = []
     seen: set[str] = set()
+    intent_text = _intent_text(prompt)
     for pattern, _ordering in SEARCH_ENGINE_PATTERNS:
-        for match in pattern.finditer(prompt):
+        for match in pattern.finditer(intent_text):
             engine = str(match.groupdict().get("engine") or "").strip()
             query = str(match.groupdict().get("query") or "").strip().rstrip(".!?")
             url = _search_url(engine, query)
@@ -336,8 +361,8 @@ def _search_hits(prompt: str) -> list[dict[str, str]]:
 
 
 def _result_index_from_prompt(prompt: str) -> int:
-    normalized = _normalize_label(prompt)
-    if any(token in normalized for token in {"first", "1st", "the video", "the repo", "the result"}):
+    normalized = _intent_text(prompt)
+    if any(token in normalized for token in {"first", "1st", "the video", "the vid", "the repo", "the result"}):
         return 1
     if any(token in normalized for token in {"second", "2nd"}):
         return 2
@@ -355,7 +380,7 @@ def _result_index_from_prompt(prompt: str) -> int:
 def _follow_up_browser_actions(prompt: str, browser_state: BrowserSessionState | None) -> list[TerminalAction]:
     if browser_state is None:
         return []
-    normalized = _normalize_label(prompt)
+    normalized = _intent_text(prompt)
     actions: list[TerminalAction] = []
     if any(token in normalized for token in {"go back", "back"}):
         actions.append(TerminalAction(kind="browser_back", target="back", resolved_target="back"))
@@ -368,22 +393,28 @@ def _follow_up_browser_actions(prompt: str, browser_state: BrowserSessionState |
         return actions
     if browser_state.page_kind != "search_results" or not browser_state.search_engine or not browser_state.search_query:
         return actions
+    verb_hit = any(token in normalized for token in {"click", "open", "press", "select", "pick"})
+    noun_hit = any(token in normalized for token in {"video", "vid", "repo", "result"})
+    ordinal_hit = any(token in normalized for token in {"first", "1st", "second", "2nd", "third", "3rd"})
     wants_result = any(
         token in normalized
         for token in {
             "click first",
+            "click the first",
             "open first",
+            "open the first",
             "press on",
             "click on",
-            "open the first",
             "open the video",
+            "open the vid",
             "open the repo",
             "click the video",
+            "click the vid",
             "click the repo",
             "click result",
             "open result",
         }
-    )
+    ) or (verb_hit and noun_hit) or (verb_hit and ordinal_hit)
     if wants_result:
         index = _result_index_from_prompt(prompt)
         actions.append(

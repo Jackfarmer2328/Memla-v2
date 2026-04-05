@@ -42,6 +42,17 @@ def test_terminal_heuristic_plan_builds_search_urls():
     assert plan.actions[0].resolved_target == "https://www.youtube.com/results?search_query=lo+fi+hip+hop"
 
 
+def test_terminal_heuristic_plan_builds_search_urls_for_casual_phrase():
+    plan = build_terminal_plan(
+        prompt="open youtube bro then i want you to search lo fi hip hop",
+        heuristic_only=True,
+    )
+
+    assert plan.source == "heuristic"
+    assert [action.kind for action in plan.actions] == ["open_url"]
+    assert plan.actions[0].resolved_target == "https://www.youtube.com/results?search_query=lo+fi+hip+hop"
+
+
 def test_terminal_heuristic_plan_uses_browser_state_for_follow_up():
     browser_state = BrowserSessionState(
         current_url="https://www.youtube.com/results?search_query=lo+fi+hip+hop",
@@ -52,6 +63,25 @@ def test_terminal_heuristic_plan_uses_browser_state_for_follow_up():
 
     plan = build_terminal_plan(
         prompt="now press on the video so i can listen",
+        heuristic_only=True,
+        browser_state=browser_state,
+    )
+
+    assert plan.source == "heuristic"
+    assert [action.kind for action in plan.actions] == ["open_search_result"]
+    assert plan.actions[0].resolved_target == "1"
+
+
+def test_terminal_heuristic_plan_handles_click_first_vid_follow_up():
+    browser_state = BrowserSessionState(
+        current_url="https://www.youtube.com/results?search_query=lo+fi+hip+hop",
+        page_kind="search_results",
+        search_engine="youtube",
+        search_query="lo fi hip hop",
+    )
+
+    plan = build_terminal_plan(
+        prompt="now click the first vid",
         heuristic_only=True,
         browser_state=browser_state,
     )
