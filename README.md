@@ -150,6 +150,15 @@ memla healthcare benchmark-denials --cases cases\\healthcare_denial_eval_cases.j
 Public provenance for the bundled healthcare pack:
 - `cases/healthcare_denial_public_sources.md`
 
+Run the policy-as-code authz replay benchmark:
+
+```bash
+memla policy benchmark-authz --cases cases\\policy_authz_eval_cases.jsonl --raw-model qwen3.5:9b --memla-model qwen3.5:9b --raw-provider ollama --raw-base-url http://127.0.0.1:11435 --memla-provider ollama --memla-base-url http://127.0.0.1:11435
+```
+
+Public provenance for the bundled policy pack:
+- `cases/policy_authz_public_sources.md`
+
 Extract a normalized finance trace bank from one or more pre-trade benchmark reports:
 
 ```bash

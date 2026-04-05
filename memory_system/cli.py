@@ -53,6 +53,10 @@ from .distillation.patch_execution_benchmark import (
     render_patch_execution_markdown,
     run_patch_execution_benchmark,
 )
+from .distillation.policy_authz_benchmark import (
+    render_policy_authz_markdown,
+    run_policy_authz_benchmark,
+)
 from .distillation.thesis_pack_builder import build_thesis_pack
 from .distillation.workflow_planner import render_workflow_plan_block
 
@@ -645,6 +649,43 @@ def _handle_healthcare_denial_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_policy_authz_benchmark(args: argparse.Namespace) -> int:
+    report = run_policy_authz_benchmark(
+        cases_path=args.cases,
+        case_ids=list(args.case_id or []),
+        limit=args.limit,
+        raw_model=args.raw_model,
+        memla_model=args.memla_model,
+        raw_iterations=args.raw_iterations,
+        memla_iterations=args.memla_iterations,
+        temperature=args.temperature,
+        num_ctx=args.num_ctx,
+        raw_provider=args.raw_provider,
+        raw_base_url=args.raw_base_url,
+        memla_provider=args.memla_provider,
+        memla_base_url=args.memla_base_url,
+    )
+    markdown = render_policy_authz_markdown(report)
+    out_dir = Path(args.out_dir).resolve() if args.out_dir else _default_report_dir("policy_authz_benchmark")
+    json_path, md_path = _write_report_bundle(
+        report=report,
+        markdown=markdown,
+        out_dir=out_dir,
+        stem="policy_authz_benchmark_report",
+    )
+    print(f"Wrote policy benchmark JSON: {json_path}")
+    print(f"Wrote policy benchmark Markdown: {md_path}")
+    utility_index = report.get("memla_vs_raw_policy_utility_index")
+    utility_text = utility_index if utility_index is not None else "n/a"
+    print(
+        "Summary: "
+        f"raw utility {report.get('avg_raw_policy_utility', 0.0)} | "
+        f"memla utility {report.get('avg_memla_policy_utility', 0.0)} | "
+        f"utility index {utility_text}"
+    )
+    return 0
+
+
 def _handle_thesis_pack(args: argparse.Namespace) -> int:
     out_dir = Path(args.out_dir).resolve() if args.out_dir else _default_report_dir("thesis_pack")
     result = build_thesis_pack(
@@ -987,6 +1028,25 @@ def _build_parser() -> argparse.ArgumentParser:
     healthcare_bench.add_argument("--memla-base-url", default="", help="Optional base URL override for the Memla lane.")
     healthcare_bench.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
     healthcare_bench.set_defaults(func=_handle_healthcare_denial_benchmark)
+
+    policy_parser = subparsers.add_parser("policy", help="Run policy-as-code authorization benchmarks.")
+    policy_sub = policy_parser.add_subparsers(dest="policy_command")
+    policy_bench = policy_sub.add_parser("benchmark-authz", help="Run a bounded policy authorization replay benchmark.")
+    policy_bench.add_argument("--cases", required=True, help="Policy authz case JSONL path.")
+    policy_bench.add_argument("--case-id", action="append", default=[], help="Optional case id filter. Repeat to run only specific policy cases.")
+    policy_bench.add_argument("--limit", type=int, default=None, help="Optional max number of policy cases to run after filtering.")
+    policy_bench.add_argument("--raw-model", required=True, help="Baseline raw model.")
+    policy_bench.add_argument("--memla-model", required=True, help="Memla repair-loop model.")
+    policy_bench.add_argument("--raw-iterations", type=int, default=1, help="How many attempts the raw lane gets.")
+    policy_bench.add_argument("--memla-iterations", type=int, default=3, help="How many verifier-backed repair attempts the Memla lane gets.")
+    policy_bench.add_argument("--temperature", type=float, default=0.1)
+    policy_bench.add_argument("--num-ctx", type=int, default=None)
+    policy_bench.add_argument("--raw-provider", default="", help="Optional provider override for the raw lane.")
+    policy_bench.add_argument("--raw-base-url", default="", help="Optional base URL override for the raw lane.")
+    policy_bench.add_argument("--memla-provider", default="", help="Optional provider override for the Memla lane.")
+    policy_bench.add_argument("--memla-base-url", default="", help="Optional base URL override for the Memla lane.")
+    policy_bench.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
+    policy_bench.set_defaults(func=_handle_policy_authz_benchmark)
 
     pack_parser = subparsers.add_parser("pack", help="Build Memla proof and buyer packs.")
     pack_sub = pack_parser.add_subparsers(dest="pack_command")
