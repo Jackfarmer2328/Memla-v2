@@ -12,6 +12,7 @@ import time
 from typing import Any
 from urllib.parse import quote_plus
 from urllib import request as urllib_request
+from urllib.error import URLError
 
 from .ollama_client import ChatMessage, UniversalLLMClient
 
@@ -373,6 +374,18 @@ def _title_from_html(html: str) -> str:
 
 def _fetch_page_html(url: str) -> str:
     req = urllib_request.Request(url, headers={"User-Agent": DEFAULT_USER_AGENT})
+    with urllib_request.urlopen(req, timeout=8.0) as response:
+        return response.read().decode("utf-8", errors="ignore")
+
+
+def _fetch_url_text(url: str, *, accept: str = "text/html") -> str:
+    req = urllib_request.Request(
+        url,
+        headers={
+            "User-Agent": DEFAULT_USER_AGENT,
+            "Accept": accept,
+        },
+    )
     with urllib_request.urlopen(req, timeout=8.0) as response:
         return response.read().decode("utf-8", errors="ignore")
 
@@ -983,13 +996,29 @@ def _open_in_browser(target: str, *, platform_name: str) -> list[str]:
     return list(launcher) + [target]
 
 
-def _fetch_search_result_urls(engine: str, query: str, *, limit: int = 5) -> list[str]:
-    url = _search_url(engine, query)
-    if not url:
+def _fetch_github_search_result_urls(query: str, *, limit: int = 5) -> list[str]:
+    api_url = f"https://api.github.com/search/repositories?q={quote_plus(query)}&per_page={max(int(limit), 1)}"
+    try:
+        payload = json.loads(_fetch_url_text(api_url, accept="application/vnd.github+json"))
+    except (OSError, URLError, json.JSONDecodeError, ValueError):
         return []
-    req = urllib_request.Request(url, headers={"User-Agent": DEFAULT_USER_AGENT})
-    with urllib_request.urlopen(req, timeout=8.0) as response:
-        html = response.read().decode("utf-8", errors="ignore")
+    items = list(payload.get("items") or []) if isinstance(payload, dict) else []
+    results: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("html_url") or "").strip()
+        if not url or url.lower() in seen:
+            continue
+        seen.add(url.lower())
+        results.append(url)
+        if len(results) >= limit:
+            break
+    return results
+
+
+def _fetch_search_result_urls(engine: str, query: str, *, limit: int = 5) -> list[str]:
     results: list[str] = []
     seen: set[str] = set()
 
@@ -1001,6 +1030,16 @@ def _fetch_search_result_urls(engine: str, query: str, *, limit: int = 5) -> lis
         results.append(clean)
 
     normalized_engine = _normalize_label(engine)
+    if normalized_engine == "github":
+        api_results = _fetch_github_search_result_urls(query, limit=limit)
+        if api_results:
+            return api_results[:limit]
+
+    url = _search_url(engine, query)
+    if not url:
+        return []
+    html = _fetch_url_text(url)
+
     if normalized_engine == "youtube":
         for video_id in re.findall(r'"videoId":"([A-Za-z0-9_-]{11})"', html):
             _append(f"https://www.youtube.com/watch?v={video_id}")

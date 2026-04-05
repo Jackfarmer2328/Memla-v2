@@ -10,6 +10,7 @@ from memory_system.natural_terminal import (
     TerminalExecutionResult,
     TerminalPlan,
     TerminalAction,
+    _fetch_search_result_urls,
     build_raw_terminal_plan,
     build_terminal_plan,
     execute_terminal_plan,
@@ -199,6 +200,29 @@ def test_terminal_execute_plan_opens_first_search_result(monkeypatch, tmp_path):
     assert launched == [["xdg-open", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"]]
     assert result.browser_state["page_kind"] == "video_page"
     assert result.browser_state["current_url"] == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+
+def test_fetch_search_result_urls_uses_github_api_first(monkeypatch):
+    def fake_fetch(url: str, *, accept: str = "text/html") -> str:
+        assert "api.github.com/search/repositories" in url
+        assert accept == "application/vnd.github+json"
+        return json.dumps(
+            {
+                "items": [
+                    {"html_url": "https://github.com/ggml-org/llama.cpp"},
+                    {"html_url": "https://github.com/oobabooga/text-generation-webui"},
+                ]
+            }
+        )
+
+    monkeypatch.setattr("memory_system.natural_terminal._fetch_url_text", fake_fetch)
+
+    results = _fetch_search_result_urls("github", "llama.cpp", limit=2)
+
+    assert results == [
+        "https://github.com/ggml-org/llama.cpp",
+        "https://github.com/oobabooga/text-generation-webui",
+    ]
 
 
 def test_terminal_execute_plan_reads_current_repo_page(monkeypatch, tmp_path):
