@@ -68,18 +68,24 @@ from .distillation.policy_authz_benchmark import (
 from .distillation.thesis_pack_builder import build_thesis_pack
 from .distillation.workflow_planner import render_workflow_plan_block
 from .natural_terminal import (
+    build_terminal_step_report,
     build_llm_client as build_terminal_llm_client,
     build_raw_terminal_plan,
     build_terminal_plan,
+    execute_terminal_step,
     execute_terminal_plan,
     load_browser_session_state,
     render_terminal_benchmark_markdown,
     render_terminal_execution_text,
     render_terminal_plan_text,
+    render_terminal_step_execution_text,
+    render_terminal_step_report_text,
     run_terminal_benchmark,
     terminal_execution_to_dict,
     terminal_model_default,
     terminal_plan_to_dict,
+    terminal_step_execution_to_dict,
+    terminal_step_report_to_dict,
 )
 
 
@@ -882,6 +888,70 @@ def _handle_terminal_run(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def _handle_terminal_step(args: argparse.Namespace) -> int:
+    prompt = _resolve_terminal_prompt(args)
+    browser_state = load_browser_session_state()
+    client = None if args.heuristic_only else build_terminal_llm_client(provider=args.provider or None, base_url=args.base_url or None)
+    started = time.perf_counter()
+    report = build_terminal_step_report(
+        prompt=prompt,
+        model=args.model,
+        client=client,
+        heuristic_only=args.heuristic_only,
+        temperature=args.temperature,
+        browser_state=browser_state,
+    )
+    planning_seconds = round(time.perf_counter() - started, 4)
+    if not args.choice:
+        if args.json:
+            payload = terminal_step_report_to_dict(report)
+            payload["planning_duration_seconds"] = planning_seconds
+            _print_json(payload)
+        else:
+            print(render_terminal_step_report_text(report))
+            print(f"Planning time: {_format_terminal_duration(planning_seconds)}")
+            if report.candidates:
+                print('Run again with `--choice N` to execute a candidate and log the trace.')
+        return 0 if report.candidates else 1
+
+    execution_started = time.perf_counter()
+    try:
+        execution = execute_terminal_step(
+            report,
+            choice=args.choice,
+            browser_state=browser_state,
+            trace_path=args.trace_log or None,
+        )
+    except ValueError as exc:
+        if args.json:
+            _print_json(
+                {
+                    "prompt": prompt,
+                    "planning_duration_seconds": planning_seconds,
+                    "error": str(exc),
+                }
+            )
+        else:
+            print(render_terminal_step_report_text(report))
+            print(f"Planning time: {_format_terminal_duration(planning_seconds)}")
+            print(str(exc))
+        return 1
+    execution_seconds = round(time.perf_counter() - execution_started, 4)
+    total_seconds = round(planning_seconds + execution_seconds, 4)
+    if args.json:
+        payload = terminal_step_execution_to_dict(execution)
+        payload["planning_duration_seconds"] = planning_seconds
+        payload["execution_duration_seconds"] = execution_seconds
+        payload["total_duration_seconds"] = total_seconds
+        _print_json(payload)
+    else:
+        print(render_terminal_step_execution_text(execution))
+        print(f"Planning time: {_format_terminal_duration(planning_seconds)}")
+        print(f"Execution time: {_format_terminal_duration(execution_seconds)}")
+        print(f"Total time: {_format_terminal_duration(total_seconds)}")
+    return 0 if execution.result.ok else 1
+
+
 def _handle_terminal_compare(args: argparse.Namespace) -> int:
     prompt = _resolve_terminal_prompt(args)
     raw_model = _resolve_shared_terminal_model(args, "raw_model")
@@ -1390,6 +1460,19 @@ def _build_parser() -> argparse.ArgumentParser:
     terminal_run.add_argument("--without-memla", action="store_true", help="Bypass Memla heuristics and use the raw model-only terminal planner.")
     terminal_run.add_argument("--json", action="store_true", help="Emit structured JSON instead of readable text.")
     terminal_run.set_defaults(func=_handle_terminal_run)
+
+    terminal_step = terminal_sub.add_parser("step", help="Inspect candidate terminal/browser transmutations and optionally execute one.")
+    terminal_step.add_argument("--prompt", "-p", default="", help="Natural-language terminal request.")
+    terminal_step.add_argument("prompt_text", nargs="*", help="Prompt words if you want to skip --prompt.")
+    terminal_step.add_argument("--model", default=_terminal_model_default(), help="Fallback local model name. Defaults to a small Phi-3 tag.")
+    terminal_step.add_argument("--provider", default="ollama", help="Provider override for model fallback.")
+    terminal_step.add_argument("--base-url", default="", help="Optional base URL override for the terminal planner.")
+    terminal_step.add_argument("--temperature", type=float, default=0.1)
+    terminal_step.add_argument("--heuristic-only", action="store_true", help="Skip the model fallback and only use the built-in bounded parser.")
+    terminal_step.add_argument("--choice", default="", help="Candidate number or candidate id to execute and log.")
+    terminal_step.add_argument("--trace-log", default="", help="Optional JSONL path for approved transmutation traces.")
+    terminal_step.add_argument("--json", action="store_true", help="Emit structured JSON instead of readable text.")
+    terminal_step.set_defaults(func=_handle_terminal_step)
 
     terminal_compare = terminal_sub.add_parser("compare", help="Compare a raw small-model terminal plan against Memla on the same prompt.")
     terminal_compare.add_argument("--prompt", "-p", default="", help="Natural-language terminal request.")

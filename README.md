@@ -179,6 +179,8 @@ memla terminal run "click the first video"
 memla terminal run "open github and search llama.cpp"
 memla terminal run "click the first repo"
 memla terminal run "what is this repo"
+memla terminal step "now click the first vid" --heuristic-only
+memla terminal step "now click the first vid" --heuristic-only --choice 1
 memla terminal run "open youtube and search lo fi hip hop" --without-memla --model phi3:mini
 memla terminal run "open downloads folder" --model phi3:mini
 ```

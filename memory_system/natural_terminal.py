@@ -55,6 +55,7 @@ LINUX_OPEN_COMMAND = ["xdg-open"]
 MACOS_OPEN_COMMAND = ["open"]
 BROWSER_STATE_ENV = "MEMLA_TERMINAL_STATE_PATH"
 BROWSER_STATE_FILENAME = "terminal_browser_state.json"
+TERMINAL_TRACE_FILENAME = "terminal_transmutation_traces.jsonl"
 DEFAULT_USER_AGENT = "Mozilla/5.0 (compatible; MemlaTerminal/1.0; +https://github.com/Jackfarmer2328/Memla-v2)"
 
 
@@ -111,6 +112,31 @@ class BrowserSessionState:
     search_engine: str = ""
     search_query: str = ""
     result_urls: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class TerminalTransmutationCandidate:
+    candidate_id: str
+    label: str
+    rationale: str
+    origin: str
+    recommended: bool = False
+    plan: TerminalPlan = field(default_factory=lambda: TerminalPlan(prompt="", source="candidate"))
+
+
+@dataclass(frozen=True)
+class TerminalStepReport:
+    prompt: str
+    constraints: dict[str, Any]
+    candidates: list[TerminalTransmutationCandidate] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class TerminalStepExecution:
+    report: TerminalStepReport
+    chosen_candidate: TerminalTransmutationCandidate
+    result: TerminalExecutionResult
+    trace_path: str
 
 
 APP_SPECS: dict[str, dict[str, Any]] = {
@@ -223,6 +249,10 @@ def terminal_browser_state_path() -> Path:
     if configured:
         return Path(configured).expanduser().resolve()
     return (Path.home() / ".memla" / BROWSER_STATE_FILENAME).resolve()
+
+
+def terminal_trace_log_path() -> Path:
+    return (terminal_browser_state_path().parent / TERMINAL_TRACE_FILENAME).resolve()
 
 
 def load_browser_session_state(path: str | Path | None = None) -> BrowserSessionState:
@@ -1528,6 +1558,285 @@ def execute_terminal_plan(
     )
 
 
+def _terminal_available_transmutations(browser_state: BrowserSessionState) -> list[str]:
+    actions: list[str] = []
+    if browser_state.current_url:
+        actions.append("browser_read_page")
+    if browser_state.page_kind == "search_results":
+        actions.extend(["open_search_result", "browser_back"])
+    elif browser_state.current_url:
+        actions.append("browser_back")
+    if browser_state.page_kind == "video_page":
+        actions.extend(["browser_media_pause", "browser_media_play"])
+    return actions
+
+
+def _terminal_constraints_snapshot(prompt: str, browser_state: BrowserSessionState) -> dict[str, Any]:
+    return {
+        "prompt": prompt,
+        "intent_text": _intent_text(prompt),
+        "current_url": browser_state.current_url,
+        "page_kind": browser_state.page_kind,
+        "search_engine": browser_state.search_engine,
+        "search_query": browser_state.search_query,
+        "cached_result_count": len(browser_state.result_urls or []),
+        "available_transmutations": _terminal_available_transmutations(browser_state),
+    }
+
+
+def _plan_signature(plan: TerminalPlan) -> tuple[str, ...]:
+    return tuple(_action_signature(action) for action in plan.actions)
+
+
+def _plan_label(plan: TerminalPlan) -> str:
+    if not plan.actions:
+        return "No actionable transmutation"
+    if len(plan.actions) > 1:
+        first = _plan_label(TerminalPlan(prompt=plan.prompt, source=plan.source, actions=[plan.actions[0]]))
+        second = _plan_label(TerminalPlan(prompt=plan.prompt, source=plan.source, actions=[plan.actions[1]]))
+        return f"{first} + {second}"
+    action = plan.actions[0]
+    target = str(action.resolved_target or action.target).strip()
+    if action.kind == "launch_app":
+        return f"Launch {target}"
+    if action.kind == "open_url":
+        note = _decode_action_note(action.note)
+        engine = str(note.get("search_engine") or "").strip()
+        query = str(note.get("search_query") or "").strip()
+        if engine and query:
+            return f"Open {engine} search for \"{query}\""
+        return f"Open {target}"
+    if action.kind == "open_search_result":
+        return f"Open search result #{target or '1'}"
+    if action.kind == "browser_read_page":
+        return "Read the current page"
+    if action.kind == "browser_back":
+        return "Go back"
+    if action.kind == "browser_media_pause":
+        return "Pause media"
+    if action.kind == "browser_media_play":
+        return "Play media"
+    if action.kind == "open_path":
+        return f"Open {target}"
+    if action.kind == "list_directory":
+        return f"List {target}"
+    if action.kind == "system_info":
+        return f"Check {target}"
+    return f"{action.kind}: {target}"
+
+
+def _candidate_from_plan(
+    *,
+    candidate_id: str,
+    plan: TerminalPlan,
+    origin: str,
+    rationale: str,
+    recommended: bool = False,
+) -> TerminalTransmutationCandidate | None:
+    if not plan.actions:
+        return None
+    return TerminalTransmutationCandidate(
+        candidate_id=candidate_id,
+        label=_plan_label(plan),
+        rationale=rationale,
+        origin=origin,
+        recommended=recommended,
+        plan=plan,
+    )
+
+
+def _contextual_terminal_candidates(browser_state: BrowserSessionState, prompt: str) -> list[TerminalTransmutationCandidate]:
+    if not browser_state.current_url and browser_state.page_kind != "search_results":
+        return []
+    prompt_text = str(prompt or "").strip()
+    candidates: list[TerminalTransmutationCandidate] = []
+    if browser_state.page_kind == "search_results":
+        candidates.append(
+            TerminalTransmutationCandidate(
+                candidate_id="result_1",
+                label="Open search result #1",
+                rationale="The current page is a search-results page, so opening the first result is a strong next transmutation.",
+                origin="browser_state",
+                plan=TerminalPlan(
+                    prompt=prompt_text,
+                    source="state_candidate",
+                    actions=[TerminalAction(kind="open_search_result", target="1", resolved_target="1")],
+                ),
+            )
+        )
+        candidates.append(
+            TerminalTransmutationCandidate(
+                candidate_id="result_2",
+                label="Open search result #2",
+                rationale="Opening the second result is a useful alternate branch when the first result is not ideal.",
+                origin="browser_state",
+                plan=TerminalPlan(
+                    prompt=prompt_text,
+                    source="state_candidate",
+                    actions=[TerminalAction(kind="open_search_result", target="2", resolved_target="2")],
+                ),
+            )
+        )
+    if browser_state.current_url:
+        candidates.append(
+            TerminalTransmutationCandidate(
+                candidate_id="read_page",
+                label="Read the current page",
+                rationale="Reading the current page extracts structured evidence before another navigation step.",
+                origin="browser_state",
+                plan=TerminalPlan(
+                    prompt=prompt_text,
+                    source="state_candidate",
+                    actions=[TerminalAction(kind="browser_read_page", target="current_page", resolved_target="current_page")],
+                ),
+            )
+        )
+        candidates.append(
+            TerminalTransmutationCandidate(
+                candidate_id="go_back",
+                label="Go back",
+                rationale="Going back is a safe recovery transmutation when you want to explore a different branch.",
+                origin="browser_state",
+                plan=TerminalPlan(
+                    prompt=prompt_text,
+                    source="state_candidate",
+                    actions=[TerminalAction(kind="browser_back", target="back", resolved_target="back")],
+                ),
+            )
+        )
+    if browser_state.page_kind == "video_page":
+        candidates.append(
+            TerminalTransmutationCandidate(
+                candidate_id="pause_media",
+                label="Pause media",
+                rationale="The current page looks like a video page, so pausing media is a relevant continuation.",
+                origin="browser_state",
+                plan=TerminalPlan(
+                    prompt=prompt_text,
+                    source="state_candidate",
+                    actions=[TerminalAction(kind="browser_media_pause", target="media", resolved_target="media")],
+                ),
+            )
+        )
+    return candidates
+
+
+def build_terminal_step_report(
+    *,
+    prompt: str,
+    model: str = "",
+    client: UniversalLLMClient | None = None,
+    heuristic_only: bool = False,
+    temperature: float = 0.1,
+    browser_state: BrowserSessionState | None = None,
+) -> TerminalStepReport:
+    current_state = browser_state or BrowserSessionState()
+    constraints = _terminal_constraints_snapshot(prompt, current_state)
+    candidates: list[TerminalTransmutationCandidate] = []
+    seen: set[tuple[str, ...]] = set()
+
+    prompt_plan = build_terminal_plan(
+        prompt=prompt,
+        model=model,
+        client=client,
+        heuristic_only=heuristic_only,
+        temperature=temperature,
+        browser_state=current_state,
+    )
+    prompt_candidate = _candidate_from_plan(
+        candidate_id="prompt_plan",
+        plan=prompt_plan,
+        origin=prompt_plan.source,
+        rationale="Best next transmutation inferred from your prompt under the current browser and terminal constraints.",
+        recommended=True,
+    )
+    if prompt_candidate is not None:
+        signature = _plan_signature(prompt_candidate.plan)
+        if signature and signature not in seen:
+            seen.add(signature)
+            candidates.append(prompt_candidate)
+
+    for candidate in _contextual_terminal_candidates(current_state, prompt):
+        signature = _plan_signature(candidate.plan)
+        if not signature or signature in seen:
+            continue
+        seen.add(signature)
+        candidates.append(candidate)
+
+    return TerminalStepReport(
+        prompt=prompt,
+        constraints=constraints,
+        candidates=candidates,
+    )
+
+
+def _resolve_terminal_step_candidate(report: TerminalStepReport, choice: str | int) -> TerminalTransmutationCandidate:
+    text = str(choice or "").strip()
+    if text.isdigit():
+        index = int(text)
+        if 1 <= index <= len(report.candidates):
+            return report.candidates[index - 1]
+    for candidate in report.candidates:
+        if candidate.candidate_id == text:
+            return candidate
+    raise ValueError(f"Unknown candidate choice: {choice}")
+
+
+def append_terminal_trace(
+    *,
+    report: TerminalStepReport,
+    chosen_candidate: TerminalTransmutationCandidate,
+    result: TerminalExecutionResult,
+    path: str | Path | None = None,
+) -> Path:
+    trace_path = Path(path).expanduser().resolve() if path else terminal_trace_log_path()
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "generated_ts": int(time.time()),
+        "prompt": report.prompt,
+        "constraints": report.constraints,
+        "chosen_candidate_id": chosen_candidate.candidate_id,
+        "chosen_label": chosen_candidate.label,
+        "chosen_origin": chosen_candidate.origin,
+        "chosen_rationale": chosen_candidate.rationale,
+        "chosen_plan": asdict(chosen_candidate.plan),
+        "execution": asdict(result),
+    }
+    with trace_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
+    return trace_path
+
+
+def execute_terminal_step(
+    report: TerminalStepReport,
+    *,
+    choice: str | int,
+    platform_name: str | None = None,
+    browser_state: BrowserSessionState | None = None,
+    state_path: str | Path | None = None,
+    trace_path: str | Path | None = None,
+) -> TerminalStepExecution:
+    chosen_candidate = _resolve_terminal_step_candidate(report, choice)
+    result = execute_terminal_plan(
+        chosen_candidate.plan,
+        platform_name=platform_name,
+        browser_state=browser_state,
+        state_path=state_path,
+    )
+    written_trace = append_terminal_trace(
+        report=report,
+        chosen_candidate=chosen_candidate,
+        result=result,
+        path=trace_path,
+    )
+    return TerminalStepExecution(
+        report=report,
+        chosen_candidate=chosen_candidate,
+        result=result,
+        trace_path=str(written_trace),
+    )
+
+
 def run_terminal_benchmark(
     *,
     cases_path: str,
@@ -1721,6 +2030,27 @@ def render_terminal_plan_text(plan: TerminalPlan) -> str:
     return "\n".join(lines)
 
 
+def render_terminal_step_report_text(report: TerminalStepReport) -> str:
+    lines = [f"Prompt: {report.prompt}", "Constraints:"]
+    for key, value in report.constraints.items():
+        if value in ("", [], None):
+            continue
+        lines.append(f"- {key}: {value}")
+    if report.candidates:
+        lines.append("Candidate transmutations:")
+        for idx, candidate in enumerate(report.candidates, start=1):
+            marker = " [recommended]" if candidate.recommended else ""
+            lines.append(f"{idx}. {candidate.label}{marker}")
+            lines.append(f"   rationale: {candidate.rationale}")
+            lines.append(f"   origin: {candidate.origin}")
+            plan_actions = ", ".join(_action_signature(action) for action in candidate.plan.actions)
+            if plan_actions:
+                lines.append(f"   actions: {plan_actions}")
+    else:
+        lines.append("Candidate transmutations: none")
+    return "\n".join(lines)
+
+
 def render_terminal_execution_text(result: TerminalExecutionResult) -> str:
     lines = [f"Prompt: {result.prompt}", f"Plan source: {result.plan_source}", f"Execution: {'OK' if result.ok else 'FAILED'}"]
     for record in result.records:
@@ -1733,12 +2063,37 @@ def render_terminal_execution_text(result: TerminalExecutionResult) -> str:
     return "\n".join(lines)
 
 
+def render_terminal_step_execution_text(execution: TerminalStepExecution) -> str:
+    lines = [
+        render_terminal_step_report_text(execution.report),
+        "",
+        f"Chosen transmutation: {execution.chosen_candidate.label}",
+        f"Trace log: {execution.trace_path}",
+        "",
+        render_terminal_execution_text(execution.result),
+    ]
+    return "\n".join(lines).strip()
+
+
 def terminal_plan_to_dict(plan: TerminalPlan) -> dict[str, Any]:
     return asdict(plan)
 
 
 def terminal_execution_to_dict(result: TerminalExecutionResult) -> dict[str, Any]:
     return asdict(result)
+
+
+def terminal_step_report_to_dict(report: TerminalStepReport) -> dict[str, Any]:
+    return asdict(report)
+
+
+def terminal_step_execution_to_dict(execution: TerminalStepExecution) -> dict[str, Any]:
+    return {
+        "report": asdict(execution.report),
+        "chosen_candidate": asdict(execution.chosen_candidate),
+        "result": asdict(execution.result),
+        "trace_path": execution.trace_path,
+    }
 
 
 def build_llm_client(
@@ -1772,19 +2127,29 @@ __all__ = [
     "TerminalPlan",
     "TerminalExecutionRecord",
     "TerminalExecutionResult",
+    "TerminalStepExecution",
+    "TerminalStepReport",
+    "TerminalTransmutationCandidate",
     "build_llm_client",
     "build_raw_terminal_plan",
+    "build_terminal_step_report",
     "build_terminal_plan",
+    "execute_terminal_step",
     "execute_terminal_plan",
     "load_browser_session_state",
     "load_terminal_benchmark_cases",
     "render_terminal_benchmark_markdown",
     "render_terminal_execution_text",
     "render_terminal_plan_text",
+    "render_terminal_step_execution_text",
+    "render_terminal_step_report_text",
     "run_terminal_benchmark",
     "save_browser_session_state",
     "terminal_browser_state_path",
     "terminal_execution_to_dict",
     "terminal_model_default",
     "terminal_plan_to_dict",
+    "terminal_step_execution_to_dict",
+    "terminal_step_report_to_dict",
+    "terminal_trace_log_path",
 ]

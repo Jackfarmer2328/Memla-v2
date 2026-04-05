@@ -12,7 +12,9 @@ from memory_system.natural_terminal import (
     TerminalAction,
     _fetch_search_result_urls,
     build_raw_terminal_plan,
+    build_terminal_step_report,
     build_terminal_plan,
+    execute_terminal_step,
     execute_terminal_plan,
     load_terminal_benchmark_cases,
     save_browser_session_state,
@@ -106,6 +108,28 @@ def test_terminal_heuristic_plan_reads_current_repo_page():
 
     assert plan.source == "heuristic"
     assert [action.kind for action in plan.actions] == ["browser_read_page"]
+
+
+def test_terminal_step_report_includes_prompt_and_state_candidates():
+    browser_state = BrowserSessionState(
+        current_url="https://www.youtube.com/results?search_query=lo+fi+hip+hop",
+        page_kind="search_results",
+        search_engine="youtube",
+        search_query="lo fi hip hop",
+    )
+
+    report = build_terminal_step_report(
+        prompt="now click the first vid",
+        heuristic_only=True,
+        browser_state=browser_state,
+    )
+
+    assert report.constraints["page_kind"] == "search_results"
+    assert report.constraints["search_engine"] == "youtube"
+    assert report.candidates[0].recommended is True
+    assert report.candidates[0].plan.actions[0].kind == "open_search_result"
+    labels = [candidate.label for candidate in report.candidates]
+    assert "Open search result #2" in labels
 
 
 def test_raw_terminal_plan_receives_browser_context():
@@ -275,6 +299,55 @@ def test_terminal_execute_plan_reads_current_repo_page(monkeypatch, tmp_path):
     assert "language C++" in result.records[0].message
 
 
+def test_execute_terminal_step_logs_trace(monkeypatch, tmp_path):
+    state_path = tmp_path / "browser_state.json"
+    trace_path = tmp_path / "trace.jsonl"
+    save_browser_session_state(
+        BrowserSessionState(
+            current_url="https://www.youtube.com/results?search_query=lo+fi+hip+hop",
+            page_kind="search_results",
+            search_engine="youtube",
+            search_query="lo fi hip hop",
+        ),
+        state_path,
+    )
+
+    report = build_terminal_step_report(
+        prompt="now click the first vid",
+        heuristic_only=True,
+        browser_state=BrowserSessionState(
+            current_url="https://www.youtube.com/results?search_query=lo+fi+hip+hop",
+            page_kind="search_results",
+            search_engine="youtube",
+            search_query="lo fi hip hop",
+        ),
+    )
+    monkeypatch.setattr(
+        "memory_system.natural_terminal.execute_terminal_plan",
+        lambda plan, **kwargs: TerminalExecutionResult(
+            prompt=plan.prompt,
+            plan_source=plan.source,
+            ok=True,
+            records=[TerminalExecutionRecord(kind="open_search_result", target="1", status="ok", message="Opened result.")],
+        ),
+    )
+
+    execution = execute_terminal_step(
+        report,
+        choice="1",
+        state_path=state_path,
+        trace_path=trace_path,
+    )
+
+    assert execution.result.ok is True
+    assert execution.chosen_candidate.candidate_id == "prompt_plan"
+    lines = trace_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    payload = json.loads(lines[0])
+    assert payload["chosen_candidate_id"] == "prompt_plan"
+    assert payload["execution"]["ok"] is True
+
+
 def test_memla_terminal_plan_json_outputs_structured_plan(monkeypatch, capsys):
     timeline = iter([0.0, 0.25])
     monkeypatch.setattr("memory_system.cli.time.perf_counter", lambda: next(timeline))
@@ -416,6 +489,99 @@ def test_memla_terminal_run_without_memla_executes_raw_plan(monkeypatch, capsys)
     payload = json.loads(capsys.readouterr().out)
     assert payload["plan_source"] == "raw_model"
     assert payload["records"][0]["command"] == ["/usr/bin/google-chrome"]
+
+
+def test_memla_terminal_step_json_outputs_candidates(monkeypatch, capsys):
+    timeline = iter([3.0, 3.25])
+    monkeypatch.setattr("memory_system.cli.time.perf_counter", lambda: next(timeline))
+    monkeypatch.setattr(
+        "memory_system.cli.build_terminal_step_report",
+        lambda **kwargs: build_terminal_step_report(
+            prompt=kwargs["prompt"],
+            heuristic_only=True,
+            browser_state=BrowserSessionState(
+                current_url="https://www.youtube.com/results?search_query=lo+fi+hip+hop",
+                page_kind="search_results",
+                search_engine="youtube",
+                search_query="lo fi hip hop",
+            ),
+        ),
+    )
+
+    rc = main(
+        [
+            "terminal",
+            "step",
+            "now",
+            "click",
+            "the",
+            "first",
+            "vid",
+            "--heuristic-only",
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["constraints"]["page_kind"] == "search_results"
+    assert payload["candidates"][0]["recommended"] is True
+    assert payload["planning_duration_seconds"] == 0.25
+
+
+def test_memla_terminal_step_choice_executes_candidate(monkeypatch, capsys, tmp_path):
+    timeline = iter([5.0, 5.2, 5.2, 5.35])
+    report = build_terminal_step_report(
+        prompt="what is this repo",
+        heuristic_only=True,
+        browser_state=BrowserSessionState(
+            current_url="https://github.com/ggml-org/llama.cpp",
+            page_kind="repo_page",
+        ),
+    )
+    monkeypatch.setattr("memory_system.cli.time.perf_counter", lambda: next(timeline))
+    monkeypatch.setattr("memory_system.cli.build_terminal_step_report", lambda **kwargs: report)
+    monkeypatch.setattr(
+        "memory_system.cli.execute_terminal_step",
+        lambda current_report, **kwargs: type(
+            "DummyExecution",
+            (),
+            {
+                "report": current_report,
+                "chosen_candidate": current_report.candidates[0],
+                "result": TerminalExecutionResult(
+                    prompt=current_report.prompt,
+                    plan_source=current_report.candidates[0].plan.source,
+                    ok=True,
+                    records=[TerminalExecutionRecord(kind="browser_read_page", target="current_page", status="ok", message="Read page.")],
+                ),
+                "trace_path": str(tmp_path / "trace.jsonl"),
+            },
+        )(),
+    )
+
+    rc = main(
+        [
+            "terminal",
+            "step",
+            "what",
+            "is",
+            "this",
+            "repo",
+            "--heuristic-only",
+            "--choice",
+            "1",
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["chosen_candidate"]["candidate_id"] == "prompt_plan"
+    assert payload["result"]["ok"] is True
+    assert payload["planning_duration_seconds"] == 0.2
+    assert payload["execution_duration_seconds"] == 0.15
+    assert payload["total_duration_seconds"] == 0.35
 
 
 def test_memla_terminal_compare_json_outputs_raw_and_memla(monkeypatch, capsys):
