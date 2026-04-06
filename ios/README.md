@@ -30,7 +30,19 @@ Routes:
 2. Run the `Build iOS App` workflow.
 3. GitHub generates the Xcode project with XcodeGen and builds the app on a macOS runner.
 
-The default workflow validates the app with an `iphonesimulator` build, which avoids signing requirements.
+The workflow now does two things:
+- validates the app with an `iphonesimulator` build
+- produces a device-targeted `Memla-AltStore.ipa` artifact for Windows + AltStore testing
+
+## AltStore testing flow
+
+1. Run the `Build iOS App` workflow on GitHub.
+2. Download the `memla-ios-build` artifact bundle.
+3. Extract `Memla-AltStore.ipa`.
+4. In AltServer on Windows, hold `Shift` and choose `Sideload .ipa...`
+5. Pick `Memla-AltStore.ipa` and install it to the iPhone.
+
+The IPA is intentionally unsigned in CI. AltServer handles the Apple-ID signing step for sideloaded testing.
 
 ## Real device install later
 

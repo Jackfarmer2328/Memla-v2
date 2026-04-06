@@ -36,10 +36,41 @@ jobs:
           xcodebuild \
             -project MemlaApp.xcodeproj \
             -scheme MemlaApp \
+            -configuration Debug \
             -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build/DerivedData \
             CODE_SIGNING_ALLOWED=NO \
             build | tee xcodebuild.log
+
+      - name: Build device app for AltStore IPA
+        working-directory: ios/MemlaApp
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project MemlaApp.xcodeproj \
+            -scheme MemlaApp \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build | tee xcodebuild-device.log
+
+      - name: Package AltStore IPA artifact
+        working-directory: ios/MemlaApp
+        run: |
+          APP_PATH="build/DerivedData/Build/Products/Release-iphoneos/Memla.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "Expected app bundle not found at $APP_PATH"
+            exit 1
+          fi
+          mkdir -p build/ipa/Payload
+          cp -R "$APP_PATH" build/ipa/Payload/Memla.app
+          cd build/ipa
+          /usr/bin/zip -qry Memla-AltStore.ipa Payload
 
       - name: Package build logs
         if: always()
@@ -50,6 +81,12 @@ jobs:
           fi
           if [ -f ios/MemlaApp/xcodebuild.log ]; then
             cp ios/MemlaApp/xcodebuild.log ios-artifacts/xcodebuild.log
+          fi
+          if [ -f ios/MemlaApp/xcodebuild-device.log ]; then
+            cp ios/MemlaApp/xcodebuild-device.log ios-artifacts/xcodebuild-device.log
+          fi
+          if [ -f ios/MemlaApp/build/ipa/Memla-AltStore.ipa ]; then
+            cp ios/MemlaApp/build/ipa/Memla-AltStore.ipa ios-artifacts/Memla-AltStore.ipa
           fi
 
       - name: Upload iOS build artifacts
