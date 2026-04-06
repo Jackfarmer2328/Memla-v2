@@ -13,33 +13,33 @@ final class MemlaViewModel: ObservableObject {
     @Published var isLoading: Bool = false
 
     func refreshHealth() async {
-        await runTask {
-            let response = try await MemlaClient.shared.health(baseURL: baseURL)
-            healthStatus = response.ok ? "Connected" : "Unavailable"
+        await runTask { [self] in
+            let response = try await MemlaClient.shared.health(baseURL: self.baseURL)
+            self.healthStatus = response.ok ? "Connected" : "Unavailable"
         }
     }
 
     func refreshState() async {
-        await runTask {
-            let response = try await MemlaClient.shared.state(baseURL: baseURL)
-            currentState = response.state
+        await runTask { [self] in
+            let response = try await MemlaClient.shared.state(baseURL: self.baseURL)
+            self.currentState = response.state
         }
     }
 
     func runScout() async {
-        await runTask {
-            let envelope = try await MemlaClient.shared.scout(prompt: scoutPrompt, baseURL: baseURL)
-            scoutResult = envelope.result
-            followupResult = nil
-            currentState = try await MemlaClient.shared.state(baseURL: baseURL).state
+        await runTask { [self] in
+            let envelope = try await MemlaClient.shared.scout(prompt: self.scoutPrompt, baseURL: self.baseURL)
+            self.scoutResult = envelope.result
+            self.followupResult = nil
+            self.currentState = try await MemlaClient.shared.state(baseURL: self.baseURL).state
         }
     }
 
     func runFollowup() async {
-        await runTask {
-            let envelope = try await MemlaClient.shared.followup(prompt: followupPrompt, baseURL: baseURL, heuristicOnly: false)
-            followupResult = envelope
-            currentState = try await MemlaClient.shared.state(baseURL: baseURL).state
+        await runTask { [self] in
+            let envelope = try await MemlaClient.shared.followup(prompt: self.followupPrompt, baseURL: self.baseURL, heuristicOnly: false)
+            self.followupResult = envelope
+            self.currentState = try await MemlaClient.shared.state(baseURL: self.baseURL).state
         }
     }
 

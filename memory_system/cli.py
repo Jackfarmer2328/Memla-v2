@@ -74,7 +74,6 @@ from .browser_ontology_benchmark import (
     run_language_learning_benchmark,
     run_language_rule_benchmark,
 )
-from .server_api import serve_memla_api
 from .natural_terminal import (
     build_terminal_step_report,
     build_llm_client as build_terminal_llm_client,
@@ -111,6 +110,12 @@ def _terminal_model_default() -> str:
 
 def _terminal_cases_default() -> str:
     return "cases/terminal_eval_cases.jsonl"
+
+
+def _serve_memla_api(**kwargs: Any) -> None:
+    from .server_api import serve_memla_api
+
+    serve_memla_api(**kwargs)
 
 
 def _browser_cases_default() -> str:
@@ -1091,7 +1096,7 @@ def _handle_memla_serve(args: argparse.Namespace) -> int:
     print("Routes: GET /health, GET /state, POST /run, POST /scout, POST /followup")
     print("Press Ctrl+C to stop the local API server.")
     try:
-        serve_memla_api(
+        _serve_memla_api(
             host=host,
             port=port,
             state_path=args.state_path or None,

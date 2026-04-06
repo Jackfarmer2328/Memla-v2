@@ -397,7 +397,7 @@ def test_memla_serve_dispatches_to_api_server(monkeypatch, capsys):
     def _fake_serve(**kwargs):
         captured.update(kwargs)
 
-    monkeypatch.setattr("memory_system.cli.serve_memla_api", _fake_serve)
+    monkeypatch.setattr("memory_system.cli._serve_memla_api", _fake_serve)
 
     rc = main(
         [
@@ -427,7 +427,7 @@ def test_memla_terminal_serve_alias_dispatches_to_api_server(monkeypatch):
     def _fake_serve(**kwargs):
         captured.update(kwargs)
 
-    monkeypatch.setattr("memory_system.cli.serve_memla_api", _fake_serve)
+    monkeypatch.setattr("memory_system.cli._serve_memla_api", _fake_serve)
 
     rc = main(
         [
