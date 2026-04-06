@@ -58,6 +58,14 @@ memla finance benchmark-pretrade --cases cases/finance_pretrade_public_eval_case
 memla healthcare benchmark-denials --cases cases/healthcare_denial_eval_cases.jsonl --raw-model qwen3.5:9b --memla-model qwen3.5:9b --raw-provider ollama --raw-base-url http://127.0.0.1:11435 --memla-provider ollama --memla-base-url http://127.0.0.1:11435
 memla policy benchmark-authz --cases cases/policy_authz_eval_cases.jsonl --raw-model qwen3.5:9b --memla-model qwen3.5:9b --raw-provider ollama --raw-base-url http://127.0.0.1:11435 --memla-provider ollama --memla-base-url http://127.0.0.1:11435
 memla terminal benchmark --model phi3
+memla terminal benchmark-browser --model phi3
+memla terminal benchmark-browser-v2 --model phi3
+memla terminal benchmark-browser-v3 --model phi3
+memla terminal benchmark-browser-v4 --model phi3
+memla terminal benchmark-browser-v5 --model phi3
+memla terminal benchmark-browser-v6 --model phi3
+memla terminal benchmark-browser-v7 --model phi3
+memla terminal benchmark-browser-v8 --model phi3
 memla terminal compare "open chrome and spotify"
 memla terminal plan "open chrome and spotify" --heuristic-only
 memla terminal run "open chrome and spotify" --heuristic-only
@@ -67,6 +75,9 @@ memla terminal run "click the first video"
 memla terminal run "open github and search llama.cpp"
 memla terminal run "click the first repo"
 memla terminal run "what is this repo"
+memla terminal run "find the best repo for c++ llm inference on cpu then find a youtube video about it then open the first one and summarize it then find a reddit post about it then open the first one and explain it" --heuristic-only
+memla terminal run "find the best repo for c++ llm inference on cpu then find a youtube video about it then open the first one and summarize it then if the first one seems weak open a better one and summarize it then find a reddit post about it then open the first one and explain it" --heuristic-only
+memla terminal run "find the best repo for c++ llm inference on cpu then find a youtube video about it then open the first one and summarize it then if the first one seems weak open a better one and summarize it then find a reddit post about it then open the first one and explain it then tell me which source best explains cpu inference on weak hardware" --heuristic-only
 memla terminal step "now click the first vid" --heuristic-only
 memla terminal step "now click the first vid" --heuristic-only --choice 1
 memla terminal run "open youtube and search lo fi hip hop" --without-memla --model phi3:mini

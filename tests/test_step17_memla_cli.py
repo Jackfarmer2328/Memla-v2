@@ -341,6 +341,44 @@ def test_memla_doctor_reports_status_with_json(monkeypatch, capsys, tmp_path):
     assert payload["ollama"]["model_present"] is True
 
 
+def test_memla_bare_prompt_routes_to_terminal_run(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _fake_terminal_run(args):
+        captured["prompt"] = args.prompt
+        captured["heuristic_only"] = args.heuristic_only
+        captured["model"] = args.model
+        return 0
+
+    monkeypatch.setattr("memory_system.cli._handle_terminal_run", _fake_terminal_run)
+
+    rc = main(["open", "github", "and", "search", "llama.cpp"])
+
+    assert rc == 0
+    assert captured["prompt"] == "open github and search llama.cpp"
+    assert captured["heuristic_only"] is False
+    assert captured["model"] == "phi3:mini"
+
+
+def test_memla_bare_prompt_preserves_terminal_flags(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _fake_terminal_run(args):
+        captured["prompt"] = args.prompt
+        captured["heuristic_only"] = args.heuristic_only
+        captured["model"] = args.model
+        return 0
+
+    monkeypatch.setattr("memory_system.cli._handle_terminal_run", _fake_terminal_run)
+
+    rc = main(["open github and search llama.cpp", "--heuristic-only", "--model", "phi3:mini"])
+
+    assert rc == 0
+    assert captured["prompt"] == "open github and search llama.cpp"
+    assert captured["heuristic_only"] is True
+    assert captured["model"] == "phi3:mini"
+
+
 def test_pyproject_exposes_memla_console_script():
     repo_root = Path(__file__).resolve().parents[1]
     pyproject = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))

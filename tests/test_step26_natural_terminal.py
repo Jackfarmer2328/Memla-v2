@@ -5,19 +5,30 @@ from pathlib import Path
 
 from memory_system.cli import main
 from memory_system.natural_terminal import (
+    BROWSER_STATE_ENV,
     BrowserSessionState,
     TerminalExecutionRecord,
     TerminalExecutionResult,
     TerminalPlan,
     TerminalAction,
+    _browser_new_tab_command,
+    _compiler_surface_text,
+    _language_rule_plan,
+    _merge_language_actions,
+    _normalize_model_actions,
+    _promote_language_rules,
     _fetch_search_result_urls,
+    build_llm_client,
     build_raw_terminal_plan,
     build_terminal_step_report,
     build_terminal_plan,
     execute_terminal_step,
     execute_terminal_plan,
     load_terminal_benchmark_cases,
+    remember_language_compile,
     save_browser_session_state,
+    terminal_language_memory_path,
+    terminal_language_rule_path,
     run_terminal_benchmark,
 )
 
@@ -54,6 +65,54 @@ def test_terminal_heuristic_plan_builds_search_urls_for_casual_phrase():
     assert plan.source == "heuristic"
     assert [action.kind for action in plan.actions] == ["open_url"]
     assert plan.actions[0].resolved_target == "https://www.youtube.com/results?search_query=lo+fi+hip+hop"
+
+
+def test_terminal_heuristic_plan_builds_search_urls_for_look_up_phrase():
+    plan = build_terminal_plan(
+        prompt="hey memla go to youtube and look up nine vicious",
+        heuristic_only=True,
+    )
+
+    assert plan.source == "heuristic"
+    assert [action.kind for action in plan.actions] == ["open_url"]
+    assert plan.actions[0].resolved_target == "https://www.youtube.com/results?search_query=nine+vicious"
+
+
+def test_terminal_heuristic_plan_handles_noisy_click_first_video_follow_up():
+    browser_state = BrowserSessionState(
+        current_url="https://www.youtube.com/results?search_query=nine+vicious",
+        page_kind="search_results",
+        search_engine="youtube",
+        search_query="nine vicious",
+    )
+
+    plan = build_terminal_plan(
+        prompt="click he first vid you see",
+        heuristic_only=True,
+        browser_state=browser_state,
+    )
+
+    assert plan.source == "heuristic"
+    assert [action.kind for action in plan.actions] == ["open_search_result"]
+    assert plan.actions[0].resolved_target == "1"
+
+
+def test_terminal_heuristic_plan_sequences_noisy_initial_browser_prompt():
+    plan = build_terminal_plan(
+        prompt="hey memla open a tab put nine vicious click he first vid you see then open a new tab and find local llm github repo",
+        heuristic_only=True,
+    )
+
+    assert plan.source == "heuristic"
+    assert [action.kind for action in plan.actions] == [
+        "browser_new_tab",
+        "open_url",
+        "open_search_result",
+        "browser_new_tab",
+        "open_url",
+    ]
+    assert plan.actions[1].resolved_target == "https://www.youtube.com/results?search_query=nine+vicious"
+    assert plan.actions[4].resolved_target == "https://github.com/search?q=local+llm&type=repositories"
 
 
 def test_terminal_heuristic_plan_uses_browser_state_for_follow_up():
@@ -108,6 +167,181 @@ def test_terminal_heuristic_plan_reads_current_repo_page():
 
     assert plan.source == "heuristic"
     assert [action.kind for action in plan.actions] == ["browser_read_page"]
+
+
+def test_terminal_heuristic_plan_reads_current_page_for_tell_me_about_this():
+    browser_state = BrowserSessionState(
+        current_url="https://github.com/ggml-org/llama.cpp",
+        page_kind="repo_page",
+    )
+
+    plan = build_terminal_plan(
+        prompt="tell me about this",
+        heuristic_only=True,
+        browser_state=browser_state,
+    )
+
+    assert plan.source == "heuristic"
+    assert [action.kind for action in plan.actions] == ["browser_read_page"]
+
+
+def test_terminal_heuristic_plan_opens_new_tab_from_browser_state():
+    browser_state = BrowserSessionState(
+        current_url="https://github.com/ggml-org/llama.cpp",
+        page_kind="repo_page",
+    )
+
+    plan = build_terminal_plan(
+        prompt="open a new tab",
+        heuristic_only=True,
+        browser_state=browser_state,
+    )
+
+    assert plan.source == "heuristic"
+    assert [action.kind for action in plan.actions] == ["browser_new_tab"]
+
+
+def test_terminal_heuristic_plan_opens_new_tab_then_searches():
+    browser_state = BrowserSessionState(
+        current_url="https://github.com/ggml-org/llama.cpp",
+        page_kind="repo_page",
+    )
+
+    plan = build_terminal_plan(
+        prompt="then open a new tab and put youtube then search nine vicious",
+        heuristic_only=True,
+        browser_state=browser_state,
+    )
+
+    assert plan.source == "heuristic"
+    assert [action.kind for action in plan.actions] == ["browser_new_tab", "open_url"]
+    assert plan.actions[1].resolved_target == "https://www.youtube.com/results?search_query=nine+vicious"
+
+
+def test_terminal_heuristic_plan_closes_current_tab():
+    browser_state = BrowserSessionState(
+        current_url="https://github.com/ggml-org/llama.cpp",
+        page_kind="repo_page",
+    )
+
+    plan = build_terminal_plan(
+        prompt="close the tab",
+        heuristic_only=True,
+        browser_state=browser_state,
+    )
+
+    assert plan.source == "heuristic"
+    assert [action.kind for action in plan.actions] == ["browser_close_tab"]
+
+
+def test_terminal_heuristic_plan_switches_tab():
+    browser_state = BrowserSessionState(current_url="https://github.com/ggml-org/llama.cpp", page_kind="repo_page")
+
+    plan = build_terminal_plan(prompt="switch to the next tab", heuristic_only=True, browser_state=browser_state)
+
+    assert [action.kind for action in plan.actions] == ["browser_switch_tab"]
+    assert plan.actions[0].resolved_target == "next"
+
+
+def test_terminal_heuristic_plan_scrolls_and_submits_and_waits():
+    browser_state = BrowserSessionState(current_url="https://github.com/ggml-org/llama.cpp", page_kind="repo_page")
+
+    scroll_plan = build_terminal_plan(prompt="scroll down", heuristic_only=True, browser_state=browser_state)
+    submit_plan = build_terminal_plan(prompt="submit", heuristic_only=True, browser_state=browser_state)
+    wait_plan = build_terminal_plan(prompt="wait 2 seconds", heuristic_only=True, browser_state=browser_state)
+
+    assert [action.kind for action in scroll_plan.actions] == ["browser_scroll"]
+    assert [action.kind for action in submit_plan.actions] == ["browser_submit"]
+    assert [action.kind for action in wait_plan.actions] == ["browser_wait"]
+    assert wait_plan.actions[0].resolved_target == "2"
+
+
+def test_terminal_heuristic_plan_types_text_and_extracts_cards():
+    browser_state = BrowserSessionState(
+        current_url="https://github.com/search?q=llama.cpp&type=repositories",
+        page_kind="search_results",
+        search_engine="github",
+        search_query="llama.cpp",
+    )
+
+    type_plan = build_terminal_plan(prompt="type hello world", heuristic_only=True, browser_state=browser_state)
+    cards_plan = build_terminal_plan(prompt="show me the top 5 results", heuristic_only=True, browser_state=browser_state)
+
+    assert [action.kind for action in type_plan.actions] == ["browser_type_text"]
+    assert [action.kind for action in cards_plan.actions] == ["browser_extract_cards"]
+
+
+def test_terminal_heuristic_plan_clicks_by_text_and_index():
+    browser_state = BrowserSessionState(
+        current_url="https://github.com/search?q=llama.cpp&type=repositories",
+        page_kind="search_results",
+        search_engine="github",
+        search_query="llama.cpp",
+        result_cards=[
+            {"index": 1, "title": "ggml-org/llama.cpp", "url": "https://github.com/ggml-org/llama.cpp", "summary": "LLM inference in C/C++"},
+            {"index": 2, "title": "ollama/ollama", "url": "https://github.com/ollama/ollama", "summary": "Get up and running with LLMs"},
+        ],
+    )
+
+    click_text_plan = build_terminal_plan(prompt="click ollama", heuristic_only=True, browser_state=browser_state)
+    click_index_plan = build_terminal_plan(prompt="click item 2", heuristic_only=True, browser_state=browser_state)
+
+    assert [action.kind for action in click_text_plan.actions] == ["browser_click_text"]
+    assert [action.kind for action in click_index_plan.actions] == ["browser_click_index"]
+
+
+def test_terminal_heuristic_plan_ranks_cards_for_goal():
+    browser_state = BrowserSessionState(
+        current_url="https://github.com/search?q=local+llm&type=repositories",
+        page_kind="search_results",
+        search_engine="github",
+        search_query="local llm",
+        result_cards=[
+            {"index": 1, "title": "ollama/ollama", "url": "https://github.com/ollama/ollama", "summary": "Simple CLI for local models."},
+            {"index": 2, "title": "ggml-org/llama.cpp", "url": "https://github.com/ggml-org/llama.cpp", "summary": "C/C++ inference runtime."},
+        ],
+    )
+
+    plan = build_terminal_plan(
+        prompt="which repo best matches a beginner local llm workflow on a laptop",
+        heuristic_only=True,
+        browser_state=browser_state,
+    )
+
+    assert [action.kind for action in plan.actions] == ["browser_rank_cards"]
+    assert plan.actions[0].resolved_target == "current_cards"
+
+
+def test_terminal_heuristic_plan_compares_first_two_cards():
+    browser_state = BrowserSessionState(
+        current_url="https://github.com/search?q=local+llm&type=repositories",
+        page_kind="search_results",
+        search_engine="github",
+        search_query="local llm",
+        result_cards=[
+            {"index": 1, "title": "ollama/ollama", "url": "https://github.com/ollama/ollama", "summary": "Simple CLI for local models."},
+            {"index": 2, "title": "ggml-org/llama.cpp", "url": "https://github.com/ggml-org/llama.cpp", "summary": "C/C++ inference runtime."},
+        ],
+    )
+
+    plan = build_terminal_plan(
+        prompt="compare the first and second repo for c++ llm inference on cpu",
+        heuristic_only=True,
+        browser_state=browser_state,
+    )
+
+    assert [action.kind for action in plan.actions] == ["browser_compare_cards"]
+    assert plan.actions[0].resolved_target == "1,2"
+
+
+def test_terminal_heuristic_plan_extracts_page_and_takes_screenshot():
+    browser_state = BrowserSessionState(current_url="https://github.com/ggml-org/llama.cpp", page_kind="repo_page")
+
+    extract_plan = build_terminal_plan(prompt="extract current page", heuristic_only=True, browser_state=browser_state)
+    screenshot_plan = build_terminal_plan(prompt="take screenshot", heuristic_only=True, browser_state=browser_state)
+
+    assert [action.kind for action in extract_plan.actions] == ["browser_extract_page"]
+    assert [action.kind for action in screenshot_plan.actions] == ["browser_screenshot"]
 
 
 def test_terminal_step_report_includes_prompt_and_state_candidates():
@@ -174,6 +408,121 @@ def test_terminal_step_report_shows_read_page_extraction_fields():
     assert candidate.expected_fields == ["repo", "description", "stars", "forks", "language", "topics"]
 
 
+def test_terminal_step_report_for_new_tab_uses_new_primitive():
+    browser_state = BrowserSessionState(
+        current_url="https://github.com/ggml-org/llama.cpp",
+        page_kind="repo_page",
+    )
+
+    report = build_terminal_step_report(
+        prompt="open a new tab",
+        heuristic_only=True,
+        browser_state=browser_state,
+    )
+
+    candidate = report.candidates[0]
+    assert candidate.plan.actions[0].kind == "browser_new_tab"
+    assert candidate.target_preview == "Active browser"
+    assert candidate.expected_outcome == "Open a fresh blank tab in the current browser."
+
+
+def test_terminal_step_report_for_new_tab_search_shows_compound_preview():
+    browser_state = BrowserSessionState(
+        current_url="https://github.com/ggml-org/llama.cpp",
+        page_kind="repo_page",
+    )
+
+    report = build_terminal_step_report(
+        prompt="then open a new tab and put youtube then search nine vicious",
+        heuristic_only=True,
+        browser_state=browser_state,
+    )
+
+    candidate = report.candidates[0]
+    assert [action.kind for action in candidate.plan.actions] == ["browser_new_tab", "open_url"]
+    assert candidate.label == 'Open a new tab + Open youtube search for "nine vicious"'
+    assert candidate.target_preview == 'Active browser -> Youtube search for "nine vicious"'
+    assert candidate.expected_outcome == "Open a fresh tab, then navigate it to the requested search results."
+
+
+def test_terminal_step_report_for_close_tab_uses_close_candidate_only():
+    browser_state = BrowserSessionState(
+        current_url="https://github.com/ggml-org/llama.cpp",
+        page_kind="repo_page",
+    )
+
+    report = build_terminal_step_report(
+        prompt="close the tab",
+        heuristic_only=True,
+        browser_state=browser_state,
+    )
+
+    assert len(report.candidates) == 1
+    candidate = report.candidates[0]
+    assert candidate.plan.actions[0].kind == "browser_close_tab"
+    assert candidate.label == "Close the current tab"
+    assert candidate.expected_outcome == "Close the active browser tab."
+
+
+def test_terminal_step_report_for_extract_cards_uses_cached_cards():
+    browser_state = BrowserSessionState(
+        current_url="https://github.com/search?q=llama.cpp&type=repositories",
+        page_kind="search_results",
+        search_engine="github",
+        search_query="llama.cpp",
+        result_cards=[{"index": 1, "title": "ggml-org/llama.cpp", "url": "https://github.com/ggml-org/llama.cpp"}],
+    )
+
+    report = build_terminal_step_report(
+        prompt="extract cards",
+        heuristic_only=True,
+        browser_state=browser_state,
+    )
+
+    candidate = report.candidates[0]
+    assert candidate.plan.actions[0].kind == "browser_extract_cards"
+    assert candidate.target_preview == "1 cached result cards"
+
+
+def test_terminal_step_report_for_rank_cards_shows_goal_fields():
+    browser_state = BrowserSessionState(
+        current_url="https://github.com/search?q=local+llm&type=repositories",
+        page_kind="search_results",
+        search_engine="github",
+        search_query="local llm",
+        result_cards=[
+            {"index": 1, "title": "ollama/ollama", "url": "https://github.com/ollama/ollama", "summary": "Simple CLI for local models."},
+            {"index": 2, "title": "ggml-org/llama.cpp", "url": "https://github.com/ggml-org/llama.cpp", "summary": "C/C++ inference runtime."},
+        ],
+    )
+
+    report = build_terminal_step_report(
+        prompt="which repo best matches a beginner local llm workflow on a laptop",
+        heuristic_only=True,
+        browser_state=browser_state,
+    )
+
+    candidate = report.candidates[0]
+    assert candidate.plan.actions[0].kind == "browser_rank_cards"
+    assert candidate.expected_fields == ["goal", "best_title", "best_url", "best_score", "ranking"]
+
+
+def test_terminal_step_report_does_not_offer_irrelevant_context_for_unknown_prompt():
+    browser_state = BrowserSessionState(
+        current_url="https://github.com/ggml-org/llama.cpp",
+        page_kind="repo_page",
+    )
+
+    report = build_terminal_step_report(
+        prompt="do the thing from earlier but cooler",
+        heuristic_only=True,
+        browser_state=browser_state,
+    )
+
+    assert report.candidates == []
+    assert "planner_clarification" in report.constraints
+
+
 def test_raw_terminal_plan_receives_browser_context():
     captured_messages = {}
 
@@ -203,6 +552,224 @@ def test_raw_terminal_plan_receives_browser_context():
     assert "Current browser URL" in system_message
     assert "youtube" in system_message
     assert "Cached browser results: 1" in system_message
+
+
+def test_language_v2_model_fallback_compiles_messy_prompt(monkeypatch):
+    captured_messages = {}
+
+    class DummyClient:
+        def chat(self, *, model, messages, temperature):
+            captured_messages["messages"] = messages
+            return json.dumps(
+                {
+                    "actions": [
+                        {"kind": "browser_search_subject", "target": "youtube"},
+                        {"kind": "open_search_result", "target": "1"},
+                    ]
+                }
+            )
+
+    browser_state = BrowserSessionState(
+        current_url="https://github.com/ggml-org/llama.cpp",
+        page_kind="repo_page",
+    )
+    monkeypatch.setenv(BROWSER_STATE_ENV, str(Path.cwd() / ".pytest_language_state.json"))
+    monkeypatch.setattr("memory_system.natural_terminal._heuristic_plan", lambda *args, **kwargs: None)
+
+    plan = build_terminal_plan(
+        prompt="pull some yt coverage on this repo and crack open the opener",
+        model="phi3:mini",
+        client=DummyClient(),
+        browser_state=browser_state,
+    )
+
+    assert plan.source == "language_model"
+    assert [action.kind for action in plan.actions] == ["browser_search_subject", "open_search_result"]
+    system_message = captured_messages["messages"][0].content
+    assert "Memla Language Ontology V2" in system_message
+    assert "compile messy human language" in system_message
+    user_message = captured_messages["messages"][1].content
+    assert "Normalized translation surface" in user_message
+
+
+def test_compiler_surface_rewrites_v3_frontier_language():
+    surface = _compiler_surface_text(
+        "sort out the repo that suits a beginner local llm setup on a weak laptop then scope out some youtube coverage on the winner and peel open the top one then tell me which source lands the clearest explanation"
+    )
+
+    assert "find whatever repo fits best" in surface
+    assert "find a youtube video about the winner" in surface
+    assert "open the first one" in surface
+    assert "best explains" in surface
+
+
+def test_merge_language_actions_completes_partial_v3_chain():
+    browser_state = BrowserSessionState(
+        current_url="https://github.com/search?q=local+llm&type=repositories",
+        page_kind="search_results",
+        search_engine="github",
+        search_query="local llm",
+        result_cards=[
+            {"index": 1, "title": "ollama/ollama", "url": "https://github.com/ollama/ollama", "summary": "Beginner local models", "meta": "beginner | local"},
+            {"index": 2, "title": "ggml-org/llama.cpp", "url": "https://github.com/ggml-org/llama.cpp", "summary": "CPU inference in C/C++", "meta": "cpp | cpu"},
+        ],
+    )
+    partial = [
+        TerminalAction(kind="browser_rank_cards", target="current_cards", resolved_target="current_cards"),
+        TerminalAction(kind="open_search_result", target="1", resolved_target="1"),
+    ]
+
+    merged = _merge_language_actions(
+        partial,
+        prompt="sort out the repo that suits a beginner local llm setup on a weak laptop, then scope out some youtube coverage on the winner and peel open the top one, then if that first clip is weak crack a stronger one and sum it up, then scope out a reddit thread on it and peel open the top one, then tell me which source lands the clearest beginner weak laptop explanation",
+        browser_state=browser_state,
+    )
+
+    assert [action.kind for action in merged] == [
+        "browser_rank_cards",
+        "browser_search_subject",
+        "open_search_result",
+        "browser_read_page",
+        "browser_retry_subject_result",
+        "browser_read_page",
+        "browser_search_subject",
+        "open_search_result",
+        "browser_read_page",
+        "browser_synthesize_evidence",
+    ]
+
+
+def test_language_v2_rejects_invalid_compiled_plan():
+    class DummyClient:
+        def chat(self, *, model, messages, temperature):
+            return json.dumps({"actions": [{"kind": "browser_synthesize_evidence", "target": "cpu inference"}]})
+
+    plan = build_terminal_plan(
+        prompt="pull it all together",
+        model="phi3:mini",
+        client=DummyClient(),
+    )
+
+    assert plan.source == "language_model"
+    assert plan.actions == []
+    assert "browser_evidence_missing" in plan.residual_constraints
+
+
+def test_language_memory_reuses_prior_compile_without_model(monkeypatch, tmp_path):
+    monkeypatch.setenv(BROWSER_STATE_ENV, str(tmp_path / "browser_state.json"))
+    browser_state = BrowserSessionState(
+        current_url="https://github.com/ggml-org/llama.cpp",
+        page_kind="repo_page",
+    )
+    remembered = TerminalPlan(
+        prompt="pull some yt coverage on this repo and crack open the opener",
+        source="language_model",
+        actions=[
+            TerminalAction(kind="browser_search_subject", target="youtube", resolved_target="youtube", note=json.dumps({"engine": "youtube"})),
+            TerminalAction(kind="open_search_result", target="1", resolved_target="1"),
+        ],
+    )
+
+    remember_language_compile(
+        prompt=remembered.prompt,
+        browser_state=browser_state,
+        plan=remembered,
+    )
+
+    class FailClient:
+        def chat(self, *, model, messages, temperature):
+            raise AssertionError("language model should not be called when memory matches")
+
+    monkeypatch.setattr("memory_system.natural_terminal._heuristic_plan", lambda *args, **kwargs: None)
+
+    plan = build_terminal_plan(
+        prompt="pull some yt coverage on this repo and crack open the opener please",
+        model="phi3:mini",
+        client=FailClient(),
+        browser_state=browser_state,
+    )
+
+    assert plan.source == "language_memory"
+    assert [action.kind for action in plan.actions] == ["browser_search_subject", "open_search_result"]
+
+
+def test_execute_terminal_plan_persists_language_memory_after_success(monkeypatch, tmp_path):
+    monkeypatch.setenv(BROWSER_STATE_ENV, str(tmp_path / "browser_state.json"))
+    launched: list[list[str]] = []
+
+    class DummyProcess:
+        def __init__(self, command, **kwargs):
+            launched.append(list(command))
+
+    monkeypatch.setattr("memory_system.natural_terminal.subprocess.Popen", DummyProcess)
+
+    browser_state = BrowserSessionState(
+        current_url="https://github.com/ggml-org/llama.cpp",
+        page_kind="repo_page",
+    )
+    plan = TerminalPlan(
+        prompt="pull some yt coverage on this repo and crack open the opener",
+        source="language_model",
+        actions=[
+            TerminalAction(kind="browser_search_subject", target="youtube", resolved_target="youtube", note=json.dumps({"engine": "youtube"})),
+        ],
+    )
+
+    result = execute_terminal_plan(plan, platform_name="linux", browser_state=browser_state)
+
+    assert result.ok is True
+    assert terminal_language_memory_path().exists() is True
+
+
+def test_language_rule_plan_activates_after_repeated_memory_hits(monkeypatch, tmp_path):
+    monkeypatch.setenv(BROWSER_STATE_ENV, str(tmp_path / "browser_state.json"))
+    browser_state = BrowserSessionState(
+        current_url="https://github.com/search?q=local+llm&type=repositories",
+        page_kind="search_results",
+        search_engine="github",
+        search_query="local llm",
+        result_cards=[
+            {"index": 1, "title": "ollama/ollama", "url": "https://github.com/ollama/ollama", "summary": "Beginner local models", "meta": "beginner | local"},
+            {"index": 2, "title": "ggml-org/llama.cpp", "url": "https://github.com/ggml-org/llama.cpp", "summary": "CPU inference in C/C++", "meta": "cpp | cpu"},
+        ],
+    )
+    plan = TerminalPlan(
+        prompt="sort out the repo that suits a beginner local llm setup on a weak laptop, then scope out some youtube coverage on the winner and peel open the top one please, then if that first clip is weak crack a stronger one and sum it up, then scope out a reddit thread on it and peel open the top one, then tell me which source lands the clearest beginner weak laptop explanation",
+        source="language_memory",
+        actions=[
+            TerminalAction(kind="browser_rank_cards", target="current_cards", resolved_target="current_cards", note=json.dumps({"goal": "beginner weak laptop local llm"})),
+            TerminalAction(kind="browser_search_subject", target="youtube", resolved_target="youtube", note=json.dumps({"engine": "youtube"})),
+            TerminalAction(kind="open_search_result", target="1", resolved_target="1"),
+            TerminalAction(kind="browser_read_page", target="current_page", resolved_target="current_page"),
+            TerminalAction(kind="browser_retry_subject_result", target="better_result", resolved_target="better_result"),
+            TerminalAction(kind="browser_read_page", target="current_page", resolved_target="current_page"),
+            TerminalAction(kind="browser_search_subject", target="reddit", resolved_target="reddit", note=json.dumps({"engine": "reddit"})),
+            TerminalAction(kind="open_search_result", target="1", resolved_target="1"),
+            TerminalAction(kind="browser_read_page", target="current_page", resolved_target="current_page"),
+            TerminalAction(kind="browser_synthesize_evidence", target="current_evidence", resolved_target="current_evidence", note=json.dumps({"goal": "beginner weak laptop explanation"})),
+        ],
+    )
+
+    _promote_language_rules(prompt=plan.prompt, browser_state=browser_state, plan=plan)
+    _promote_language_rules(prompt=plan.prompt, browser_state=browser_state, plan=plan)
+
+    promoted = _language_rule_plan(plan.prompt, browser_state=browser_state)
+
+    assert terminal_language_rule_path().exists() is True
+    assert promoted is not None
+    assert promoted.source == "language_rule"
+    assert [action.kind for action in promoted.actions] == [
+        "browser_rank_cards",
+        "browser_search_subject",
+        "open_search_result",
+        "browser_read_page",
+        "browser_retry_subject_result",
+        "browser_read_page",
+        "browser_search_subject",
+        "open_search_result",
+        "browser_read_page",
+        "browser_synthesize_evidence",
+    ]
 
 
 def test_terminal_execute_plan_launches_linux_apps(monkeypatch):
@@ -277,10 +844,10 @@ def test_terminal_execute_search_primes_result_cache(monkeypatch):
 
     monkeypatch.setattr("memory_system.natural_terminal.subprocess.Popen", DummyProcess)
     monkeypatch.setattr(
-        "memory_system.natural_terminal._fetch_search_result_urls",
+        "memory_system.natural_terminal._fetch_search_result_cards",
         lambda engine, query, limit=5: [
-            "https://github.com/ggml-org/llama.cpp",
-            "https://github.com/oobabooga/text-generation-webui",
+            {"index": 1, "title": "ggml-org/llama.cpp", "url": "https://github.com/ggml-org/llama.cpp"},
+            {"index": 2, "title": "oobabooga/text-generation-webui", "url": "https://github.com/oobabooga/text-generation-webui"},
         ],
     )
 
@@ -294,6 +861,328 @@ def test_terminal_execute_search_primes_result_cache(monkeypatch):
         "https://github.com/ggml-org/llama.cpp",
         "https://github.com/oobabooga/text-generation-webui",
     ]
+
+
+def test_terminal_execute_plan_opens_new_tab(monkeypatch):
+    launched: list[list[str]] = []
+
+    class DummyProcess:
+        def __init__(self, command, **kwargs):
+            launched.append(list(command))
+
+    monkeypatch.setattr("memory_system.natural_terminal.subprocess.Popen", DummyProcess)
+    monkeypatch.setattr("memory_system.natural_terminal.shutil.which", lambda name: "/usr/bin/xdotool" if name == "xdotool" else None)
+
+    plan = TerminalPlan(
+        prompt="open a new tab",
+        source="heuristic",
+        actions=[TerminalAction(kind="browser_new_tab", target="new_tab", resolved_target="new_tab")],
+    )
+    result = execute_terminal_plan(
+        plan,
+        platform_name="linux",
+        browser_state=BrowserSessionState(current_url="https://github.com/ggml-org/llama.cpp", page_kind="repo_page"),
+    )
+
+    assert result.ok is True
+    assert launched == [["/usr/bin/xdotool", "key", "ctrl+t"]]
+    assert result.browser_state["page_kind"] == "blank_tab"
+
+
+def test_terminal_execute_plan_closes_tab(monkeypatch):
+    launched: list[list[str]] = []
+
+    class DummyProcess:
+        def __init__(self, command, **kwargs):
+            launched.append(list(command))
+
+    monkeypatch.setattr("memory_system.natural_terminal.subprocess.Popen", DummyProcess)
+    monkeypatch.setattr("memory_system.natural_terminal.shutil.which", lambda name: "/usr/bin/xdotool" if name == "xdotool" else None)
+
+    plan = build_terminal_plan(
+        prompt="close the tab",
+        heuristic_only=True,
+        browser_state=BrowserSessionState(current_url="https://github.com/ggml-org/llama.cpp", page_kind="repo_page"),
+    )
+    result = execute_terminal_plan(
+        plan,
+        platform_name="linux",
+        browser_state=BrowserSessionState(current_url="https://github.com/ggml-org/llama.cpp", page_kind="repo_page"),
+    )
+
+    assert result.ok is True
+    assert launched == [["/usr/bin/xdotool", "key", "ctrl+w"]]
+    assert result.browser_state["current_url"] == ""
+
+
+def test_terminal_execute_plan_switches_tab_and_scrolls_and_submits(monkeypatch):
+    launched: list[list[str]] = []
+
+    class DummyProcess:
+        def __init__(self, command, **kwargs):
+            launched.append(list(command))
+
+    monkeypatch.setattr("memory_system.natural_terminal.subprocess.Popen", DummyProcess)
+    monkeypatch.setattr("memory_system.natural_terminal.shutil.which", lambda name: "/usr/bin/xdotool" if name == "xdotool" else None)
+
+    switch_result = execute_terminal_plan(
+        TerminalPlan(prompt="switch tabs", source="heuristic", actions=[TerminalAction(kind="browser_switch_tab", target="next", resolved_target="next")]),
+        platform_name="linux",
+        browser_state=BrowserSessionState(current_url="https://github.com/ggml-org/llama.cpp", page_kind="repo_page"),
+    )
+    scroll_result = execute_terminal_plan(
+        TerminalPlan(prompt="scroll down", source="heuristic", actions=[TerminalAction(kind="browser_scroll", target="down", resolved_target="down")]),
+        platform_name="linux",
+        browser_state=BrowserSessionState(current_url="https://github.com/ggml-org/llama.cpp", page_kind="repo_page"),
+    )
+    submit_result = execute_terminal_plan(
+        TerminalPlan(prompt="submit", source="heuristic", actions=[TerminalAction(kind="browser_submit", target="submit", resolved_target="submit")]),
+        platform_name="linux",
+        browser_state=BrowserSessionState(current_url="https://github.com/ggml-org/llama.cpp", page_kind="repo_page"),
+    )
+
+    assert switch_result.ok is True
+    assert scroll_result.ok is True
+    assert submit_result.ok is True
+    assert launched == [
+        ["/usr/bin/xdotool", "key", "ctrl+Tab"],
+        ["/usr/bin/xdotool", "key", "Page_Down"],
+        ["/usr/bin/xdotool", "key", "Return"],
+    ]
+
+
+def test_terminal_execute_plan_clicks_text_and_extracts_cards(monkeypatch):
+    launched: list[list[str]] = []
+
+    class DummyProcess:
+        def __init__(self, command, **kwargs):
+            launched.append(list(command))
+
+    monkeypatch.setattr("memory_system.natural_terminal.subprocess.Popen", DummyProcess)
+    state = BrowserSessionState(
+        current_url="https://github.com/search?q=llama.cpp&type=repositories",
+        page_kind="search_results",
+        search_engine="github",
+        search_query="llama.cpp",
+        result_cards=[
+            {"index": 1, "title": "ggml-org/llama.cpp", "url": "https://github.com/ggml-org/llama.cpp", "summary": "LLM inference"},
+            {"index": 2, "title": "ollama/ollama", "url": "https://github.com/ollama/ollama", "summary": "Run LLMs"},
+        ],
+    )
+
+    click_result = execute_terminal_plan(
+        TerminalPlan(prompt="click ollama", source="heuristic", actions=[TerminalAction(kind="browser_click_text", target="ollama", resolved_target="ollama")]),
+        platform_name="linux",
+        browser_state=state,
+    )
+    cards_result = execute_terminal_plan(
+        TerminalPlan(prompt="extract cards", source="heuristic", actions=[TerminalAction(kind="browser_extract_cards", target="current_cards", resolved_target="current_cards")]),
+        platform_name="linux",
+        browser_state=state,
+    )
+
+    assert click_result.ok is True
+    assert launched == [["xdg-open", "https://github.com/ollama/ollama"]]
+    assert cards_result.ok is True
+    assert len(cards_result.records[0].details["cards"]) == 2
+
+
+def test_terminal_execute_plan_types_waits_extracts_and_screenshots(monkeypatch, tmp_path):
+    launched: list[list[str]] = []
+
+    class DummyProcess:
+        def __init__(self, command, **kwargs):
+            launched.append(list(command))
+
+        def wait(self, timeout=None):
+            return 0
+
+    sleeps: list[float] = []
+
+    monkeypatch.setattr("memory_system.natural_terminal.subprocess.Popen", DummyProcess)
+    monkeypatch.setattr("memory_system.natural_terminal.shutil.which", lambda name: "/usr/bin/xdotool" if name == "xdotool" else None)
+    monkeypatch.setattr("memory_system.natural_terminal.time.sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr("memory_system.natural_terminal.terminal_browser_state_path", lambda: tmp_path / "browser_state.json")
+    monkeypatch.setattr("memory_system.natural_terminal.time.time", lambda: 1234567890)
+    monkeypatch.setattr("memory_system.natural_terminal._fetch_page_html", lambda url: "<html><title>Example</title></html>")
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._browser_screenshot_command",
+        lambda output_path, platform_name: ["/usr/bin/gnome-screenshot", "-f", str(output_path)],
+    )
+
+    type_result = execute_terminal_plan(
+        TerminalPlan(prompt="type hello", source="heuristic", actions=[TerminalAction(kind="browser_type_text", target="hello", resolved_target="hello")]),
+        platform_name="linux",
+        browser_state=BrowserSessionState(current_url="https://example.com", page_kind="web_page"),
+    )
+    wait_result = execute_terminal_plan(
+        TerminalPlan(prompt="wait 2", source="heuristic", actions=[TerminalAction(kind="browser_wait", target="2", resolved_target="2")]),
+        platform_name="linux",
+        browser_state=BrowserSessionState(current_url="https://example.com", page_kind="web_page"),
+    )
+    extract_result = execute_terminal_plan(
+        TerminalPlan(prompt="extract page", source="heuristic", actions=[TerminalAction(kind="browser_extract_page", target="current_page", resolved_target="current_page")]),
+        platform_name="linux",
+        browser_state=BrowserSessionState(current_url="https://example.com", page_kind="web_page"),
+    )
+    screenshot_result = execute_terminal_plan(
+        TerminalPlan(prompt="screenshot", source="heuristic", actions=[TerminalAction(kind="browser_screenshot", target="current_page", resolved_target="current_page")]),
+        platform_name="linux",
+        browser_state=BrowserSessionState(current_url="https://example.com", page_kind="web_page"),
+    )
+
+    assert type_result.ok is True
+    assert wait_result.ok is True
+    assert extract_result.ok is True
+    assert screenshot_result.ok is True
+    assert launched[0] == ["/usr/bin/xdotool", "type", "--delay", "0", "hello"]
+    assert sleeps == [2.0]
+
+
+def test_windows_browser_new_tab_command_activates_browser_first(monkeypatch):
+    monkeypatch.setenv("MEMLA_BROWSER_APP", "brave")
+
+    command = _browser_new_tab_command(platform_name="win32")
+
+    assert command[:3] == ["powershell.exe", "-NoProfile", "-Command"]
+    assert "AppActivate($title)" in command[3]
+    assert "Brave" in command[3]
+    assert "$wshell.SendKeys('^t')" in command[3]
+
+
+def test_windows_new_tab_followed_by_url_falls_back_safely(monkeypatch):
+    launched: list[list[str]] = []
+
+    class DummyProcess:
+        def __init__(self, command, **kwargs):
+            self.command = list(command)
+            launched.append(self.command)
+
+        def wait(self, timeout=None):
+            if self.command and str(self.command[0]).lower().endswith("powershell.exe"):
+                return 17
+            return 0
+
+    monkeypatch.setattr("memory_system.natural_terminal.subprocess.Popen", DummyProcess)
+
+    plan = build_terminal_plan(
+        prompt="open a new tab with youtube and find a cool video on llms",
+        heuristic_only=True,
+    )
+    result = execute_terminal_plan(
+        plan,
+        platform_name="win32",
+        browser_state=BrowserSessionState(
+            current_url="https://github.com/ggml-org/llama.cpp",
+            page_kind="repo_page",
+            browser_app="brave",
+        ),
+    )
+
+    assert result.ok is True
+    assert launched[0][0] == "powershell.exe"
+    assert launched[1][:4] == ["cmd", "/c", "start", ""]
+    assert launched[1][4] == "https://www.youtube.com/results?search_query=cool+llms"
+    assert result.records[0].message.startswith("Skipped the raw new-tab shortcut")
+    assert result.browser_state["current_url"] == "https://www.youtube.com/results?search_query=cool+llms"
+
+
+def test_terminal_execute_plan_new_tab_then_search_uses_active_tab_navigation(monkeypatch):
+    launched: list[list[str]] = []
+
+    class DummyProcess:
+        def __init__(self, command, **kwargs):
+            launched.append(list(command))
+
+    monkeypatch.setattr("memory_system.natural_terminal.subprocess.Popen", DummyProcess)
+    monkeypatch.setattr("memory_system.natural_terminal.shutil.which", lambda name: "/usr/bin/xdotool" if name == "xdotool" else None)
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._fetch_search_result_urls",
+        lambda engine, query, limit=5: ["https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
+    )
+
+    plan = build_terminal_plan(
+        prompt="now open a new tab and within that tab open youtube and search nine vicious",
+        heuristic_only=True,
+        browser_state=BrowserSessionState(current_url="https://github.com/ggml-org/llama.cpp", page_kind="repo_page"),
+    )
+    result = execute_terminal_plan(
+        plan,
+        platform_name="linux",
+        browser_state=BrowserSessionState(current_url="https://github.com/ggml-org/llama.cpp", page_kind="repo_page"),
+    )
+
+    assert result.ok is True
+    assert launched == [
+        ["/usr/bin/xdotool", "key", "ctrl+t"],
+        [
+            "/usr/bin/xdotool",
+            "key",
+            "ctrl+l",
+            "type",
+            "--delay",
+            "0",
+            "https://www.youtube.com/results?search_query=nine+vicious",
+            "key",
+            "Return",
+        ],
+    ]
+    assert result.browser_state["page_kind"] == "search_results"
+    assert result.records[1].message.startswith("Navigated the active browser tab to")
+
+
+def test_build_llm_client_prefers_reachable_ollama_port(monkeypatch):
+    class DummyResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _fake_urlopen(request, timeout=0.0):
+        full_url = request.full_url
+        if "11435" in full_url:
+            return DummyResponse()
+        raise OSError("connection refused")
+
+    monkeypatch.delenv("OLLAMA_URL", raising=False)
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    monkeypatch.setattr("memory_system.natural_terminal.urllib_request.urlopen", _fake_urlopen)
+
+    client = build_llm_client(provider="ollama")
+
+    assert client.base_url == "http://127.0.0.1:11435"
+
+
+def test_build_llm_client_respects_explicit_base_url(monkeypatch):
+    called = {"urlopen": False}
+
+    def _fake_urlopen(request, timeout=0.0):
+        called["urlopen"] = True
+        raise AssertionError("urlopen should not be called when base_url is explicit")
+
+    monkeypatch.setattr("memory_system.natural_terminal.urllib_request.urlopen", _fake_urlopen)
+
+    client = build_llm_client(provider="ollama", base_url="http://127.0.0.1:9999")
+
+    assert client.base_url == "http://127.0.0.1:9999"
+    assert called["urlopen"] is False
+
+
+def test_normalize_model_actions_converts_url_like_open_path_to_open_url():
+    actions = _normalize_model_actions(
+        {
+            "actions": [
+                {
+                    "kind": "open_path",
+                    "target": "https://github.com/mudler/LocalAI",
+                }
+            ]
+        }
+    )
+
+    assert [action.kind for action in actions] == ["open_url"]
+    assert actions[0].resolved_target == "https://github.com/mudler/LocalAI"
 
 
 def test_fetch_search_result_urls_uses_github_api_first(monkeypatch):
@@ -367,6 +1256,888 @@ def test_terminal_execute_plan_reads_current_repo_page(monkeypatch, tmp_path):
     assert result.records[0].details["forks"] == "11.2k"
     assert "Repo summary:" in result.records[0].message
     assert "language C++" in result.records[0].message
+
+
+def test_terminal_execute_plan_ranks_and_compares_cards():
+    state = BrowserSessionState(
+        current_url="https://github.com/search?q=local+llm&type=repositories",
+        page_kind="search_results",
+        search_engine="github",
+        search_query="local llm",
+        result_cards=[
+            {
+                "index": 1,
+                "title": "ollama/ollama",
+                "url": "https://github.com/ollama/ollama",
+                "summary": "Simple CLI for local models on laptops.",
+                "meta": "cli | beginner",
+            },
+            {
+                "index": 2,
+                "title": "ggml-org/llama.cpp",
+                "url": "https://github.com/ggml-org/llama.cpp",
+                "summary": "C/C++ inference runtime for CPUs.",
+                "meta": "c++ | inference | cpu",
+            },
+        ],
+    )
+
+    rank_plan = build_terminal_plan(
+        prompt="which repo best matches a beginner local llm workflow on a laptop",
+        heuristic_only=True,
+        browser_state=state,
+    )
+    cpp_rank_plan = build_terminal_plan(
+        prompt="rank these repos for local c++ inference on weak hardware",
+        heuristic_only=True,
+        browser_state=state,
+    )
+    compare_plan = build_terminal_plan(
+        prompt="compare the first and second repo for c++ llm inference on cpu",
+        heuristic_only=True,
+        browser_state=state,
+    )
+
+    rank_result = execute_terminal_plan(rank_plan, browser_state=state)
+    cpp_rank_result = execute_terminal_plan(cpp_rank_plan, browser_state=state)
+    compare_result = execute_terminal_plan(compare_plan, browser_state=state)
+
+    assert rank_result.records[0].details["best_title"] == "ollama/ollama"
+    assert cpp_rank_result.records[0].details["best_title"] == "ggml-org/llama.cpp"
+    assert compare_result.records[0].details["winner_title"] == "ggml-org/llama.cpp"
+
+
+def test_terminal_heuristic_plan_chains_rank_then_youtube_subject_search():
+    state = BrowserSessionState(
+        current_url="https://github.com/search?q=local+llm&type=repositories",
+        page_kind="search_results",
+        search_engine="github",
+        search_query="local llm",
+        result_cards=[
+            {
+                "index": 1,
+                "title": "ollama/ollama",
+                "url": "https://github.com/ollama/ollama",
+                "summary": "Simple CLI for local models on laptops.",
+                "meta": "cli | beginner",
+            },
+            {
+                "index": 2,
+                "title": "ggml-org/llama.cpp",
+                "url": "https://github.com/ggml-org/llama.cpp",
+                "summary": "C/C++ inference runtime for CPUs.",
+                "meta": "c++ | inference | cpu | portable",
+            },
+        ],
+    )
+
+    plan = build_terminal_plan(
+        prompt="find the best repo for c++ llm inference on cpu then find a youtube video about it",
+        heuristic_only=True,
+        browser_state=state,
+    )
+
+    assert [action.kind for action in plan.actions] == ["browser_rank_cards", "browser_search_subject"]
+    assert json.loads(plan.actions[1].note)["engine"] == "youtube"
+
+
+def test_terminal_heuristic_plan_chains_rank_search_and_open_video():
+    state = BrowserSessionState(
+        current_url="https://github.com/search?q=local+llm&type=repositories",
+        page_kind="search_results",
+        search_engine="github",
+        search_query="local llm",
+        result_cards=[
+            {
+                "index": 1,
+                "title": "ollama/ollama",
+                "url": "https://github.com/ollama/ollama",
+                "summary": "Simple CLI for local models on laptops.",
+                "meta": "cli | beginner",
+            },
+            {
+                "index": 2,
+                "title": "ggml-org/llama.cpp",
+                "url": "https://github.com/ggml-org/llama.cpp",
+                "summary": "C/C++ inference runtime for CPUs.",
+                "meta": "c++ | inference | cpu | portable",
+            },
+        ],
+    )
+
+    plan = build_terminal_plan(
+        prompt="find the best repo for c++ llm inference on cpu then find a youtube video about it and open the first one",
+        heuristic_only=True,
+        browser_state=state,
+    )
+
+    assert [action.kind for action in plan.actions] == ["browser_rank_cards", "browser_search_subject", "open_search_result"]
+
+
+def test_terminal_heuristic_plan_chains_rank_search_open_and_read_video():
+    state = BrowserSessionState(
+        current_url="https://github.com/search?q=local+llm&type=repositories",
+        page_kind="search_results",
+        search_engine="github",
+        search_query="local llm",
+        result_cards=[
+            {
+                "index": 1,
+                "title": "ollama/ollama",
+                "url": "https://github.com/ollama/ollama",
+                "summary": "Simple CLI for local models on laptops.",
+                "meta": "cli | beginner",
+            },
+            {
+                "index": 2,
+                "title": "ggml-org/llama.cpp",
+                "url": "https://github.com/ggml-org/llama.cpp",
+                "summary": "C/C++ inference runtime for CPUs.",
+                "meta": "c++ | inference | cpu | portable",
+            },
+        ],
+    )
+
+    plan = build_terminal_plan(
+        prompt="find the best repo for c++ llm inference on cpu then find a youtube video about it and open the first one and summarize it",
+        heuristic_only=True,
+        browser_state=state,
+    )
+
+    assert [action.kind for action in plan.actions] == [
+        "browser_rank_cards",
+        "browser_search_subject",
+        "open_search_result",
+        "browser_read_page",
+    ]
+
+
+def test_terminal_heuristic_plan_searches_youtube_for_current_repo():
+    state = BrowserSessionState(
+        current_url="https://github.com/ggml-org/llama.cpp",
+        page_kind="repo_page",
+    )
+
+    plan = build_terminal_plan(
+        prompt="find a youtube video about this repo",
+        heuristic_only=True,
+        browser_state=state,
+    )
+
+    assert [action.kind for action in plan.actions] == ["browser_search_subject"]
+    assert plan.actions[0].resolved_target == "youtube"
+
+
+def test_terminal_execute_plan_rank_then_search_subject(monkeypatch):
+    launched: list[list[str]] = []
+
+    class DummyProcess:
+        def __init__(self, command, **kwargs):
+            launched.append(list(command))
+
+    monkeypatch.setattr("memory_system.natural_terminal.subprocess.Popen", DummyProcess)
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._fetch_search_result_cards",
+        lambda engine, query, limit=5: [
+            {
+                "index": 1,
+                "title": "llama.cpp walkthrough",
+                "url": "https://www.youtube.com/watch?v=demo",
+                "summary": "A walkthrough of llama.cpp.",
+                "meta": "video",
+            }
+        ]
+        if engine == "youtube"
+        else [],
+    )
+
+    state = BrowserSessionState(
+        current_url="https://github.com/search?q=local+llm&type=repositories",
+        page_kind="search_results",
+        search_engine="github",
+        search_query="local llm",
+        result_cards=[
+            {
+                "index": 1,
+                "title": "ollama/ollama",
+                "url": "https://github.com/ollama/ollama",
+                "summary": "Simple CLI for local models on laptops.",
+                "meta": "cli | beginner",
+            },
+            {
+                "index": 2,
+                "title": "ggml-org/llama.cpp",
+                "url": "https://github.com/ggml-org/llama.cpp",
+                "summary": "C/C++ inference runtime for CPUs.",
+                "meta": "c++ | inference | cpu | portable",
+            },
+        ],
+    )
+    plan = build_terminal_plan(
+        prompt="find the best repo for c++ llm inference on cpu then find a youtube video about it",
+        heuristic_only=True,
+        browser_state=state,
+    )
+
+    result = execute_terminal_plan(plan, platform_name="linux", browser_state=state)
+
+    assert result.ok is True
+    assert result.records[0].details["best_title"] == "ggml-org/llama.cpp"
+    assert result.records[1].details["subject_title"] == "ggml-org/llama.cpp"
+    assert result.browser_state["search_engine"] == "youtube"
+    assert result.browser_state["search_query"] == "ggml org llama cpp"
+    assert result.browser_state["subject_title"] == "ggml-org/llama.cpp"
+    assert launched[-1] == [
+        "xdg-open",
+        "https://www.youtube.com/results?search_query=ggml+org+llama+cpp",
+    ]
+
+
+def test_terminal_execute_plan_rank_search_and_open_subject_result(monkeypatch):
+    launched: list[list[str]] = []
+
+    class DummyProcess:
+        def __init__(self, command, **kwargs):
+            launched.append(list(command))
+
+    monkeypatch.setattr("memory_system.natural_terminal.subprocess.Popen", DummyProcess)
+
+    def fake_cards(engine, query, limit=5):
+        if engine == "youtube":
+            return [
+                {
+                    "index": 1,
+                    "title": "llama.cpp CPU inference walkthrough",
+                    "url": "https://www.youtube.com/watch?v=llama-cpp-cpu",
+                    "summary": "A walkthrough of llama.cpp on CPU.",
+                    "meta": "youtube | c++ | cpu",
+                }
+            ]
+        return []
+
+    monkeypatch.setattr("memory_system.natural_terminal._fetch_search_result_cards", fake_cards)
+
+    state = BrowserSessionState(
+        current_url="https://github.com/search?q=local+llm&type=repositories",
+        page_kind="search_results",
+        search_engine="github",
+        search_query="local llm",
+        result_cards=[
+            {
+                "index": 1,
+                "title": "ollama/ollama",
+                "url": "https://github.com/ollama/ollama",
+                "summary": "Simple CLI for local models on laptops.",
+                "meta": "cli | beginner",
+            },
+            {
+                "index": 2,
+                "title": "ggml-org/llama.cpp",
+                "url": "https://github.com/ggml-org/llama.cpp",
+                "summary": "C/C++ inference runtime for CPUs.",
+                "meta": "c++ | inference | cpu | portable",
+            },
+        ],
+    )
+
+    plan = build_terminal_plan(
+        prompt="find the best repo for c++ llm inference on cpu then find a youtube video about it and open the first one",
+        heuristic_only=True,
+        browser_state=state,
+    )
+    result = execute_terminal_plan(plan, platform_name="linux", browser_state=state)
+
+    assert result.ok is True
+    assert result.browser_state["page_kind"] == "video_page"
+    assert result.browser_state["current_url"] == "https://www.youtube.com/watch?v=llama-cpp-cpu"
+    assert result.browser_state["subject_title"] == "llama.cpp CPU inference walkthrough"
+    assert launched[-1] == ["xdg-open", "https://www.youtube.com/watch?v=llama-cpp-cpu"]
+
+
+def test_terminal_execute_plan_rank_search_open_and_read_subject_result(monkeypatch):
+    launched: list[list[str]] = []
+
+    class DummyProcess:
+        def __init__(self, command, **kwargs):
+            launched.append(list(command))
+
+    monkeypatch.setattr("memory_system.natural_terminal.subprocess.Popen", DummyProcess)
+
+    def fake_cards(engine, query, limit=5):
+        if engine == "youtube":
+            return [
+                {
+                    "index": 1,
+                    "title": "llama.cpp CPU inference walkthrough",
+                    "url": "https://www.youtube.com/watch?v=llama-cpp-cpu",
+                    "summary": "A walkthrough of llama.cpp on CPU.",
+                    "meta": "youtube | c++ | cpu",
+                }
+            ]
+        return []
+
+    monkeypatch.setattr("memory_system.natural_terminal._fetch_search_result_cards", fake_cards)
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._fetch_page_html",
+        lambda url: """
+        <html>
+          <head>
+            <title>llama.cpp CPU inference walkthrough</title>
+            <meta property=\"og:description\" content=\"A walkthrough of llama.cpp running LLM inference efficiently on CPU hardware.\" />
+            <meta itemprop=\"channelId\" content=\"Local LLM Lab\" />
+          </head>
+        </html>
+        """,
+    )
+
+    state = BrowserSessionState(
+        current_url="https://github.com/search?q=local+llm&type=repositories",
+        page_kind="search_results",
+        search_engine="github",
+        search_query="local llm",
+        result_cards=[
+            {
+                "index": 1,
+                "title": "ollama/ollama",
+                "url": "https://github.com/ollama/ollama",
+                "summary": "Simple CLI for local models on laptops.",
+                "meta": "cli | beginner",
+            },
+            {
+                "index": 2,
+                "title": "ggml-org/llama.cpp",
+                "url": "https://github.com/ggml-org/llama.cpp",
+                "summary": "C/C++ inference runtime for CPUs.",
+                "meta": "c++ | inference | cpu | portable",
+            },
+        ],
+    )
+
+    plan = build_terminal_plan(
+        prompt="find the best repo for c++ llm inference on cpu then find a youtube video about it and open the first one and summarize it",
+        heuristic_only=True,
+        browser_state=state,
+    )
+    result = execute_terminal_plan(plan, platform_name="linux", browser_state=state)
+
+    assert result.ok is True
+    assert result.records[-1].kind == "browser_read_page"
+    assert result.records[-1].details["title"] == "llama.cpp CPU inference walkthrough"
+    assert result.records[-1].details["summary"] == "A walkthrough of llama.cpp running LLM inference efficiently on CPU hardware."
+
+
+def test_terminal_heuristic_plan_chains_youtube_then_reddit_about_same_subject():
+    state = BrowserSessionState(
+        current_url="https://github.com/search?q=local+llm&type=repositories",
+        page_kind="search_results",
+        search_engine="github",
+        search_query="local llm",
+        result_cards=[
+            {
+                "index": 1,
+                "title": "ollama/ollama",
+                "url": "https://github.com/ollama/ollama",
+                "summary": "Simple CLI for local models on laptops.",
+                "meta": "cli | beginner",
+            },
+            {
+                "index": 2,
+                "title": "ggml-org/llama.cpp",
+                "url": "https://github.com/ggml-org/llama.cpp",
+                "summary": "C/C++ inference runtime for CPUs.",
+                "meta": "c++ | inference | cpu | portable",
+            },
+        ],
+    )
+
+    plan = build_terminal_plan(
+        prompt=(
+            "find the best repo for c++ llm inference on cpu then find a youtube video about it "
+            "then open the first one and summarize it then find a reddit post about it "
+            "then open the first one and explain it"
+        ),
+        heuristic_only=True,
+        browser_state=state,
+    )
+
+    assert [action.kind for action in plan.actions] == [
+        "browser_rank_cards",
+        "browser_search_subject",
+        "open_search_result",
+        "browser_read_page",
+        "browser_search_subject",
+        "open_search_result",
+        "browser_read_page",
+    ]
+    assert json.loads(plan.actions[1].note)["engine"] == "youtube"
+    assert json.loads(plan.actions[4].note)["engine"] == "reddit"
+
+
+def test_terminal_execute_plan_carries_research_subject_from_youtube_to_reddit(monkeypatch):
+    launched: list[list[str]] = []
+
+    class DummyProcess:
+        def __init__(self, command, **kwargs):
+            launched.append(list(command))
+
+    monkeypatch.setattr("memory_system.natural_terminal.subprocess.Popen", DummyProcess)
+
+    def fake_cards(engine, query, limit=5):
+        if engine == "youtube":
+            return [
+                {
+                    "index": 1,
+                    "title": "llama.cpp CPU inference walkthrough",
+                    "url": "https://www.youtube.com/watch?v=llama-cpp-cpu",
+                    "summary": "A walkthrough of llama.cpp on CPU.",
+                    "meta": "youtube | c++ | cpu",
+                }
+            ]
+        if engine == "reddit":
+            return [
+                {
+                    "index": 1,
+                    "title": "Best way to use llama.cpp on weak hardware?",
+                    "url": "https://www.reddit.com/r/LocalLLaMA/comments/llama_cpp_weak_hw",
+                    "summary": "Discussion of llama.cpp on laptops and CPU-only boxes.",
+                    "meta": "reddit | weak hardware | cpu",
+                }
+            ]
+        return []
+
+    monkeypatch.setattr("memory_system.natural_terminal._fetch_search_result_cards", fake_cards)
+
+    def fake_html(url):
+        if "youtube.com/watch" in url:
+            return """
+            <html>
+              <head>
+                <title>llama.cpp CPU inference walkthrough</title>
+                <meta property=\"og:description\" content=\"A walkthrough of llama.cpp running LLM inference efficiently on CPU hardware.\" />
+                <meta itemprop=\"channelId\" content=\"Local LLM Lab\" />
+              </head>
+            </html>
+            """
+        return """
+        <html>
+          <head>
+            <title>Best way to use llama.cpp on weak hardware?</title>
+            <meta property=\"og:description\" content=\"Reddit discussion about using llama.cpp on laptops and CPU-only systems.\" />
+          </head>
+          <body>
+            <a href=\"/r/LocalLLaMA\">r/LocalLLaMA</a>
+          </body>
+        </html>
+        """
+
+    monkeypatch.setattr("memory_system.natural_terminal._fetch_page_html", fake_html)
+
+    state = BrowserSessionState(
+        current_url="https://github.com/search?q=local+llm&type=repositories",
+        page_kind="search_results",
+        search_engine="github",
+        search_query="local llm",
+        result_cards=[
+            {
+                "index": 1,
+                "title": "ollama/ollama",
+                "url": "https://github.com/ollama/ollama",
+                "summary": "Simple CLI for local models on laptops.",
+                "meta": "cli | beginner",
+            },
+            {
+                "index": 2,
+                "title": "ggml-org/llama.cpp",
+                "url": "https://github.com/ggml-org/llama.cpp",
+                "summary": "C/C++ inference runtime for CPUs.",
+                "meta": "c++ | inference | cpu | portable",
+            },
+        ],
+    )
+
+    plan = build_terminal_plan(
+        prompt=(
+            "find the best repo for c++ llm inference on cpu then find a youtube video about it "
+            "then open the first one and summarize it then find a reddit post about it "
+            "then open the first one and explain it"
+        ),
+        heuristic_only=True,
+        browser_state=state,
+    )
+    result = execute_terminal_plan(plan, platform_name="linux", browser_state=state)
+
+    assert result.ok is True
+    assert result.browser_state["page_kind"] == "post_page"
+    assert result.browser_state["search_engine"] == "reddit"
+    assert result.browser_state["search_query"] == "ggml org llama cpp"
+    assert result.browser_state["subject_title"] == "Best way to use llama.cpp on weak hardware?"
+    assert result.browser_state["research_subject_title"] == "ggml-org/llama.cpp"
+    assert result.records[-1].details["title"] == "Best way to use llama.cpp on weak hardware?"
+    assert launched[-1] == ["xdg-open", "https://www.reddit.com/r/LocalLLaMA/comments/llama_cpp_weak_hw"]
+
+
+def test_terminal_heuristic_plan_retries_weak_subject_result_before_reddit():
+    state = BrowserSessionState(
+        current_url="https://github.com/search?q=local+llm&type=repositories",
+        page_kind="search_results",
+        search_engine="github",
+        search_query="local llm",
+        result_cards=[
+            {
+                "index": 1,
+                "title": "ollama/ollama",
+                "url": "https://github.com/ollama/ollama",
+                "summary": "Simple CLI for local models on laptops.",
+                "meta": "cli | beginner",
+            },
+            {
+                "index": 2,
+                "title": "ggml-org/llama.cpp",
+                "url": "https://github.com/ggml-org/llama.cpp",
+                "summary": "C/C++ inference runtime for CPUs.",
+                "meta": "c++ | inference | cpu | portable",
+            },
+        ],
+    )
+
+    plan = build_terminal_plan(
+        prompt=(
+            "find the best repo for c++ llm inference on cpu then find a youtube video about it "
+            "then open the first one and summarize it then if the first one seems weak open a better one and summarize it "
+            "then find a reddit post about it then open the first one and explain it"
+        ),
+        heuristic_only=True,
+        browser_state=state,
+    )
+
+    assert [action.kind for action in plan.actions] == [
+        "browser_rank_cards",
+        "browser_search_subject",
+        "open_search_result",
+        "browser_read_page",
+        "browser_retry_subject_result",
+        "browser_read_page",
+        "browser_search_subject",
+        "open_search_result",
+        "browser_read_page",
+    ]
+
+
+def test_terminal_execute_plan_recovers_to_better_subject_result(monkeypatch):
+    launched: list[list[str]] = []
+
+    class DummyProcess:
+        def __init__(self, command, **kwargs):
+            launched.append(list(command))
+
+    monkeypatch.setattr("memory_system.natural_terminal.subprocess.Popen", DummyProcess)
+
+    def fake_cards(engine, query, limit=5):
+        if engine == "youtube":
+            return [
+                {
+                    "index": 1,
+                    "title": "Local AI news roundup",
+                    "url": "https://www.youtube.com/watch?v=local-ai-news",
+                    "summary": "A generic local AI roundup with little llama.cpp CPU guidance.",
+                    "meta": "youtube | roundup | generic",
+                },
+                {
+                    "index": 2,
+                    "title": "llama.cpp CPU inference walkthrough",
+                    "url": "https://www.youtube.com/watch?v=llama-cpp-cpu",
+                    "summary": "A walkthrough of llama.cpp running LLM inference on CPU.",
+                    "meta": "youtube | c++ | cpu | inference",
+                },
+            ]
+        if engine == "reddit":
+            return [
+                {
+                    "index": 1,
+                    "title": "Best way to use llama.cpp on weak hardware?",
+                    "url": "https://www.reddit.com/r/LocalLLaMA/comments/llama_cpp_weak_hw",
+                    "summary": "Discussion of llama.cpp on laptops and CPU-only boxes.",
+                    "meta": "reddit | weak hardware | cpu",
+                }
+            ]
+        return []
+
+    monkeypatch.setattr("memory_system.natural_terminal._fetch_search_result_cards", fake_cards)
+
+    def fake_html(url):
+        if "local-ai-news" in url:
+            return """
+            <html><head>
+            <title>Local AI news roundup</title>
+            <meta property=\"og:description\" content=\"A generic local AI roundup with little llama.cpp CPU guidance.\" />
+            <meta itemprop=\"channelId\" content=\"Local Model News\" />
+            </head></html>
+            """
+        if "youtube.com/watch" in url:
+            return """
+            <html><head>
+            <title>llama.cpp CPU inference walkthrough</title>
+            <meta property=\"og:description\" content=\"A walkthrough of llama.cpp running LLM inference efficiently on CPU hardware.\" />
+            <meta itemprop=\"channelId\" content=\"Local LLM Lab\" />
+            </head></html>
+            """
+        return """
+        <html><head>
+        <title>Best way to use llama.cpp on weak hardware?</title>
+        <meta property=\"og:description\" content=\"Reddit discussion about using llama.cpp on laptops and CPU-only systems.\" />
+        </head><body><a href=\"/r/LocalLLaMA\">r/LocalLLaMA</a></body></html>
+        """
+
+    monkeypatch.setattr("memory_system.natural_terminal._fetch_page_html", fake_html)
+
+    state = BrowserSessionState(
+        current_url="https://github.com/search?q=local+llm&type=repositories",
+        page_kind="search_results",
+        search_engine="github",
+        search_query="local llm",
+        result_cards=[
+            {
+                "index": 1,
+                "title": "ollama/ollama",
+                "url": "https://github.com/ollama/ollama",
+                "summary": "Simple CLI for local models on laptops.",
+                "meta": "cli | beginner",
+            },
+            {
+                "index": 2,
+                "title": "ggml-org/llama.cpp",
+                "url": "https://github.com/ggml-org/llama.cpp",
+                "summary": "C/C++ inference runtime for CPUs.",
+                "meta": "c++ | inference | cpu | portable",
+            },
+        ],
+    )
+
+    plan = build_terminal_plan(
+        prompt=(
+            "find the best repo for c++ llm inference on cpu then find a youtube video about it "
+            "then open the first one and summarize it then if the first one seems weak open a better one and summarize it "
+            "then find a reddit post about it then open the first one and explain it"
+        ),
+        heuristic_only=True,
+        browser_state=state,
+    )
+    result = execute_terminal_plan(plan, platform_name="linux", browser_state=state)
+
+    assert result.ok is True
+    assert result.records[4].kind == "browser_retry_subject_result"
+    assert result.records[4].details["selected_title"] == "llama.cpp CPU inference walkthrough"
+    assert result.records[4].command == ["xdg-open", "https://www.youtube.com/watch?v=llama-cpp-cpu"]
+    assert result.browser_state["page_kind"] == "post_page"
+    assert result.browser_state["research_subject_title"] == "ggml-org/llama.cpp"
+
+
+def test_terminal_heuristic_plan_chains_cross_source_synthesis():
+    state = BrowserSessionState(
+        current_url="https://github.com/search?q=local+llm&type=repositories",
+        page_kind="search_results",
+        search_engine="github",
+        search_query="local llm",
+        result_cards=[
+            {
+                "index": 1,
+                "title": "ollama/ollama",
+                "url": "https://github.com/ollama/ollama",
+                "summary": "Simple CLI for local models on laptops.",
+                "meta": "cli | beginner",
+            },
+            {
+                "index": 2,
+                "title": "ggml-org/llama.cpp",
+                "url": "https://github.com/ggml-org/llama.cpp",
+                "summary": "C/C++ inference runtime for CPUs.",
+                "meta": "c++ | inference | cpu | portable",
+            },
+        ],
+    )
+
+    plan = build_terminal_plan(
+        prompt=(
+            "find the best repo for c++ llm inference on cpu then find a youtube video about it "
+            "then open the first one and summarize it then if the first one seems weak open a better one and summarize it "
+            "then find a reddit post about it then open the first one and explain it "
+            "then tell me which source best explains cpu inference on weak hardware"
+        ),
+        heuristic_only=True,
+        browser_state=state,
+    )
+
+    assert [action.kind for action in plan.actions] == [
+        "browser_rank_cards",
+        "browser_search_subject",
+        "open_search_result",
+        "browser_read_page",
+        "browser_retry_subject_result",
+        "browser_read_page",
+        "browser_search_subject",
+        "open_search_result",
+        "browser_read_page",
+        "browser_synthesize_evidence",
+    ]
+
+
+def test_terminal_heuristic_plan_chains_cross_source_synthesis_for_paraphrase():
+    state = BrowserSessionState(
+        current_url="https://github.com/search?q=local+llm&type=repositories",
+        page_kind="search_results",
+        search_engine="github",
+        search_query="local llm",
+        result_cards=[
+            {
+                "index": 1,
+                "title": "ollama/ollama",
+                "url": "https://github.com/ollama/ollama",
+                "summary": "Simple CLI for local models on laptops.",
+                "meta": "cli | beginner",
+            },
+            {
+                "index": 2,
+                "title": "ggml-org/llama.cpp",
+                "url": "https://github.com/ggml-org/llama.cpp",
+                "summary": "C/C++ inference runtime for CPUs.",
+                "meta": "c++ | inference | cpu | portable",
+            },
+        ],
+    )
+
+    plan = build_terminal_plan(
+        prompt=(
+            "find the best repo for c plus plus llm inference on cpu then grab a youtube vid on it "
+            "then open the first one and sum it up then if that one seems weak pick a better one and sum it up "
+            "then grab a reddit thread on it then open the first one and explain it "
+            "then tell me which source best explains cpu inference on weak hardware"
+        ),
+        heuristic_only=True,
+        browser_state=state,
+    )
+
+    assert [action.kind for action in plan.actions] == [
+        "browser_rank_cards",
+        "browser_search_subject",
+        "open_search_result",
+        "browser_read_page",
+        "browser_retry_subject_result",
+        "browser_read_page",
+        "browser_search_subject",
+        "open_search_result",
+        "browser_read_page",
+        "browser_synthesize_evidence",
+    ]
+
+
+def test_terminal_execute_plan_synthesizes_cross_source_evidence(monkeypatch):
+    launched: list[list[str]] = []
+
+    class DummyProcess:
+        def __init__(self, command, **kwargs):
+            launched.append(list(command))
+
+    monkeypatch.setattr("memory_system.natural_terminal.subprocess.Popen", DummyProcess)
+
+    def fake_cards(engine, query, limit=5):
+        if engine == "youtube":
+            return [
+                {
+                    "index": 1,
+                    "title": "Local AI news roundup",
+                    "url": "https://www.youtube.com/watch?v=local-ai-news",
+                    "summary": "A generic local AI roundup with little llama.cpp CPU guidance.",
+                    "meta": "youtube | roundup | generic",
+                },
+                {
+                    "index": 2,
+                    "title": "llama.cpp CPU inference walkthrough",
+                    "url": "https://www.youtube.com/watch?v=llama-cpp-cpu",
+                    "summary": "A step-by-step walkthrough of llama.cpp CPU inference on weak hardware laptops.",
+                    "meta": "youtube | c++ | cpu | weak hardware | walkthrough",
+                },
+            ]
+        if engine == "reddit":
+            return [
+                {
+                    "index": 1,
+                    "title": "Best way to use llama.cpp on weak hardware?",
+                    "url": "https://www.reddit.com/r/LocalLLaMA/comments/llama_cpp_weak_hw",
+                    "summary": "Community discussion about using llama.cpp on laptops and CPU-only systems.",
+                    "meta": "reddit | weak hardware | cpu | discussion",
+                }
+            ]
+        return []
+
+    monkeypatch.setattr("memory_system.natural_terminal._fetch_search_result_cards", fake_cards)
+
+    def fake_html(url):
+        if "local-ai-news" in url:
+            return """
+            <html><head>
+            <title>Local AI news roundup</title>
+            <meta property=\"og:description\" content=\"A generic local AI roundup with little llama.cpp CPU guidance.\" />
+            <meta itemprop=\"channelId\" content=\"Local Model News\" />
+            </head></html>
+            """
+        if "youtube.com/watch" in url:
+            return """
+            <html><head>
+            <title>llama.cpp CPU inference walkthrough</title>
+            <meta property=\"og:description\" content=\"A step-by-step walkthrough of llama.cpp CPU inference on weak hardware laptops.\" />
+            <meta itemprop=\"channelId\" content=\"Local LLM Lab\" />
+            </head></html>
+            """
+        return """
+        <html><head>
+        <title>Best way to use llama.cpp on weak hardware?</title>
+        <meta property=\"og:description\" content=\"Community discussion about using llama.cpp on laptops and CPU-only systems.\" />
+        </head><body><a href=\"/r/LocalLLaMA\">r/LocalLLaMA</a></body></html>
+        """
+
+    monkeypatch.setattr("memory_system.natural_terminal._fetch_page_html", fake_html)
+
+    state = BrowserSessionState(
+        current_url="https://github.com/search?q=local+llm&type=repositories",
+        page_kind="search_results",
+        search_engine="github",
+        search_query="local llm",
+        result_cards=[
+            {
+                "index": 1,
+                "title": "ollama/ollama",
+                "url": "https://github.com/ollama/ollama",
+                "summary": "Simple CLI for local models on laptops.",
+                "meta": "cli | beginner",
+            },
+            {
+                "index": 2,
+                "title": "ggml-org/llama.cpp",
+                "url": "https://github.com/ggml-org/llama.cpp",
+                "summary": "C/C++ inference runtime for CPUs.",
+                "meta": "c++ | inference | cpu | portable",
+            },
+        ],
+    )
+
+    plan = build_terminal_plan(
+        prompt=(
+            "find the best repo for c++ llm inference on cpu then find a youtube video about it "
+            "then open the first one and summarize it then if the first one seems weak open a better one and summarize it "
+            "then find a reddit post about it then open the first one and explain it "
+            "then tell me which source best explains cpu inference on weak hardware"
+        ),
+        heuristic_only=True,
+        browser_state=state,
+    )
+    result = execute_terminal_plan(plan, platform_name="linux", browser_state=state)
+
+    assert result.ok is True
+    assert result.records[-1].kind == "browser_synthesize_evidence"
+    assert result.records[-1].details["best_source_title"] == "llama.cpp CPU inference walkthrough"
+    assert result.records[-1].details["best_source_kind"] == "video_page"
+    assert result.records[-1].details["source_count"] >= 3
+    assert "weak hardware" in result.records[-1].details["synthesis"].lower()
 
 
 def test_execute_terminal_step_logs_trace(monkeypatch, tmp_path):
@@ -652,6 +2423,37 @@ def test_memla_terminal_step_choice_executes_candidate(monkeypatch, capsys, tmp_
     assert payload["planning_duration_seconds"] == 0.2
     assert payload["execution_duration_seconds"] == 0.15
     assert payload["total_duration_seconds"] == 0.35
+
+
+def test_memla_terminal_workbench_invokes_server(monkeypatch, capsys):
+    captured: dict[str, object] = {}
+
+    def fake_serve_terminal_workbench(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("memory_system.cli.serve_terminal_workbench", fake_serve_terminal_workbench)
+
+    rc = main(
+        [
+            "terminal",
+            "workbench",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8766",
+            "--heuristic-only",
+            "--model",
+            "phi3:mini",
+        ]
+    )
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Serving Memla browser workbench at http://127.0.0.1:8766" in out
+    assert captured["host"] == "127.0.0.1"
+    assert captured["port"] == 8766
+    assert captured["heuristic_only"] is True
+    assert captured["model"] == "phi3:mini"
 
 
 def test_memla_terminal_compare_json_outputs_raw_and_memla(monkeypatch, capsys):

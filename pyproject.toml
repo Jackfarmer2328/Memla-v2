@@ -49,3 +49,6 @@ include-package-data = false
 
 [tool.setuptools.packages.find]
 include = ["memory_system", "memory_system.*"]
+
+[tool.setuptools.package-data]
+memory_system = ["terminal_workbench.html"]

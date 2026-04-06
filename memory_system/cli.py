@@ -67,6 +67,12 @@ from .distillation.policy_authz_benchmark import (
 )
 from .distillation.thesis_pack_builder import build_thesis_pack
 from .distillation.workflow_planner import render_workflow_plan_block
+from .browser_ontology_benchmark import (
+    render_browser_benchmark_markdown,
+    run_browser_benchmark,
+    run_language_learning_benchmark,
+    run_language_rule_benchmark,
+)
 from .natural_terminal import (
     build_terminal_step_report,
     build_llm_client as build_terminal_llm_client,
@@ -87,6 +93,7 @@ from .natural_terminal import (
     terminal_step_execution_to_dict,
     terminal_step_report_to_dict,
 )
+from .terminal_workbench import serve_terminal_workbench
 
 
 def _coding_model_default() -> str:
@@ -99,6 +106,54 @@ def _terminal_model_default() -> str:
 
 def _terminal_cases_default() -> str:
     return "cases/terminal_eval_cases.jsonl"
+
+
+def _browser_cases_default() -> str:
+    return "cases/browser_eval_cases.jsonl"
+
+
+def _browser_v2_cases_default() -> str:
+    return "cases/browser_eval_cases_v2.jsonl"
+
+
+def _browser_v3_cases_default() -> str:
+    return "cases/browser_eval_cases_v3.jsonl"
+
+
+def _browser_v4_cases_default() -> str:
+    return "cases/browser_eval_cases_v4.jsonl"
+
+
+def _browser_v5_cases_default() -> str:
+    return "cases/browser_eval_cases_v5.jsonl"
+
+
+def _browser_v6_cases_default() -> str:
+    return "cases/browser_eval_cases_v6.jsonl"
+
+
+def _browser_v7_cases_default() -> str:
+    return "cases/browser_eval_cases_v7.jsonl"
+
+
+def _browser_v8_cases_default() -> str:
+    return "cases/browser_eval_cases_v8.jsonl"
+
+
+def _language_v1_cases_default() -> str:
+    return "cases/language_eval_cases_v1.jsonl"
+
+
+def _language_v2_cases_default() -> str:
+    return "cases/language_eval_cases_v2.jsonl"
+
+
+def _language_v3_cases_default() -> str:
+    return "cases/language_eval_cases_v3.jsonl"
+
+
+def _language_v4_cases_default() -> str:
+    return "cases/language_eval_cases_v4.jsonl"
 
 
 def _user_id_default() -> str:
@@ -952,6 +1007,27 @@ def _handle_terminal_step(args: argparse.Namespace) -> int:
     return 0 if execution.result.ok else 1
 
 
+def _handle_terminal_workbench(args: argparse.Namespace) -> int:
+    host = str(args.host or "127.0.0.1").strip() or "127.0.0.1"
+    port = int(args.port)
+    print(f"Serving Memla browser workbench at http://{host}:{port}")
+    print("Press Ctrl+C to stop the local UI server.")
+    try:
+        serve_terminal_workbench(
+            host=host,
+            port=port,
+            model=args.model,
+            provider=args.provider,
+            base_url=args.base_url,
+            temperature=args.temperature,
+            heuristic_only=args.heuristic_only,
+            trace_log=args.trace_log,
+        )
+    except KeyboardInterrupt:
+        print("Stopped Memla browser workbench.")
+    return 0
+
+
 def _handle_terminal_compare(args: argparse.Namespace) -> int:
     prompt = _resolve_terminal_prompt(args)
     raw_model = _resolve_shared_terminal_model(args, "raw_model")
@@ -1035,6 +1111,98 @@ def _handle_terminal_benchmark(args: argparse.Namespace) -> int:
         "Summary: "
         f"raw latency {report.get('avg_raw_latency_ms', 0.0)} ms | "
         f"memla latency {report.get('avg_memla_latency_ms', 0.0)} ms | "
+        f"speedup {speedup_text}"
+    )
+    return 0
+
+
+def _handle_terminal_browser_benchmark(args: argparse.Namespace) -> int:
+    raw_model = _resolve_shared_terminal_model(args, "raw_model")
+    memla_model = _resolve_shared_terminal_model(args, "memla_model")
+    ontology_version = str(getattr(args, "ontology_version", "browser_v1") or "browser_v1")
+    if ontology_version == "language_v4":
+        benchmark_slug = "language_benchmark_v4"
+    elif ontology_version == "language_v3":
+        benchmark_slug = "language_benchmark_v3"
+    elif ontology_version == "language_v2":
+        benchmark_slug = "language_benchmark_v2"
+    elif ontology_version == "language_v1":
+        benchmark_slug = "language_benchmark_v1"
+    elif ontology_version == "browser_v8":
+        benchmark_slug = "browser_benchmark_v8"
+    elif ontology_version == "browser_v7":
+        benchmark_slug = "browser_benchmark_v7"
+    elif ontology_version == "browser_v6":
+        benchmark_slug = "browser_benchmark_v6"
+    elif ontology_version == "browser_v5":
+        benchmark_slug = "browser_benchmark_v5"
+    elif ontology_version == "browser_v4":
+        benchmark_slug = "browser_benchmark_v4"
+    elif ontology_version == "browser_v3":
+        benchmark_slug = "browser_benchmark_v3"
+    elif ontology_version == "browser_v2":
+        benchmark_slug = "browser_benchmark_v2"
+    else:
+        benchmark_slug = "browser_benchmark"
+    out_dir = Path(args.out_dir).resolve() if args.out_dir else _default_report_dir(benchmark_slug)
+    if ontology_version == "language_v4":
+        report = run_language_rule_benchmark(
+            cases_path=args.cases,
+            raw_model=raw_model,
+            memla_model=memla_model,
+            raw_provider=args.raw_provider,
+            raw_base_url=args.raw_base_url,
+            memla_provider=args.memla_provider,
+            memla_base_url=args.memla_base_url,
+            temperature=args.temperature,
+            case_ids=args.case_id,
+            limit=args.limit,
+            memory_root=str(out_dir),
+        )
+    elif ontology_version == "language_v3":
+        report = run_language_learning_benchmark(
+            cases_path=args.cases,
+            raw_model=raw_model,
+            memla_model=memla_model,
+            raw_provider=args.raw_provider,
+            raw_base_url=args.raw_base_url,
+            memla_provider=args.memla_provider,
+            memla_base_url=args.memla_base_url,
+            temperature=args.temperature,
+            case_ids=args.case_id,
+            limit=args.limit,
+            memory_root=str(out_dir),
+        )
+    else:
+        report = run_browser_benchmark(
+            cases_path=args.cases,
+            raw_model=raw_model,
+            memla_model=memla_model,
+            raw_provider=args.raw_provider,
+            raw_base_url=args.raw_base_url,
+            memla_provider=args.memla_provider,
+            memla_base_url=args.memla_base_url,
+            temperature=args.temperature,
+            case_ids=args.case_id,
+            limit=args.limit,
+            heuristic_only=args.heuristic_only,
+            ontology_version=ontology_version,
+        )
+    markdown = render_browser_benchmark_markdown(report)
+    json_path, md_path = _write_report_bundle(
+        out_dir=out_dir,
+        stem="browser_benchmark_report",
+        report=report,
+        markdown=markdown,
+    )
+    print(f"Wrote browser benchmark JSON: {json_path}")
+    print(f"Wrote browser benchmark Markdown: {md_path}")
+    speedup = report.get("memla_vs_raw_speedup")
+    speedup_text = f"{speedup}x" if speedup else "n/a"
+    print(
+        "Summary: "
+        f"raw semantic {report.get('avg_raw_semantic_success', 0.0)} | "
+        f"memla semantic {report.get('avg_memla_rule_semantic_success', report.get('avg_memla_warm_semantic_success', report.get('avg_memla_semantic_success', 0.0)))} | "
         f"speedup {speedup_text}"
     )
     return 0
@@ -1474,6 +1642,17 @@ def _build_parser() -> argparse.ArgumentParser:
     terminal_step.add_argument("--json", action="store_true", help="Emit structured JSON instead of readable text.")
     terminal_step.set_defaults(func=_handle_terminal_step)
 
+    terminal_workbench = terminal_sub.add_parser("workbench", help="Launch a local browser workbench UI for approving transmutations.")
+    terminal_workbench.add_argument("--host", default="127.0.0.1", help="Host interface for the local UI server.")
+    terminal_workbench.add_argument("--port", type=int, default=8766, help="Port for the local UI server.")
+    terminal_workbench.add_argument("--model", default=_terminal_model_default(), help="Fallback local model name for proposal generation.")
+    terminal_workbench.add_argument("--provider", default="ollama", help="Provider override for the workbench fallback model.")
+    terminal_workbench.add_argument("--base-url", default="", help="Optional base URL override for the workbench fallback model.")
+    terminal_workbench.add_argument("--temperature", type=float, default=0.1)
+    terminal_workbench.add_argument("--heuristic-only", action="store_true", help="Start the workbench in heuristic-only mode by default.")
+    terminal_workbench.add_argument("--trace-log", default="", help="Optional JSONL path for approved transmutation traces.")
+    terminal_workbench.set_defaults(func=_handle_terminal_workbench)
+
     terminal_compare = terminal_sub.add_parser("compare", help="Compare a raw small-model terminal plan against Memla on the same prompt.")
     terminal_compare.add_argument("--prompt", "-p", default="", help="Natural-language terminal request.")
     terminal_compare.add_argument("prompt_text", nargs="*", help="Prompt words if you want to skip --prompt.")
@@ -1505,6 +1684,232 @@ def _build_parser() -> argparse.ArgumentParser:
     terminal_bench.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
     terminal_bench.set_defaults(func=_handle_terminal_benchmark)
 
+    terminal_browser_bench = terminal_sub.add_parser(
+        "benchmark-browser",
+        help="Benchmark raw-vs-Memla browser planning and backtesting on the locked Browser Ontology V1 pack.",
+    )
+    terminal_browser_bench.add_argument("--cases", default=_browser_cases_default(), help="Browser benchmark case JSONL path.")
+    terminal_browser_bench.add_argument("--case-id", action="append", default=[], help="Optional case id filter. Repeat to benchmark only specific prompts.")
+    terminal_browser_bench.add_argument("--limit", type=int, default=None, help="Optional max number of benchmark prompts to run after filtering.")
+    terminal_browser_bench.add_argument("--model", default="", help="Shared model for both lanes.")
+    terminal_browser_bench.add_argument("--raw-model", default="", help="Raw baseline model. Defaults to --model or the small terminal default.")
+    terminal_browser_bench.add_argument("--memla-model", default="", help="Memla model. Defaults to --model or the small terminal default.")
+    terminal_browser_bench.add_argument("--raw-provider", default="ollama", help="Provider override for the raw lane.")
+    terminal_browser_bench.add_argument("--raw-base-url", default="", help="Optional base URL override for the raw lane.")
+    terminal_browser_bench.add_argument("--memla-provider", default="ollama", help="Provider override for the Memla lane.")
+    terminal_browser_bench.add_argument("--memla-base-url", default="", help="Optional base URL override for the Memla lane.")
+    terminal_browser_bench.add_argument("--temperature", type=float, default=0.1)
+    terminal_browser_bench.add_argument("--heuristic-only", action="store_true", help="Force the Memla lane to stay heuristic-only.")
+    terminal_browser_bench.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
+    terminal_browser_bench.set_defaults(func=_handle_terminal_browser_benchmark, ontology_version="browser_v1")
+
+    terminal_browser_bench_v2 = terminal_sub.add_parser(
+        "benchmark-browser-v2",
+        help="Benchmark raw-vs-Memla ranking/comparison on Browser Ontology V2.",
+    )
+    terminal_browser_bench_v2.add_argument("--cases", default=_browser_v2_cases_default(), help="Browser Ontology V2 benchmark case JSONL path.")
+    terminal_browser_bench_v2.add_argument("--case-id", action="append", default=[], help="Optional case id filter. Repeat to benchmark only specific prompts.")
+    terminal_browser_bench_v2.add_argument("--limit", type=int, default=None, help="Optional max number of benchmark prompts to run after filtering.")
+    terminal_browser_bench_v2.add_argument("--model", default="", help="Shared model for both lanes.")
+    terminal_browser_bench_v2.add_argument("--raw-model", default="", help="Raw baseline model. Defaults to --model or the small terminal default.")
+    terminal_browser_bench_v2.add_argument("--memla-model", default="", help="Memla model. Defaults to --model or the small terminal default.")
+    terminal_browser_bench_v2.add_argument("--raw-provider", default="ollama", help="Provider override for the raw lane.")
+    terminal_browser_bench_v2.add_argument("--raw-base-url", default="", help="Optional base URL override for the raw lane.")
+    terminal_browser_bench_v2.add_argument("--memla-provider", default="ollama", help="Provider override for the Memla lane.")
+    terminal_browser_bench_v2.add_argument("--memla-base-url", default="", help="Optional base URL override for the Memla lane.")
+    terminal_browser_bench_v2.add_argument("--temperature", type=float, default=0.1)
+    terminal_browser_bench_v2.add_argument("--heuristic-only", action="store_true", help="Force the Memla lane to stay heuristic-only.")
+    terminal_browser_bench_v2.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
+    terminal_browser_bench_v2.set_defaults(func=_handle_terminal_browser_benchmark, ontology_version="browser_v2")
+
+    terminal_browser_bench_v3 = terminal_sub.add_parser(
+        "benchmark-browser-v3",
+        help="Benchmark raw-vs-Memla multi-step research handoffs on Browser Ontology V3.",
+    )
+    terminal_browser_bench_v3.add_argument("--cases", default=_browser_v3_cases_default(), help="Browser Ontology V3 benchmark case JSONL path.")
+    terminal_browser_bench_v3.add_argument("--case-id", action="append", default=[], help="Optional case id filter. Repeat to benchmark only specific prompts.")
+    terminal_browser_bench_v3.add_argument("--limit", type=int, default=None, help="Optional max number of benchmark prompts to run after filtering.")
+    terminal_browser_bench_v3.add_argument("--model", default="", help="Shared model for both lanes.")
+    terminal_browser_bench_v3.add_argument("--raw-model", default="", help="Raw baseline model. Defaults to --model or the small terminal default.")
+    terminal_browser_bench_v3.add_argument("--memla-model", default="", help="Memla model. Defaults to --model or the small terminal default.")
+    terminal_browser_bench_v3.add_argument("--raw-provider", default="ollama", help="Provider override for the raw lane.")
+    terminal_browser_bench_v3.add_argument("--raw-base-url", default="", help="Optional base URL override for the raw lane.")
+    terminal_browser_bench_v3.add_argument("--memla-provider", default="ollama", help="Provider override for the Memla lane.")
+    terminal_browser_bench_v3.add_argument("--memla-base-url", default="", help="Optional base URL override for the Memla lane.")
+    terminal_browser_bench_v3.add_argument("--temperature", type=float, default=0.1)
+    terminal_browser_bench_v3.add_argument("--heuristic-only", action="store_true", help="Force the Memla lane to stay heuristic-only.")
+    terminal_browser_bench_v3.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
+    terminal_browser_bench_v3.set_defaults(func=_handle_terminal_browser_benchmark, ontology_version="browser_v3")
+
+    terminal_browser_bench_v4 = terminal_sub.add_parser(
+        "benchmark-browser-v4",
+        help="Benchmark raw-vs-Memla research chains that search a second site and open the best result on Browser Ontology V4.",
+    )
+    terminal_browser_bench_v4.add_argument("--cases", default=_browser_v4_cases_default(), help="Browser Ontology V4 benchmark case JSONL path.")
+    terminal_browser_bench_v4.add_argument("--case-id", action="append", default=[], help="Optional case id filter. Repeat to benchmark only specific prompts.")
+    terminal_browser_bench_v4.add_argument("--limit", type=int, default=None, help="Optional max number of benchmark prompts to run after filtering.")
+    terminal_browser_bench_v4.add_argument("--model", default="", help="Shared model for both lanes.")
+    terminal_browser_bench_v4.add_argument("--raw-model", default="", help="Raw baseline model. Defaults to --model or the small terminal default.")
+    terminal_browser_bench_v4.add_argument("--memla-model", default="", help="Memla model. Defaults to --model or the small terminal default.")
+    terminal_browser_bench_v4.add_argument("--raw-provider", default="ollama", help="Provider override for the raw lane.")
+    terminal_browser_bench_v4.add_argument("--raw-base-url", default="", help="Optional base URL override for the raw lane.")
+    terminal_browser_bench_v4.add_argument("--memla-provider", default="ollama", help="Provider override for the Memla lane.")
+    terminal_browser_bench_v4.add_argument("--memla-base-url", default="", help="Optional base URL override for the Memla lane.")
+    terminal_browser_bench_v4.add_argument("--temperature", type=float, default=0.1)
+    terminal_browser_bench_v4.add_argument("--heuristic-only", action="store_true", help="Force the Memla lane to stay heuristic-only.")
+    terminal_browser_bench_v4.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
+    terminal_browser_bench_v4.set_defaults(func=_handle_terminal_browser_benchmark, ontology_version="browser_v4")
+
+    terminal_browser_bench_v5 = terminal_sub.add_parser(
+        "benchmark-browser-v5",
+        help="Benchmark raw-vs-Memla research chains that open and then read the follow-on result on Browser Ontology V5.",
+    )
+    terminal_browser_bench_v5.add_argument("--cases", default=_browser_v5_cases_default(), help="Browser Ontology V5 benchmark case JSONL path.")
+    terminal_browser_bench_v5.add_argument("--case-id", action="append", default=[], help="Optional case id filter. Repeat to benchmark only specific prompts.")
+    terminal_browser_bench_v5.add_argument("--limit", type=int, default=None, help="Optional max number of benchmark prompts to run after filtering.")
+    terminal_browser_bench_v5.add_argument("--model", default="", help="Shared model for both lanes.")
+    terminal_browser_bench_v5.add_argument("--raw-model", default="", help="Raw baseline model. Defaults to --model or the small terminal default.")
+    terminal_browser_bench_v5.add_argument("--memla-model", default="", help="Memla model. Defaults to --model or the small terminal default.")
+    terminal_browser_bench_v5.add_argument("--raw-provider", default="ollama", help="Provider override for the raw lane.")
+    terminal_browser_bench_v5.add_argument("--raw-base-url", default="", help="Optional base URL override for the raw lane.")
+    terminal_browser_bench_v5.add_argument("--memla-provider", default="ollama", help="Provider override for the Memla lane.")
+    terminal_browser_bench_v5.add_argument("--memla-base-url", default="", help="Optional base URL override for the Memla lane.")
+    terminal_browser_bench_v5.add_argument("--temperature", type=float, default=0.1)
+    terminal_browser_bench_v5.add_argument("--heuristic-only", action="store_true", help="Force the Memla lane to stay heuristic-only.")
+    terminal_browser_bench_v5.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
+    terminal_browser_bench_v5.set_defaults(func=_handle_terminal_browser_benchmark, ontology_version="browser_v5")
+
+    terminal_browser_bench_v6 = terminal_sub.add_parser(
+        "benchmark-browser-v6",
+        help="Benchmark raw-vs-Memla multi-hop research chains that carry the same subject across YouTube and Reddit on Browser Ontology V6.",
+    )
+    terminal_browser_bench_v6.add_argument("--cases", default=_browser_v6_cases_default(), help="Browser Ontology V6 benchmark case JSONL path.")
+    terminal_browser_bench_v6.add_argument("--case-id", action="append", default=[], help="Optional case id filter. Repeat to benchmark only specific prompts.")
+    terminal_browser_bench_v6.add_argument("--limit", type=int, default=None, help="Optional max number of benchmark prompts to run after filtering.")
+    terminal_browser_bench_v6.add_argument("--model", default="", help="Shared model for both lanes.")
+    terminal_browser_bench_v6.add_argument("--raw-model", default="", help="Raw baseline model. Defaults to --model or the small terminal default.")
+    terminal_browser_bench_v6.add_argument("--memla-model", default="", help="Memla model. Defaults to --model or the small terminal default.")
+    terminal_browser_bench_v6.add_argument("--raw-provider", default="ollama", help="Provider override for the raw lane.")
+    terminal_browser_bench_v6.add_argument("--raw-base-url", default="", help="Optional base URL override for the raw lane.")
+    terminal_browser_bench_v6.add_argument("--memla-provider", default="ollama", help="Provider override for the Memla lane.")
+    terminal_browser_bench_v6.add_argument("--memla-base-url", default="", help="Optional base URL override for the Memla lane.")
+    terminal_browser_bench_v6.add_argument("--temperature", type=float, default=0.1)
+    terminal_browser_bench_v6.add_argument("--heuristic-only", action="store_true", help="Force the Memla lane to stay heuristic-only.")
+    terminal_browser_bench_v6.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
+    terminal_browser_bench_v6.set_defaults(func=_handle_terminal_browser_benchmark, ontology_version="browser_v6")
+
+    terminal_browser_bench_v7 = terminal_sub.add_parser(
+        "benchmark-browser-v7",
+        help="Benchmark raw-vs-Memla bounded recovery chains that reopen a stronger follow-on result when the first one is weak on Browser Ontology V7.",
+    )
+    terminal_browser_bench_v7.add_argument("--cases", default=_browser_v7_cases_default(), help="Browser Ontology V7 benchmark case JSONL path.")
+    terminal_browser_bench_v7.add_argument("--case-id", action="append", default=[], help="Optional case id filter. Repeat to benchmark only specific prompts.")
+    terminal_browser_bench_v7.add_argument("--limit", type=int, default=None, help="Optional max number of benchmark prompts to run after filtering.")
+    terminal_browser_bench_v7.add_argument("--model", default="", help="Shared model for both lanes.")
+    terminal_browser_bench_v7.add_argument("--raw-model", default="", help="Raw baseline model. Defaults to --model or the small terminal default.")
+    terminal_browser_bench_v7.add_argument("--memla-model", default="", help="Memla model. Defaults to --model or the small terminal default.")
+    terminal_browser_bench_v7.add_argument("--raw-provider", default="ollama", help="Provider override for the raw lane.")
+    terminal_browser_bench_v7.add_argument("--raw-base-url", default="", help="Optional base URL override for the raw lane.")
+    terminal_browser_bench_v7.add_argument("--memla-provider", default="ollama", help="Provider override for the Memla lane.")
+    terminal_browser_bench_v7.add_argument("--memla-base-url", default="", help="Optional base URL override for the Memla lane.")
+    terminal_browser_bench_v7.add_argument("--temperature", type=float, default=0.1)
+    terminal_browser_bench_v7.add_argument("--heuristic-only", action="store_true", help="Force the Memla lane to stay heuristic-only.")
+    terminal_browser_bench_v7.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
+    terminal_browser_bench_v7.set_defaults(func=_handle_terminal_browser_benchmark, ontology_version="browser_v7")
+
+    terminal_browser_bench_v8 = terminal_sub.add_parser(
+        "benchmark-browser-v8",
+        help="Benchmark raw-vs-Memla bounded cross-source synthesis chains on Browser Ontology V8.",
+    )
+    terminal_browser_bench_v8.add_argument("--cases", default=_browser_v8_cases_default(), help="Browser Ontology V8 benchmark case JSONL path.")
+    terminal_browser_bench_v8.add_argument("--case-id", action="append", default=[], help="Optional case id filter. Repeat to benchmark only specific prompts.")
+    terminal_browser_bench_v8.add_argument("--limit", type=int, default=None, help="Optional max number of benchmark prompts to run after filtering.")
+    terminal_browser_bench_v8.add_argument("--model", default="", help="Shared model for both lanes.")
+    terminal_browser_bench_v8.add_argument("--raw-model", default="", help="Raw baseline model. Defaults to --model or the small terminal default.")
+    terminal_browser_bench_v8.add_argument("--memla-model", default="", help="Memla model. Defaults to --model or the small terminal default.")
+    terminal_browser_bench_v8.add_argument("--raw-provider", default="ollama", help="Provider override for the raw lane.")
+    terminal_browser_bench_v8.add_argument("--raw-base-url", default="", help="Optional base URL override for the raw lane.")
+    terminal_browser_bench_v8.add_argument("--memla-provider", default="ollama", help="Provider override for the Memla lane.")
+    terminal_browser_bench_v8.add_argument("--memla-base-url", default="", help="Optional base URL override for the Memla lane.")
+    terminal_browser_bench_v8.add_argument("--temperature", type=float, default=0.1)
+    terminal_browser_bench_v8.add_argument("--heuristic-only", action="store_true", help="Force the Memla lane to stay heuristic-only.")
+    terminal_browser_bench_v8.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
+    terminal_browser_bench_v8.set_defaults(func=_handle_terminal_browser_benchmark, ontology_version="browser_v8")
+
+    terminal_language_bench_v1 = terminal_sub.add_parser(
+        "benchmark-language-v1",
+        help="Benchmark paraphrase robustness on Language Ontology V1 over the locked browser runtime.",
+    )
+    terminal_language_bench_v1.add_argument("--cases", default=_language_v1_cases_default(), help="Language Ontology V1 benchmark case JSONL path.")
+    terminal_language_bench_v1.add_argument("--case-id", action="append", default=[], help="Optional case id filter. Repeat to benchmark only specific prompts.")
+    terminal_language_bench_v1.add_argument("--limit", type=int, default=None, help="Optional max number of benchmark prompts to run after filtering.")
+    terminal_language_bench_v1.add_argument("--model", default="", help="Shared model for both lanes.")
+    terminal_language_bench_v1.add_argument("--raw-model", default="", help="Raw baseline model. Defaults to --model or the small terminal default.")
+    terminal_language_bench_v1.add_argument("--memla-model", default="", help="Memla model. Defaults to --model or the small terminal default.")
+    terminal_language_bench_v1.add_argument("--raw-provider", default="ollama", help="Provider override for the raw lane.")
+    terminal_language_bench_v1.add_argument("--raw-base-url", default="", help="Optional base URL override for the raw lane.")
+    terminal_language_bench_v1.add_argument("--memla-provider", default="ollama", help="Provider override for the Memla lane.")
+    terminal_language_bench_v1.add_argument("--memla-base-url", default="", help="Optional base URL override for the Memla lane.")
+    terminal_language_bench_v1.add_argument("--temperature", type=float, default=0.1)
+    terminal_language_bench_v1.add_argument("--heuristic-only", action="store_true", help="Force the Memla lane to stay heuristic-only.")
+    terminal_language_bench_v1.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
+    terminal_language_bench_v1.set_defaults(func=_handle_terminal_browser_benchmark, ontology_version="language_v1")
+
+    terminal_language_bench_v2 = terminal_sub.add_parser(
+        "benchmark-language-v2",
+        help="Benchmark Language Ontology V2 with LLM language compilation above the locked browser runtime.",
+    )
+    terminal_language_bench_v2.add_argument("--cases", default=_language_v2_cases_default(), help="Language Ontology V2 benchmark case JSONL path.")
+    terminal_language_bench_v2.add_argument("--case-id", action="append", default=[], help="Optional case id filter. Repeat to benchmark only specific prompts.")
+    terminal_language_bench_v2.add_argument("--limit", type=int, default=None, help="Optional max number of benchmark prompts to run after filtering.")
+    terminal_language_bench_v2.add_argument("--model", default="", help="Shared model for both lanes.")
+    terminal_language_bench_v2.add_argument("--raw-model", default="", help="Raw baseline model. Defaults to --model or the small terminal default.")
+    terminal_language_bench_v2.add_argument("--memla-model", default="", help="Memla model. Defaults to --model or the small terminal default.")
+    terminal_language_bench_v2.add_argument("--raw-provider", default="ollama", help="Provider override for the raw lane.")
+    terminal_language_bench_v2.add_argument("--raw-base-url", default="", help="Optional base URL override for the raw lane.")
+    terminal_language_bench_v2.add_argument("--memla-provider", default="ollama", help="Provider override for the Memla lane.")
+    terminal_language_bench_v2.add_argument("--memla-base-url", dest="memla_base_url", default="", help="Optional base URL override for the Memla lane.")
+    terminal_language_bench_v2.add_argument("--temperature", type=float, default=0.1)
+    terminal_language_bench_v2.add_argument("--heuristic-only", action="store_true", help="Force the Memla lane to stay heuristic-only.")
+    terminal_language_bench_v2.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
+    terminal_language_bench_v2.set_defaults(func=_handle_terminal_browser_benchmark, ontology_version="language_v2")
+
+    terminal_language_bench_v3 = terminal_sub.add_parser(
+        "benchmark-language-v3",
+        help="Benchmark Language Ontology V3 as a cold-vs-warm learning loop over the locked browser runtime.",
+    )
+    terminal_language_bench_v3.add_argument("--cases", default=_language_v3_cases_default(), help="Language Ontology V3 benchmark case JSONL path.")
+    terminal_language_bench_v3.add_argument("--case-id", action="append", default=[], help="Optional case id filter. Repeat to benchmark only specific prompts.")
+    terminal_language_bench_v3.add_argument("--limit", type=int, default=None, help="Optional max number of benchmark prompts to run after filtering.")
+    terminal_language_bench_v3.add_argument("--model", default="", help="Shared model for both lanes.")
+    terminal_language_bench_v3.add_argument("--raw-model", default="", help="Raw baseline model. Defaults to --model or the small terminal default.")
+    terminal_language_bench_v3.add_argument("--memla-model", default="", help="Memla model. Defaults to --model or the small terminal default.")
+    terminal_language_bench_v3.add_argument("--raw-provider", default="ollama", help="Provider override for the raw lane.")
+    terminal_language_bench_v3.add_argument("--raw-base-url", default="", help="Optional base URL override for the raw lane.")
+    terminal_language_bench_v3.add_argument("--memla-provider", default="ollama", help="Provider override for the Memla lane.")
+    terminal_language_bench_v3.add_argument("--memla-base-url", dest="memla_base_url", default="", help="Optional base URL override for the Memla lane.")
+    terminal_language_bench_v3.add_argument("--temperature", type=float, default=0.1)
+    terminal_language_bench_v3.add_argument("--out-dir", default="", help="Directory for report artifacts and temporary language memory. Defaults to ./memla_reports/<timestamp>.")
+    terminal_language_bench_v3.set_defaults(func=_handle_terminal_browser_benchmark, ontology_version="language_v3")
+
+    terminal_language_bench_v4 = terminal_sub.add_parser(
+        "benchmark-language-v4",
+        help="Benchmark Language Ontology V4 as compiler -> memory -> promoted rule coverage.",
+    )
+    terminal_language_bench_v4.add_argument("--cases", default=_language_v4_cases_default(), help="Language Ontology V4 benchmark case JSONL path.")
+    terminal_language_bench_v4.add_argument("--case-id", action="append", default=[], help="Optional case id filter. Repeat to benchmark only specific prompts.")
+    terminal_language_bench_v4.add_argument("--limit", type=int, default=None, help="Optional max number of benchmark prompts to run after filtering.")
+    terminal_language_bench_v4.add_argument("--model", default="", help="Shared model for both lanes.")
+    terminal_language_bench_v4.add_argument("--raw-model", default="", help="Raw baseline model. Defaults to --model or the small terminal default.")
+    terminal_language_bench_v4.add_argument("--memla-model", default="", help="Memla model. Defaults to --model or the small terminal default.")
+    terminal_language_bench_v4.add_argument("--raw-provider", default="ollama", help="Provider override for the raw lane.")
+    terminal_language_bench_v4.add_argument("--raw-base-url", default="", help="Optional base URL override for the raw lane.")
+    terminal_language_bench_v4.add_argument("--memla-provider", default="ollama", help="Provider override for the Memla lane.")
+    terminal_language_bench_v4.add_argument("--memla-base-url", dest="memla_base_url", default="", help="Optional base URL override for the Memla lane.")
+    terminal_language_bench_v4.add_argument("--temperature", type=float, default=0.1)
+    terminal_language_bench_v4.add_argument("--out-dir", default="", help="Directory for report artifacts and temporary language memory/rules. Defaults to ./memla_reports/<timestamp>.")
+    terminal_language_bench_v4.set_defaults(func=_handle_terminal_browser_benchmark, ontology_version="language_v4")
+
     pack_parser = subparsers.add_parser("pack", help="Build Memla proof and buyer packs.")
     pack_sub = pack_parser.add_subparsers(dest="pack_command")
     thesis_parser = pack_sub.add_parser("thesis", help="Build the current thesis proof pack.")
@@ -1534,9 +1939,41 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _top_level_subcommand_names(parser: argparse.ArgumentParser) -> set[str]:
+    for action in getattr(parser, "_actions", []):
+        choices = getattr(action, "choices", None)
+        if isinstance(choices, dict):
+            return {str(name) for name in choices}
+    return set()
+
+
+def _rewrite_bare_terminal_argv(parser: argparse.ArgumentParser, argv: list[str] | None) -> list[str]:
+    argv_list = list(sys.argv[1:] if argv is None else argv)
+    if not argv_list:
+        return argv_list
+    first = str(argv_list[0]).strip()
+    if not first or first.startswith("-"):
+        return argv_list
+    if first in _top_level_subcommand_names(parser):
+        return argv_list
+    prompt_parts: list[str] = []
+    option_start = len(argv_list)
+    for index, token in enumerate(argv_list):
+        token_text = str(token).strip()
+        if index > 0 and token_text.startswith("-"):
+            option_start = index
+            break
+        if token_text:
+            prompt_parts.append(token_text)
+    prompt = " ".join(prompt_parts).strip()
+    if not prompt:
+        return argv_list
+    return ["terminal", "run", "--prompt", prompt, *argv_list[option_start:]]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(_rewrite_bare_terminal_argv(parser, argv))
     func = getattr(args, "func", None)
     if func is None:
         parser.print_help(sys.stderr)

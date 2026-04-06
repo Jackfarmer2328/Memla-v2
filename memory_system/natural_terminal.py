@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from difflib import SequenceMatcher
 import json
 import os
 from pathlib import Path
@@ -20,10 +21,28 @@ from .ollama_client import ChatMessage, UniversalLLMClient
 SUPPORTED_ACTION_KINDS = {
     "launch_app",
     "open_url",
+    "browser_new_tab",
+    "browser_close_tab",
+    "browser_switch_tab",
     "open_search_result",
+    "browser_click_index",
+    "browser_click_text",
     "browser_read_page",
+    "browser_extract_page",
+    "browser_extract_cards",
+    "browser_rank_cards",
+    "browser_compare_cards",
+    "browser_search_subject",
+    "browser_retry_subject_result",
+    "browser_synthesize_evidence",
     "open_path",
     "browser_back",
+    "browser_forward",
+    "browser_scroll",
+    "browser_type_text",
+    "browser_submit",
+    "browser_wait",
+    "browser_screenshot",
     "browser_media_pause",
     "browser_media_play",
     "list_directory",
@@ -56,7 +75,10 @@ MACOS_OPEN_COMMAND = ["open"]
 BROWSER_STATE_ENV = "MEMLA_TERMINAL_STATE_PATH"
 BROWSER_STATE_FILENAME = "terminal_browser_state.json"
 TERMINAL_TRACE_FILENAME = "terminal_transmutation_traces.jsonl"
+TERMINAL_LANGUAGE_MEMORY_FILENAME = "terminal_language_memory.jsonl"
+TERMINAL_LANGUAGE_RULE_FILENAME = "terminal_language_rules.json"
 DEFAULT_USER_AGENT = "Mozilla/5.0 (compatible; MemlaTerminal/1.0; +https://github.com/Jackfarmer2328/Memla-v2)"
+PREFERRED_BROWSER_ENV = "MEMLA_BROWSER_APP"
 
 
 @dataclass(frozen=True)
@@ -109,9 +131,18 @@ class TerminalBenchmarkCase:
 class BrowserSessionState:
     current_url: str = ""
     page_kind: str = ""
+    browser_app: str = ""
     search_engine: str = ""
     search_query: str = ""
     result_urls: list[str] = field(default_factory=list)
+    result_cards: list[dict[str, Any]] = field(default_factory=list)
+    subject_title: str = ""
+    subject_url: str = ""
+    subject_summary: str = ""
+    research_subject_title: str = ""
+    research_subject_url: str = ""
+    research_subject_summary: str = ""
+    evidence_items: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -143,11 +174,23 @@ class TerminalStepExecution:
 
 
 APP_SPECS: dict[str, dict[str, Any]] = {
+    "brave": {
+        "aliases": ("brave", "brave browser"),
+        "linux": ("brave-browser", "brave"),
+        "darwin": ("Brave Browser", "Brave"),
+        "win32": ("brave.exe",),
+    },
     "chrome": {
         "aliases": ("chrome", "google chrome", "chromium", "chromium browser"),
         "linux": ("google-chrome-stable", "google-chrome", "chromium", "chromium-browser"),
         "darwin": ("Google Chrome",),
         "win32": ("chrome.exe",),
+    },
+    "edge": {
+        "aliases": ("edge", "microsoft edge"),
+        "linux": ("microsoft-edge", "microsoft-edge-stable"),
+        "darwin": ("Microsoft Edge",),
+        "win32": ("msedge.exe",),
     },
     "firefox": {
         "aliases": ("firefox", "mozilla firefox"),
@@ -228,6 +271,14 @@ SEARCH_ENGINE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
         re.compile(r"\bopen\s+(?P<engine>youtube|github|google|reddit|amazon)\b(?:.*?\b)?search\s+(?P<query>.+)$", flags=re.IGNORECASE),
         "engine_first",
     ),
+    (
+        re.compile(r"\b(?:put|go to|visit)\s+(?P<engine>youtube|github|google|reddit|amazon)\b(?:.*?\b)?search\s+(?P<query>.+)$", flags=re.IGNORECASE),
+        "engine_first",
+    ),
+    (
+        re.compile(r"\b(?:look up|lookup|pull up|check out)\s+(?P<query>.+?)\s+on\s+(?P<engine>google|web|youtube|github|reddit|amazon)\b", flags=re.IGNORECASE),
+        "query_first",
+    ),
 )
 
 FILLER_PHRASES: tuple[str, ...] = (
@@ -240,7 +291,244 @@ FILLER_PHRASES: tuple[str, ...] = (
     "bro",
     "now",
     "just",
+    "hey memla",
+    "you see",
 )
+
+LANGUAGE_REWRITE_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"\blook up\b", " search "),
+    (r"\blookup\b", " search "),
+    (r"\bpull up\b", " open "),
+    (r"\bcheck out\b", " open "),
+    (r"\bcrack open\b", " open "),
+    (r"\bgrab\b", " find "),
+    (r"\bsnag\b", " find "),
+    (r"\bpeep\b", " find "),
+    (r"\bpop\b", " open "),
+    (r"\bvids\b", " videos "),
+    (r"\bvid\b", " video "),
+    (r"\bthreads\b", " posts "),
+    (r"\bthread\b", " post "),
+    (r"\byt\b", " youtube "),
+    (r"\bnewbie\b", " beginner "),
+    (r"\bopener\b", " first "),
+    (r"\bbunk\b", " weak "),
+    (r"\bopen a tab\b", " open new tab "),
+    (r"\bopen tab\b", " open new tab "),
+    (r"\bhe first\b", " first "),
+    (r"\bhe second\b", " second "),
+    (r"\bhe third\b", " third "),
+)
+
+INFERRED_SEARCH_ENGINE_HINTS: dict[str, tuple[str, ...]] = {
+    "youtube": ("youtube", "video", "videos", "music", "song", "watch"),
+    "github": ("github", "repo", "repos", "repository", "repositories", "codebase", "project"),
+    "reddit": ("reddit", "post", "posts", "thread", "threads", "discussion", "discussions"),
+    "google": ("google", "web"),
+    "amazon": ("amazon", "product", "products"),
+}
+
+SEARCH_QUERY_LEAD_INS: tuple[str, ...] = (
+    "search",
+    "find",
+    "put",
+    "open",
+    "show",
+)
+
+SEARCH_QUERY_TRAILING_CUES: tuple[str, ...] = (
+    "click",
+    "open",
+    "watch",
+    "play",
+    "pick",
+    "select",
+    "press",
+    "read",
+    "summarize",
+    "summarise",
+    "explain",
+    "tell me",
+)
+
+GOAL_STOPWORDS: set[str] = {
+    "a",
+    "an",
+    "and",
+    "align",
+    "aligned",
+    "any",
+    "are",
+    "best",
+    "browser",
+    "card",
+    "cards",
+    "compare",
+    "current",
+    "does",
+    "fit",
+    "for",
+    "from",
+    "good",
+    "is",
+    "match",
+    "matches",
+    "most",
+    "of",
+    "page",
+    "repo",
+    "repos",
+    "repository",
+    "result",
+    "results",
+    "show",
+    "source",
+    "sources",
+    "tell",
+    "that",
+    "the",
+    "these",
+    "this",
+    "to",
+    "what",
+    "which",
+    "with",
+}
+
+LOW_SIGNAL_GOAL_TOKENS: set[str] = {
+    "local",
+    "workflow",
+    "setup",
+    "project",
+    "repo",
+    "repos",
+    "repository",
+    "repositories",
+    "result",
+    "results",
+    "card",
+    "cards",
+}
+
+LANGUAGE_MEMORY_STOPWORDS: set[str] = {
+    "a",
+    "an",
+    "and",
+    "about",
+    "all",
+    "any",
+    "at",
+    "best",
+    "but",
+    "figure",
+    "find",
+    "for",
+    "from",
+    "get",
+    "go",
+    "grab",
+    "hey",
+    "i",
+    "if",
+    "in",
+    "into",
+    "it",
+    "just",
+    "me",
+    "memla",
+    "my",
+    "now",
+    "of",
+    "on",
+    "open",
+    "or",
+    "over",
+    "please",
+    "pull",
+    "search",
+    "show",
+    "snag",
+    "some",
+    "tell",
+    "that",
+    "the",
+    "then",
+    "this",
+    "to",
+    "up",
+    "yo",
+    "you",
+}
+
+COMPILER_REWRITE_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"\bscope out some youtube coverage on\b", " find a youtube video about "),
+    (r"\bscope out youtube coverage on\b", " find a youtube video about "),
+    (r"\bscope out a reddit thread on\b", " find a reddit thread about "),
+    (r"\bscope out some reddit coverage on\b", " find a reddit thread about "),
+    (r"\bscope out\b", " find "),
+    (r"\bsuss out\b", " find "),
+    (r"\bline up\b", " find "),
+    (r"\bhunt down\b", " find "),
+    (r"\btrack down\b", " find "),
+    (r"\bround up\b", " find "),
+    (r"\bpeel open\b", " open "),
+    (r"\bclip\b", " video "),
+    (r"\bcrack a stronger one\b", " open a better one "),
+    (r"\bcrack stronger one\b", " open a better one "),
+    (r"\bcrack a better one\b", " open a better one "),
+    (r"\btop one\b", " first one "),
+    (r"\btop result\b", " first result "),
+    (r"\btop repo\b", " first repo "),
+    (r"\btop video\b", " first video "),
+    (r"\bsort out the repo that suits\b", " find whatever repo best fits "),
+    (r"\bsort out which repo suits\b", " find whatever repo best fits "),
+    (r"\bbest fits\b", " fits best "),
+    (r"\bweigh the first two repos\b", " compare the first two repos "),
+    (r"\blands the clearest\b", " best explains "),
+)
+
+GOAL_CONCEPT_PATTERNS: dict[str, tuple[float, tuple[str, ...]]] = {
+    "cpp": (
+        2.0,
+        (
+            r"\bc\+\+\b",
+            r"\bcpp\b",
+            r"\bc plus plus\b",
+            r"\bcxx\b",
+        ),
+    ),
+    "inference": (
+        1.5,
+        (
+            r"\binference\b",
+            r"\bruntime\b",
+        ),
+    ),
+    "resource_constrained": (
+        1.5,
+        (
+            r"\bweak hardware\b",
+            r"\bweak laptop\b",
+            r"\blaptop\b",
+            r"\blaptops\b",
+            r"\bcpu\b",
+            r"\bportable\b",
+            r"\bportability\b",
+        ),
+    ),
+    "beginner": (
+        2.0,
+        (
+            r"\bbeginner\b",
+            r"\bgetting started\b",
+            r"\bget started\b",
+            r"\bsimple cli\b",
+            r"\bsimple\b",
+            r"\beasy\b",
+            r"\bquickly\b",
+        ),
+    ),
+}
 
 
 def terminal_model_default() -> str:
@@ -258,6 +546,14 @@ def terminal_trace_log_path() -> Path:
     return (terminal_browser_state_path().parent / TERMINAL_TRACE_FILENAME).resolve()
 
 
+def terminal_language_memory_path() -> Path:
+    return (terminal_browser_state_path().parent / TERMINAL_LANGUAGE_MEMORY_FILENAME).resolve()
+
+
+def terminal_language_rule_path() -> Path:
+    return (terminal_browser_state_path().parent / TERMINAL_LANGUAGE_RULE_FILENAME).resolve()
+
+
 def load_browser_session_state(path: str | Path | None = None) -> BrowserSessionState:
     state_path = Path(path).expanduser().resolve() if path else terminal_browser_state_path()
     if not state_path.exists():
@@ -269,12 +565,23 @@ def load_browser_session_state(path: str | Path | None = None) -> BrowserSession
     if not isinstance(payload, dict):
         return BrowserSessionState()
     result_urls = [str(item).strip() for item in list(payload.get("result_urls") or []) if str(item).strip()]
+    result_cards = [dict(item) for item in list(payload.get("result_cards") or []) if isinstance(item, dict)]
+    evidence_items = [dict(item) for item in list(payload.get("evidence_items") or []) if isinstance(item, dict)]
     return BrowserSessionState(
         current_url=str(payload.get("current_url") or "").strip(),
         page_kind=str(payload.get("page_kind") or "").strip(),
+        browser_app=str(payload.get("browser_app") or "").strip(),
         search_engine=str(payload.get("search_engine") or "").strip(),
         search_query=str(payload.get("search_query") or "").strip(),
         result_urls=result_urls,
+        result_cards=result_cards,
+        subject_title=str(payload.get("subject_title") or "").strip(),
+        subject_url=str(payload.get("subject_url") or "").strip(),
+        subject_summary=str(payload.get("subject_summary") or "").strip(),
+        research_subject_title=str(payload.get("research_subject_title") or "").strip(),
+        research_subject_url=str(payload.get("research_subject_url") or "").strip(),
+        research_subject_summary=str(payload.get("research_subject_summary") or "").strip(),
+        evidence_items=evidence_items,
     )
 
 
@@ -291,12 +598,152 @@ def _normalize_label(value: str) -> str:
     return " ".join(text.split())
 
 
+def _clone_evidence_items(items: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    return [dict(item) for item in list(items or []) if isinstance(item, dict)]
+
+
+def _browser_state_payload(browser_state: BrowserSessionState) -> dict[str, Any]:
+    return {
+        "current_url": browser_state.current_url,
+        "page_kind": browser_state.page_kind,
+        "browser_app": browser_state.browser_app,
+        "search_engine": browser_state.search_engine,
+        "search_query": browser_state.search_query,
+        "result_urls": [str(item).strip() for item in list(browser_state.result_urls or []) if str(item).strip()],
+        "result_cards": [dict(item) for item in list(browser_state.result_cards or []) if isinstance(item, dict)],
+        "subject_title": browser_state.subject_title,
+        "subject_url": browser_state.subject_url,
+        "subject_summary": browser_state.subject_summary,
+        "research_subject_title": browser_state.research_subject_title,
+        "research_subject_url": browser_state.research_subject_url,
+        "research_subject_summary": browser_state.research_subject_summary,
+        "evidence_items": _clone_evidence_items(browser_state.evidence_items),
+    }
+
+
+def _browser_state_copy(browser_state: BrowserSessionState, **updates: Any) -> BrowserSessionState:
+    payload = _browser_state_payload(browser_state)
+    payload.update(updates)
+    payload["result_urls"] = [str(item).strip() for item in list(payload.get("result_urls") or []) if str(item).strip()]
+    payload["result_cards"] = [dict(item) for item in list(payload.get("result_cards") or []) if isinstance(item, dict)]
+    payload["evidence_items"] = _clone_evidence_items(payload.get("evidence_items"))
+    return BrowserSessionState(**payload)
+
+
+def _normalize_goal_text(value: str) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"\bc\+\+\b", " cpp ", text)
+    text = re.sub(r"\bc plus plus\b", " cpp ", text)
+    text = re.sub(r"\bcxx\b", " cpp ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    for pattern, replacement in LANGUAGE_REWRITE_PATTERNS:
+        text = re.sub(pattern, replacement, text)
+    return " ".join(text.split())
+
+
 def _intent_text(value: str) -> str:
     text = _normalize_label(value)
+    for pattern, replacement in LANGUAGE_REWRITE_PATTERNS:
+        text = re.sub(pattern, replacement, text)
     for phrase in FILLER_PHRASES:
         text = re.sub(rf"\b{re.escape(phrase)}\b", " ", text)
     text = re.sub(r"\bthen\b", " ", text)
     return " ".join(text.split())
+
+
+def _compiler_surface_text(value: str) -> str:
+    text = _normalize_goal_text(value)
+    for pattern, replacement in LANGUAGE_REWRITE_PATTERNS:
+        text = re.sub(pattern, replacement, text)
+    for pattern, replacement in COMPILER_REWRITE_PATTERNS:
+        text = re.sub(pattern, replacement, text)
+    text = re.sub(r"\bwinner\b", " winner ", text)
+    return " ".join(text.split())
+
+
+def _infer_search_engine_from_text(text: str) -> str:
+    normalized = _intent_text(text)
+    if not normalized:
+        return ""
+    for engine, hints in INFERRED_SEARCH_ENGINE_HINTS.items():
+        if any(re.search(rf"\b{re.escape(hint)}\b", normalized) for hint in hints):
+            return engine
+    return ""
+
+
+def _trim_inferred_query_tail(text: str) -> str:
+    clean = str(text or "").strip()
+    if not clean:
+        return ""
+    for cue in SEARCH_QUERY_TRAILING_CUES:
+        pattern = rf"\b{re.escape(_normalize_goal_text(cue))}\b"
+        match = re.search(pattern, clean)
+        if match:
+            clean = clean[: match.start()].strip()
+            break
+    return clean
+
+
+def _clean_inferred_query(text: str, *, engine: str = "") -> str:
+    clean = _normalize_goal_text(text)
+    if not clean:
+        return ""
+    clean = _trim_inferred_query_tail(clean)
+    if engine:
+        clean = re.sub(rf"\b{re.escape(_normalize_goal_text(engine))}\b", " ", clean)
+    engine_hints = INFERRED_SEARCH_ENGINE_HINTS.get(engine, ())
+    for hint in engine_hints:
+        clean = re.sub(rf"\b{re.escape(_normalize_goal_text(hint))}\b", " ", clean)
+    clean = re.sub(r"\b(?:on|about|for|with|of|the|a|an|me|this|that|it)\b", " ", clean)
+    return " ".join(clean.split())
+
+
+def _explicit_search_hits_from_text(text: str) -> list[dict[str, str]]:
+    hits: list[dict[str, str]] = []
+    seen: set[str] = set()
+    intent_text = _intent_text(text)
+    if not intent_text:
+        return hits
+    for pattern, _ordering in SEARCH_ENGINE_PATTERNS:
+        for match in pattern.finditer(intent_text):
+            engine = str(match.groupdict().get("engine") or "").strip()
+            query = str(match.groupdict().get("query") or "").strip().rstrip(".!?")
+            url = _search_url(engine, query)
+            if not url or url.lower() in seen:
+                continue
+            seen.add(url.lower())
+            hits.append(
+                {
+                    "engine": _normalize_label(engine),
+                    "query": " ".join(query.split()),
+                    "url": url,
+                }
+            )
+    return hits
+
+
+def _search_hits_from_text(text: str) -> list[dict[str, str]]:
+    hits = _explicit_search_hits_from_text(text)
+    if hits:
+        return hits
+    intent_text = _intent_text(text)
+    inferred_engine = _infer_search_engine_from_text(intent_text)
+    if not inferred_engine:
+        return hits
+    inferred_query = ""
+    for lead_in in SEARCH_QUERY_LEAD_INS:
+        match = re.search(rf"\b{re.escape(_normalize_goal_text(lead_in))}\s+(?P<query>.+)$", intent_text)
+        if match:
+            inferred_query = _clean_inferred_query(str(match.group("query") or "").strip(), engine=inferred_engine)
+            if inferred_query:
+                break
+    if not inferred_query:
+        return hits
+    url = _search_url(inferred_engine, inferred_query)
+    if not url:
+        return hits
+    hits.append({"engine": inferred_engine, "query": inferred_query, "url": url})
+    return hits
 
 
 def _alias_hits(prompt: str, alias_map: dict[str, tuple[str, ...]]) -> list[str]:
@@ -335,7 +782,13 @@ def _url_hits(prompt: str) -> list[str]:
 
 def _contains_risky_intent(prompt: str) -> bool:
     lower = str(prompt or "").strip().lower()
-    return any(token in lower for token in RISKY_TOKENS)
+    for token in RISKY_TOKENS:
+        clean = str(token or "").strip().lower()
+        if not clean:
+            continue
+        if re.search(rf"\b{re.escape(clean)}\b", lower):
+            return True
+    return False
 
 
 def _search_url(engine: str, query: str) -> str:
@@ -439,34 +892,33 @@ def _decode_action_note(note: str) -> dict[str, Any]:
 
 
 def _search_hits(prompt: str) -> list[dict[str, str]]:
+    explicit_hits = _explicit_search_hits_from_text(prompt)
+    if explicit_hits:
+        return explicit_hits
     hits: list[dict[str, str]] = []
     seen: set[str] = set()
-    intent_text = _intent_text(prompt)
-    for pattern, _ordering in SEARCH_ENGINE_PATTERNS:
-        for match in pattern.finditer(intent_text):
-            engine = str(match.groupdict().get("engine") or "").strip()
-            query = str(match.groupdict().get("query") or "").strip().rstrip(".!?")
-            url = _search_url(engine, query)
+    clauses = _split_prompt_clauses(prompt)
+    if not clauses:
+        clauses = [_intent_text(prompt)]
+    for clause in clauses:
+        for hit in _search_hits_from_text(clause):
+            url = str(hit.get("url") or "").strip()
             if not url or url.lower() in seen:
                 continue
             seen.add(url.lower())
-            hits.append(
-                {
-                    "engine": _normalize_label(engine),
-                    "query": " ".join(query.split()),
-                    "url": url,
-                }
-            )
-    return hits
+            hits.append(hit)
+    if hits:
+        return hits
+    return _search_hits_from_text(prompt)
 
 
 def _result_index_from_prompt(prompt: str) -> int:
     normalized = _intent_text(prompt)
-    if any(token in normalized for token in {"first", "1st", "the video", "the vid", "the repo", "the result"}):
+    if any(token in normalized for token in {"first", "1st", "one", "top one", "top result", "top repo", "top video", "the video", "the vid", "the repo", "the result"}):
         return 1
-    if any(token in normalized for token in {"second", "2nd"}):
+    if any(token in normalized for token in {"second", "2nd", "two"}):
         return 2
-    if any(token in normalized for token in {"third", "3rd"}):
+    if any(token in normalized for token in {"third", "3rd", "three"}):
         return 3
     match = re.search(r"\b(\d+)(?:st|nd|rd|th)?\b", normalized)
     if match:
@@ -477,6 +929,21 @@ def _result_index_from_prompt(prompt: str) -> int:
     return 1
 
 
+def _text_target_from_prompt(prompt: str) -> str:
+    intent = _intent_text(prompt)
+    match = re.search(r"\b(?:click|select|pick)\s+(?:on\s+)?(?:the\s+)?(?P<target>.+)$", intent)
+    if not match:
+        return ""
+    target = str(match.group("target") or "").strip()
+    for prefix in ("text ", "label ", "button ", "link "):
+        if target.startswith(prefix):
+            target = target[len(prefix):].strip()
+    target = target.strip("\"' ")
+    if any(token in target for token in {"first", "second", "third", "result", "repo", "video", "vid", "item", "card"}):
+        return ""
+    return target
+
+
 def _wants_browser_read(prompt: str) -> bool:
     normalized = _intent_text(prompt)
     page_phrase_hit = any(
@@ -485,12 +952,17 @@ def _wants_browser_read(prompt: str) -> bool:
             "read this page",
             "summarize this page",
             "summarise this page",
+            "summary on this",
+            "summary of this",
             "read this post",
             "read this repo",
             "what is this page",
             "what is this repo",
             "what is this post",
             "what is this video",
+            "tell me about this",
+            "tell me more about this",
+            "what am i looking at",
             "extract repo info",
             "extract page info",
             "repo info",
@@ -501,16 +973,1087 @@ def _wants_browser_read(prompt: str) -> bool:
     return page_phrase_hit or (verb_hit and noun_hit)
 
 
+def _cached_cards(browser_state: BrowserSessionState) -> list[dict[str, Any]]:
+    cards = [dict(item) for item in list(browser_state.result_cards or []) if isinstance(item, dict)]
+    if cards:
+        return cards
+    return _fallback_cards_from_urls(list(browser_state.result_urls or []))
+
+
+def _resolve_card_by_index(browser_state: BrowserSessionState, index: int) -> dict[str, Any]:
+    cards = _cached_cards(browser_state)
+    if 1 <= index <= len(cards):
+        return dict(cards[index - 1])
+    return {}
+
+
+def _resolve_card_by_text(browser_state: BrowserSessionState, text: str) -> dict[str, Any]:
+    needle = _normalize_label(text)
+    if not needle:
+        return {}
+    best: dict[str, Any] = {}
+    for card in _cached_cards(browser_state):
+        haystacks = [
+            _normalize_label(card.get("title", "")),
+            _normalize_label(card.get("summary", "")),
+            _normalize_label(card.get("url", "")),
+        ]
+        if any(needle and needle in hay for hay in haystacks):
+            best = dict(card)
+            break
+    return best
+
+
+def _browser_state_with_subject(browser_state: BrowserSessionState, subject: dict[str, Any] | None) -> BrowserSessionState:
+    payload = dict(subject or {})
+    return _browser_state_copy(
+        browser_state,
+        subject_title=str(payload.get("title") or "").strip(),
+        subject_url=str(payload.get("url") or "").strip(),
+        subject_summary=str(payload.get("summary") or "").strip(),
+    )
+
+
+def _browser_state_with_research_subject(browser_state: BrowserSessionState, subject: dict[str, Any] | None) -> BrowserSessionState:
+    payload = dict(subject or {})
+    return _browser_state_copy(
+        browser_state,
+        research_subject_title=str(payload.get("title") or "").strip(),
+        research_subject_url=str(payload.get("url") or "").strip(),
+        research_subject_summary=str(payload.get("summary") or "").strip(),
+    )
+
+
+def _goal_text_from_prompt(prompt: str) -> str:
+    intent = _intent_text(prompt)
+    compact = " ".join(intent.split()).strip()
+    if not compact:
+        return ""
+    for pattern in (
+        r"\b(?:rank|compare)\s+(?:these\s+)?(?:repos|repositories|results|cards)\s+for\s+(.+)$",
+        r"\bfind\s+the\s+best\s+(?:repo|repository|result|card)\s+for\s+(.+)$",
+        r"\bwhich\s+(?:repo|repository|result|card)\s+(?:best\s+)?(?:aligns|matches|fits)\s+(?:most\s+)?with\s+(.+)$",
+        r"\bwhat\s+is\s+the\s+best\s+(?:repo|repository|result|card)\s+for\s+(.+)$",
+        r"\bcompare\s+.+?\s+for\s+(.+)$",
+    ):
+        match = re.search(pattern, compact)
+        if match:
+            text = str(match.group(1) or "").strip()
+            if text:
+                return text
+    return compact
+
+
+def _leading_clause_text(prompt: str) -> str:
+    compact = " ".join(_intent_text(prompt).split()).strip()
+    if not compact:
+        return ""
+    for separator in (" and then ", " then ", " after that ", " afterwards ", " next "):
+        if separator in compact:
+            return compact.split(separator, 1)[0].strip()
+    return compact
+
+
+def _goal_tokens(text: str) -> list[str]:
+    normalized = _normalize_goal_text(text)
+    if not normalized:
+        return []
+    return [
+        token
+        for token in normalized.split()
+        if token and token not in GOAL_STOPWORDS and not token.isdigit() and len(token) > 1
+    ]
+
+
+def _card_goal_text(card: dict[str, Any]) -> str:
+    parts = [
+        str(card.get("title") or "").strip(),
+        str(card.get("summary") or "").strip(),
+        str(card.get("meta") or "").strip(),
+        str(card.get("url") or "").strip(),
+    ]
+    return " ".join(part for part in parts if part)
+
+
+def _goal_concepts(text: str) -> set[str]:
+    source = str(text or "").strip().lower()
+    if not source:
+        return set()
+    out: set[str] = set()
+    for name, (_, patterns) in GOAL_CONCEPT_PATTERNS.items():
+        if any(re.search(pattern, source) for pattern in patterns):
+            out.add(name)
+    return out
+
+
+def _score_text_against_goal(text: str, goal: str) -> tuple[float, list[str]]:
+    text_tokens = set(_goal_tokens(text))
+    goal_tokens = _goal_tokens(goal)
+    if not goal_tokens:
+        return 0.0, []
+    overlap = [token for token in goal_tokens if token in text_tokens]
+    score = 0.0
+    for token in overlap:
+        score += 0.5 if token in LOW_SIGNAL_GOAL_TOKENS else 1.0
+    goal_concepts = _goal_concepts(goal)
+    text_concepts = _goal_concepts(text)
+    concept_overlap = sorted(goal_concepts & text_concepts)
+    for concept in concept_overlap:
+        score += float(GOAL_CONCEPT_PATTERNS[concept][0])
+    normalized_text = _normalize_goal_text(text)
+    normalized_goal = _normalize_goal_text(goal)
+    if normalized_goal and normalized_goal in normalized_text:
+        score += 1.0
+    matching_terms = overlap + [f"concept:{concept}" for concept in concept_overlap]
+    deduped_terms: list[str] = []
+    seen: set[str] = set()
+    for term in matching_terms:
+        if term in seen:
+            continue
+        seen.add(term)
+        deduped_terms.append(term)
+    return score, deduped_terms[:6]
+
+
+def _rank_cards_against_goal(cards: list[dict[str, Any]], goal: str) -> list[dict[str, Any]]:
+    ranked: list[dict[str, Any]] = []
+    for index, card in enumerate(list(cards or []), start=1):
+        payload = dict(card)
+        score, matches = _score_text_against_goal(_card_goal_text(payload), goal)
+        payload["index"] = int(payload.get("index") or index)
+        payload["score"] = round(score, 4)
+        payload["matching_terms"] = matches
+        ranked.append(payload)
+    ranked.sort(
+        key=lambda item: (
+            -float(item.get("score") or 0.0),
+            int(item.get("index") or 0),
+            str(item.get("title") or ""),
+        )
+    )
+    return ranked
+
+
+def _compare_cards_against_goal(cards: list[dict[str, Any]], goal: str) -> dict[str, Any]:
+    ranked = _rank_cards_against_goal(cards, goal)
+    winner = dict(ranked[0]) if ranked else {}
+    runner_up = dict(ranked[1]) if len(ranked) > 1 else {}
+    return {
+        "goal": goal,
+        "winner_title": str(winner.get("title") or "").strip(),
+        "winner_url": str(winner.get("url") or "").strip(),
+        "winner_score": float(winner.get("score") or 0.0),
+        "winner_matching_terms": list(winner.get("matching_terms") or []),
+        "runner_up_title": str(runner_up.get("title") or "").strip(),
+        "runner_up_score": float(runner_up.get("score") or 0.0),
+        "comparison": ranked,
+    }
+
+
+def _select_better_cached_result(browser_state: BrowserSessionState, goal: str) -> dict[str, Any]:
+    cards = _cached_cards(browser_state)
+    if not cards:
+        return {}
+    ranked = _rank_cards_against_goal(cards, goal)
+    current_url = _normalize_url(browser_state.current_url)
+    current_title = _normalize_label(browser_state.subject_title)
+    selected: dict[str, Any] = {}
+    for candidate in ranked:
+        candidate_url = _normalize_url(str(candidate.get("url") or "").strip())
+        candidate_title = _normalize_label(str(candidate.get("title") or "").strip())
+        same_url = bool(current_url and candidate_url and candidate_url == current_url)
+        same_title = bool(current_title and candidate_title and candidate_title == current_title)
+        if same_url or same_title:
+            continue
+        selected = dict(candidate)
+        break
+    if not selected and len(ranked) > 1:
+        selected = dict(ranked[1])
+    if selected and not selected.get("index"):
+        for idx, card in enumerate(cards, start=1):
+            if _normalize_url(str(card.get("url") or "").strip()) == _normalize_url(str(selected.get("url") or "").strip()):
+                selected["index"] = idx
+                break
+    if ranked:
+        selected["ranking"] = ranked
+    return selected
+
+
+def _subject_from_browser_state(browser_state: BrowserSessionState | None) -> dict[str, str]:
+    if browser_state is None:
+        return {}
+    if browser_state.subject_title or browser_state.subject_url:
+        return {
+            "title": str(browser_state.subject_title or "").strip(),
+            "url": str(browser_state.subject_url or "").strip(),
+            "summary": str(browser_state.subject_summary or "").strip(),
+        }
+    if browser_state.page_kind == "repo_page" and browser_state.current_url:
+        repo_title = _preview_label_for_url(browser_state.current_url) or browser_state.current_url
+        return {
+            "title": repo_title,
+            "url": str(browser_state.current_url or "").strip(),
+            "summary": "",
+        }
+    return {}
+
+
+def _research_subject_from_browser_state(browser_state: BrowserSessionState | None) -> dict[str, str]:
+    if browser_state is None:
+        return {}
+    if browser_state.research_subject_title or browser_state.research_subject_url:
+        return {
+            "title": str(browser_state.research_subject_title or "").strip(),
+            "url": str(browser_state.research_subject_url or "").strip(),
+            "summary": str(browser_state.research_subject_summary or "").strip(),
+        }
+    return _subject_from_browser_state(browser_state)
+
+
+def _subject_query_from_browser_state(browser_state: BrowserSessionState | None) -> str:
+    subject = _subject_from_browser_state(browser_state)
+    title = str(subject.get("title") or "").strip()
+    if not title:
+        return ""
+    return " ".join(_normalize_goal_text(title).split())
+
+
+def _research_subject_query_from_browser_state(browser_state: BrowserSessionState | None) -> str:
+    subject = _research_subject_from_browser_state(browser_state)
+    title = str(subject.get("title") or "").strip()
+    if not title:
+        return ""
+    return " ".join(_normalize_goal_text(title).split())
+
+
+def _evidence_item_from_details(browser_state: BrowserSessionState, details: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(details or {})
+    source_kind = str(payload.get("page_kind") or browser_state.page_kind or "web_page").strip()
+    title = str(payload.get("title") or payload.get("repo") or browser_state.subject_title or browser_state.current_url).strip()
+    url = str(payload.get("url") or browser_state.current_url or browser_state.subject_url).strip()
+    summary = str(payload.get("summary") or payload.get("description") or browser_state.subject_summary or title).strip()
+    meta_parts = [source_kind.replace("_", " ")]
+    for key in ("channel", "subreddit", "author", "language", "topics"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            meta_parts.append(value)
+    return {
+        "source_kind": source_kind,
+        "title": title,
+        "url": url,
+        "summary": summary,
+        "meta": " | ".join(part for part in meta_parts if part),
+    }
+
+
+def _evidence_item_from_subject(
+    subject: dict[str, Any] | None,
+    *,
+    source_kind: str,
+    fallback_url: str = "",
+    meta: str = "",
+) -> dict[str, Any]:
+    payload = dict(subject or {})
+    title = str(payload.get("title") or "").strip()
+    url = str(payload.get("url") or fallback_url or "").strip()
+    summary = str(payload.get("summary") or title).strip()
+    meta_text = " | ".join(part for part in [source_kind.replace("_", " "), meta] if part)
+    return {
+        "source_kind": source_kind,
+        "title": title,
+        "url": url,
+        "summary": summary,
+        "meta": meta_text,
+    }
+
+
+def _append_browser_evidence(browser_state: BrowserSessionState, evidence_item: dict[str, Any] | None) -> BrowserSessionState:
+    payload = dict(evidence_item or {})
+    if not any(str(payload.get(field) or "").strip() for field in ("title", "url", "summary")):
+        return browser_state
+    items = _clone_evidence_items(browser_state.evidence_items)
+    candidate_url = _normalize_url(str(payload.get("url") or "").strip())
+    candidate_title = _normalize_label(str(payload.get("title") or "").strip())
+    candidate_kind = _normalize_label(str(payload.get("source_kind") or "").strip())
+    replaced = False
+    for index, item in enumerate(items):
+        existing_url = _normalize_url(str(item.get("url") or "").strip())
+        existing_title = _normalize_label(str(item.get("title") or "").strip())
+        existing_kind = _normalize_label(str(item.get("source_kind") or "").strip())
+        same_url = bool(candidate_url and existing_url and candidate_url == existing_url)
+        same_title = bool(candidate_title and existing_title and candidate_title == existing_title and candidate_kind == existing_kind)
+        if not same_url and not same_title:
+            continue
+        merged = dict(item)
+        for key, value in payload.items():
+            if value not in ("", None, [], {}):
+                merged[key] = value
+        items[index] = merged
+        replaced = True
+        break
+    if not replaced:
+        items.append(payload)
+    return _browser_state_copy(browser_state, evidence_items=items)
+
+
+def _synthesize_browser_evidence(
+    evidence_items: list[dict[str, Any]],
+    goal: str,
+    research_subject: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    cleaned = [dict(item) for item in list(evidence_items or []) if isinstance(item, dict)]
+    if not cleaned:
+        return {}
+    subject_title = str((research_subject or {}).get("title") or "").strip()
+    goal_text = str(goal or "").strip()
+    synthesis_goal = " ".join(part for part in [goal_text, subject_title] if part).strip()
+    if not synthesis_goal:
+        synthesis_goal = subject_title
+    ranked = _rank_cards_against_goal(cleaned, synthesis_goal)
+    normalized_goal = _normalize_goal_text(goal_text)
+    reranked: list[dict[str, Any]] = []
+    for item in ranked:
+        candidate = dict(item)
+        source_kind = str(candidate.get("source_kind") or candidate.get("page_kind") or "").strip()
+        candidate_text = _normalize_goal_text(_card_goal_text(candidate))
+        bonus = 0.0
+        if len(cleaned) > 1 and any(needle in normalized_goal for needle in {"which source", "best source", "what source", "best explains"}):
+            if source_kind == "repo_page":
+                bonus -= 2.0
+        if any(needle in normalized_goal for needle in {"why people choose", "why people pick", "discussion", "thread"}):
+            if source_kind == "post_page":
+                bonus += 1.5
+            elif source_kind == "video_page":
+                bonus += 0.35
+        if any(needle in normalized_goal for needle in {"what this repo is for", "what it is for", "overview", "best explains", "explain"}):
+            if source_kind == "video_page":
+                bonus += 1.0
+            elif source_kind == "repo_page":
+                bonus += 0.6
+            elif source_kind == "post_page":
+                bonus += 0.2
+            if any(needle in candidate_text for needle in {"overview", "what it is for", "why people use it"}):
+                bonus += 0.75
+        if any(needle in normalized_goal for needle in {"setup", "walkthrough", "guide", "how to", "beginner"}):
+            if source_kind == "video_page":
+                bonus += 1.0
+            elif source_kind == "post_page":
+                bonus += 0.3
+        candidate["score"] = round(float(candidate.get("score") or 0.0) + bonus, 4)
+        reranked.append(candidate)
+    reranked.sort(
+        key=lambda item: (
+            -float(item.get("score") or 0.0),
+            int(item.get("index") or 0),
+            str(item.get("title") or ""),
+        )
+    )
+    ranked = reranked
+    best = dict(ranked[0]) if ranked else {}
+    if not best:
+        return {}
+    source_kind = str(best.get("source_kind") or best.get("page_kind") or "web_page").strip()
+    source_label_map = {
+        "repo_page": "GitHub repo",
+        "video_page": "YouTube video",
+        "post_page": "Reddit post",
+        "web_page": "web page",
+    }
+    source_label = source_label_map.get(source_kind, source_kind.replace("_", " ") or "source")
+    summary = str(best.get("summary") or best.get("title") or "").strip()
+    explanation_goal = goal_text or subject_title or "the current goal"
+    if subject_title:
+        synthesis = f"{source_label} \"{str(best.get('title') or '').strip()}\" best explains {subject_title} for \"{explanation_goal}\". {summary}".strip()
+    else:
+        synthesis = f"{source_label} \"{str(best.get('title') or '').strip()}\" best explains \"{explanation_goal}\". {summary}".strip()
+    return {
+        "goal": explanation_goal,
+        "best_source_title": str(best.get("title") or "").strip(),
+        "best_source_url": str(best.get("url") or "").strip(),
+        "best_source_kind": source_kind,
+        "best_source_score": float(best.get("score") or 0.0),
+        "best_source_matching_terms": list(best.get("matching_terms") or []),
+        "evidence_titles": [str(item.get("title") or "").strip() for item in ranked if str(item.get("title") or "").strip()],
+        "source_count": len(cleaned),
+        "research_subject_title": subject_title,
+        "synthesis": synthesis,
+        "ranking": ranked,
+    }
+
+
+def _subject_search_engine_from_prompt(prompt: str) -> str:
+    normalized = _intent_text(prompt)
+    if any(
+        token in normalized
+        for token in {
+            "search youtube",
+            "youtube video",
+            "video about it",
+            "video about this repo",
+            "video about the repo",
+            "video about the winner",
+            "find a youtube video",
+            "find youtube video",
+            "find a video about",
+            "grab a youtube video",
+            "youtube vid",
+        }
+    ):
+        return "youtube"
+    if any(
+        token in normalized
+        for token in {
+            "search reddit",
+            "reddit post",
+            "reddit discussion",
+            "find a reddit post",
+            "find reddit discussion",
+            "discussion about it",
+            "post about it",
+            "reddit thread",
+            "thread about it",
+        }
+    ):
+        return "reddit"
+    if any(token in normalized for token in {"search google", "search web", "look it up", "look this up on google"}):
+        return "google"
+    return ""
+
+
+def _split_prompt_clauses(prompt: str) -> list[str]:
+    text = _normalize_goal_text(prompt)
+    for phrase in FILLER_PHRASES:
+        text = re.sub(rf"\b{re.escape(_normalize_goal_text(phrase))}\b", " ", text)
+    parts = re.split(r"\b(?:and then|then|after that|afterwards|next)\b", text)
+    return [part.strip(" ,") for part in parts if part and part.strip(" ,")]
+
+
+def _wants_open_subject_search_result(prompt: str) -> bool:
+    normalized = _intent_text(prompt)
+    explicit_tokens = {
+        "open the first",
+        "open first",
+        "click the first",
+        "click first",
+        "open the video",
+        "open the vid",
+        "open the repo",
+        "open the result",
+        "click the video",
+        "click the vid",
+        "click the repo",
+        "click the result",
+        "watch it",
+        "watch the first",
+        "play it",
+        "open it",
+    }
+    if any(token in normalized for token in explicit_tokens):
+        return True
+    verb_hit = any(token in normalized for token in {"click", "open", "watch", "play", "pick", "select"})
+    ordinal_hit = any(token in normalized for token in {"first", "1st", "second", "2nd", "third", "3rd"})
+    return verb_hit and ordinal_hit
+
+
+def _wants_explain_opened_result(prompt: str) -> bool:
+    normalized = _intent_text(prompt)
+    return any(
+        token in normalized
+        for token in {
+            "tell me what it is",
+            "tell me about it",
+            "what is it",
+            "summarize it",
+            "summarise it",
+            "sum it up",
+            "explain it",
+            "what is this video",
+            "summarize this video",
+            "summarise this video",
+            "what is this post",
+            "summarize this post",
+            "summarise this post",
+        }
+    )
+
+
+def _clause_wants_new_tab(prompt: str) -> bool:
+    normalized = _intent_text(prompt)
+    return any(token in normalized for token in {"new tab", "another tab", "open a tab", "open tab"})
+
+
+def _rank_or_compare_actions_from_clause(clause: str, browser_state: BrowserSessionState) -> list[TerminalAction]:
+    if browser_state.page_kind != "search_results" or not _cached_cards(browser_state):
+        return []
+    normalized = _intent_text(clause)
+    compare_hit = "compare" in normalized
+    indexes = _comparison_indexes_from_prompt(clause)
+    if not compare_hit and "stack rank" in normalized and len(indexes) >= 2:
+        compare_hit = True
+    rank_hit = any(
+        token in normalized
+        for token in {
+            "rank ",
+            "rank these",
+            "which repo",
+            "which result",
+            "best repo",
+            "best result",
+            "find the best repo",
+            "aligns most",
+            "matches most",
+            "fits best",
+        }
+    )
+    if not rank_hit and "best" in normalized and any(token in normalized for token in {"fit ", "fits ", "matching", "match "}):
+        rank_hit = True
+    if compare_hit:
+        if len(indexes) < 2:
+            indexes = [1, 2]
+        indexes = indexes[:2]
+        goal = _goal_text_from_prompt(clause)
+        return [
+            TerminalAction(
+                kind="browser_compare_cards",
+                target=",".join(str(index) for index in indexes),
+                resolved_target=",".join(str(index) for index in indexes),
+                note=_encode_action_note({"goal": goal, "indexes": indexes}),
+            )
+        ]
+    if rank_hit:
+        goal = _goal_text_from_prompt(clause)
+        return [
+            TerminalAction(
+                kind="browser_rank_cards",
+                target="current_cards",
+                resolved_target="current_cards",
+                note=_encode_action_note({"goal": goal}),
+            )
+        ]
+    return []
+
+
+def _subject_search_actions_from_clause(clause: str) -> list[TerminalAction]:
+    engine = _subject_search_engine_from_prompt(clause)
+    if not engine:
+        return []
+    actions = [
+        TerminalAction(
+            kind="browser_search_subject",
+            target=engine,
+            resolved_target=engine,
+            note=_encode_action_note({"engine": engine}),
+        )
+    ]
+    if _wants_open_subject_search_result(clause):
+        result_index = _result_index_from_prompt(clause)
+        actions.append(
+            TerminalAction(
+                kind="open_search_result",
+                target=str(result_index),
+                resolved_target=str(result_index),
+            )
+        )
+        if _wants_explain_opened_result(clause):
+            actions.append(TerminalAction(kind="browser_read_page", target="current_page", resolved_target="current_page"))
+    return actions
+
+
+def _wants_retry_subject_result(clause: str) -> bool:
+    normalized = _intent_text(clause)
+    if not normalized:
+        return False
+    strong_signals = {
+        "if it seems weak",
+        "if the first one seems weak",
+        "if it is weak",
+        "if the first one is weak",
+        "if it looks weak",
+        "if the first one looks weak",
+        "if it seems off topic",
+        "if it is off topic",
+        "if it feels off topic",
+        "if that one seems weak",
+        "open a better one",
+        "open a stronger one",
+        "open a more relevant one",
+        "try a better one",
+        "try another one",
+        "pick a better one",
+    }
+    if any(signal in normalized for signal in strong_signals):
+        return True
+    weak_hit = any(token in normalized for token in {"weak", "off topic", "more relevant", "better one", "another one", "stronger one"})
+    retry_hit = any(token in normalized for token in {"if ", "instead", "retry", "try another", "pick another", "open another", "open a better", "try a better"})
+    return weak_hit and retry_hit
+
+
+def _retry_subject_actions_from_clause(clause: str) -> list[TerminalAction]:
+    if not _wants_retry_subject_result(clause):
+        return []
+    goal = _goal_text_from_prompt(clause)
+    note_payload: dict[str, Any] = {}
+    if goal:
+        note_payload["goal"] = goal
+    actions = [
+        TerminalAction(
+            kind="browser_retry_subject_result",
+            target="better_result",
+            resolved_target="better_result",
+            note=_encode_action_note(note_payload),
+        )
+    ]
+    if _wants_explain_opened_result(clause):
+        actions.append(TerminalAction(kind="browser_read_page", target="current_page", resolved_target="current_page"))
+    return actions
+
+
+def _wants_synthesize_evidence(clause: str) -> bool:
+    normalized = _intent_text(clause)
+    if not normalized:
+        return False
+    if any(
+        signal in normalized
+        for signal in {
+            "which source best",
+            "what source best",
+            "best source",
+            "best explains",
+            "best explanation",
+            "most useful source",
+            "pull it together",
+            "synthesize",
+            "sum it up across",
+            "across the sources",
+            "across youtube and reddit",
+        }
+    ):
+        return True
+    return (
+        "source" in normalized
+        and "best" in normalized
+        and any(token in normalized for token in {"explain", "explains", "explained"})
+    )
+
+
+def _synthesis_actions_from_clause(clause: str) -> list[TerminalAction]:
+    if not _wants_synthesize_evidence(clause):
+        return []
+    goal = _goal_text_from_prompt(clause) or clause
+    return [
+        TerminalAction(
+            kind="browser_synthesize_evidence",
+            target="current_evidence",
+            resolved_target="current_evidence",
+            note=_encode_action_note({"goal": goal}),
+        )
+    ]
+
+
+def _initial_sequenced_browser_actions(prompt: str) -> list[TerminalAction]:
+    clauses = _split_prompt_clauses(prompt)
+    if not clauses:
+        return []
+    actions: list[TerminalAction] = []
+    state = BrowserSessionState()
+    used_sequence = False
+    for clause in clauses:
+        clause_actions: list[TerminalAction] = []
+        clause_hit = _search_hits_from_text(clause)
+        if _clause_wants_new_tab(clause):
+            clause_actions.append(TerminalAction(kind="browser_new_tab", target="new_tab", resolved_target="new_tab"))
+            used_sequence = True
+        if clause_hit:
+            hit = clause_hit[0]
+            clause_actions.append(
+                TerminalAction(
+                    kind="open_url",
+                    target=hit["url"],
+                    resolved_target=hit["url"],
+                    note=_encode_action_note(
+                        {
+                            "search_engine": hit["engine"],
+                            "search_query": hit["query"],
+                            "page_kind": "search_results",
+                            "tab_mode": "new_tab" if _clause_wants_new_tab(clause) else "",
+                        }
+                    ),
+                )
+            )
+            state = _browser_state_for_url(
+                hit["url"],
+                search_engine=hit["engine"],
+                search_query=hit["query"],
+            )
+            used_sequence = True
+        if state.page_kind == "search_results" and _wants_open_subject_search_result(clause):
+            result_index = _result_index_from_prompt(clause)
+            clause_actions.append(
+                TerminalAction(
+                    kind="open_search_result",
+                    target=str(result_index),
+                    resolved_target=str(result_index),
+                    note=_encode_action_note(
+                        {
+                            "search_engine": state.search_engine,
+                            "search_query": state.search_query,
+                            "page_kind": state.page_kind,
+                        }
+                    ),
+                )
+            )
+            if state.search_engine == "youtube":
+                state = _browser_state_for_url("https://www.youtube.com/watch?v=placeholder")
+            elif state.search_engine == "github":
+                state = _browser_state_for_url("https://github.com/example/repo")
+            elif state.search_engine == "reddit":
+                state = _browser_state_for_url("https://www.reddit.com/r/example/comments/post")
+            else:
+                state = BrowserSessionState(current_url="about:blank", page_kind="web_page")
+            used_sequence = True
+            if _wants_explain_opened_result(clause):
+                clause_actions.append(TerminalAction(kind="browser_read_page", target="current_page", resolved_target="current_page"))
+        elif state.current_url and _wants_browser_read(clause):
+            clause_actions.append(TerminalAction(kind="browser_read_page", target="current_page", resolved_target="current_page"))
+            used_sequence = True
+        actions.extend(clause_actions)
+    return actions if used_sequence and len(actions) >= 2 else []
+
+
+def _sequenced_browser_actions(prompt: str, browser_state: BrowserSessionState) -> list[TerminalAction]:
+    clauses = _split_prompt_clauses(prompt)
+    if len(clauses) < 2:
+        return []
+    actions: list[TerminalAction] = []
+    has_subject = bool(_research_subject_from_browser_state(browser_state) or _subject_from_browser_state(browser_state) or browser_state.page_kind == "repo_page")
+    search_results_available = browser_state.page_kind == "search_results" and bool(_cached_cards(browser_state))
+    pending_search_result = False
+    opened_subject_result = False
+    evidence_available = bool(browser_state.evidence_items)
+    for index, clause in enumerate(clauses):
+        next_clause = clauses[index + 1] if index + 1 < len(clauses) else ""
+        clause_actions: list[TerminalAction] = []
+        if search_results_available:
+            clause_actions = _rank_or_compare_actions_from_clause(clause, browser_state)
+            if clause_actions:
+                actions.extend(clause_actions)
+                has_subject = True
+                search_results_available = False
+                pending_search_result = False
+                evidence_available = True
+                continue
+        clause_actions = _retry_subject_actions_from_clause(clause)
+        if clause_actions and opened_subject_result:
+            actions.extend(clause_actions)
+            pending_search_result = False
+            opened_subject_result = any(action.kind == "browser_retry_subject_result" for action in clause_actions) or opened_subject_result
+            if any(action.kind == "browser_read_page" for action in clause_actions):
+                evidence_available = True
+            continue
+        clause_actions = _subject_search_actions_from_clause(clause)
+        if clause_actions and has_subject:
+            if (
+                any(action.kind == "open_search_result" for action in clause_actions)
+                and not any(action.kind == "browser_read_page" for action in clause_actions)
+                and (_wants_synthesize_evidence(next_clause) or _wants_retry_subject_result(next_clause))
+            ):
+                clause_actions.append(TerminalAction(kind="browser_read_page", target="current_page", resolved_target="current_page"))
+            actions.extend(clause_actions)
+            has_subject = True
+            pending_search_result = any(action.kind == "browser_search_subject" for action in clause_actions)
+            if any(action.kind == "open_search_result" for action in clause_actions):
+                pending_search_result = False
+                opened_subject_result = True
+            if any(action.kind == "browser_read_page" for action in clause_actions):
+                evidence_available = True
+            continue
+        if pending_search_result and _wants_open_subject_search_result(clause):
+            result_index = _result_index_from_prompt(clause)
+            actions.append(
+                TerminalAction(
+                    kind="open_search_result",
+                    target=str(result_index),
+                    resolved_target=str(result_index),
+                )
+            )
+            if _wants_explain_opened_result(clause):
+                actions.append(TerminalAction(kind="browser_read_page", target="current_page", resolved_target="current_page"))
+                evidence_available = True
+            elif _wants_synthesize_evidence(next_clause) or _wants_retry_subject_result(next_clause):
+                actions.append(TerminalAction(kind="browser_read_page", target="current_page", resolved_target="current_page"))
+                evidence_available = True
+            pending_search_result = False
+            opened_subject_result = True
+            continue
+        clause_actions = _synthesis_actions_from_clause(clause)
+        if clause_actions and evidence_available:
+            actions.extend(clause_actions)
+    search_subject_steps = sum(1 for action in actions if action.kind == "browser_search_subject")
+    if any(action.kind == "browser_synthesize_evidence" for action in actions):
+        return actions if search_subject_steps >= 2 else []
+    return actions if search_subject_steps >= 2 else []
+
+
+def _comparison_indexes_from_prompt(prompt: str) -> list[int]:
+    normalized = _intent_text(prompt)
+    hits: list[int] = []
+    for token, value in (
+        ("first", 1),
+        ("1st", 1),
+        ("one", 1),
+        ("second", 2),
+        ("2nd", 2),
+        ("two", 2),
+        ("third", 3),
+        ("3rd", 3),
+        ("three", 3),
+    ):
+        if token in normalized and value not in hits:
+            hits.append(value)
+    for match in re.findall(r"\b(\d+)(?:st|nd|rd|th)?\b", normalized):
+        try:
+            value = max(int(match), 1)
+        except ValueError:
+            continue
+        if value not in hits:
+            hits.append(value)
+    return hits[:3]
+
+
 def _follow_up_browser_actions(prompt: str, browser_state: BrowserSessionState | None) -> list[TerminalAction]:
     if browser_state is None:
         return []
     normalized = _intent_text(prompt)
     actions: list[TerminalAction] = []
-    if browser_state.current_url and _wants_browser_read(prompt):
+    sequenced_actions = _sequenced_browser_actions(prompt, browser_state)
+    if sequenced_actions:
+        return sequenced_actions
+    if browser_state.evidence_items:
+        synthesis_actions = _synthesis_actions_from_clause(prompt)
+        if synthesis_actions:
+            return synthesis_actions
+    related_engine = _subject_search_engine_from_prompt(prompt)
+    open_related_result = _wants_open_subject_search_result(prompt)
+    explain_related_result = _wants_explain_opened_result(prompt)
+    if browser_state.current_url and any(token in normalized for token in {"take screenshot", "capture screenshot", "screenshot"}):
+        actions.append(TerminalAction(kind="browser_screenshot", target="current_page", resolved_target="current_page"))
+        return actions
+    if browser_state.current_url and any(token in normalized for token in {"wait "}):
+        seconds_match = re.search(r"\bwait(?: for)?\s+(\d+(?:\.\d+)?)", normalized)
+        seconds = seconds_match.group(1) if seconds_match else "1"
+        actions.append(TerminalAction(kind="browser_wait", target=seconds, resolved_target=seconds))
+        return actions
+    wants_new_tab = browser_state.current_url and _clause_wants_new_tab(prompt)
+    if wants_new_tab:
+        search_hits = _search_hits(prompt)
+        if search_hits:
+            hit = search_hits[0]
+            actions.append(TerminalAction(kind="browser_new_tab", target="new_tab", resolved_target="new_tab"))
+            actions.append(
+                TerminalAction(
+                    kind="open_url",
+                    target=hit["url"],
+                    resolved_target=hit["url"],
+                    note=_encode_action_note(
+                        {
+                            "search_engine": hit["engine"],
+                            "search_query": hit["query"],
+                            "page_kind": "search_results",
+                            "tab_mode": "new_tab",
+                        }
+                    ),
+                )
+            )
+            if _wants_open_subject_search_result(prompt):
+                result_index = _result_index_from_prompt(prompt)
+                actions.append(
+                    TerminalAction(
+                        kind="open_search_result",
+                        target=str(result_index),
+                        resolved_target=str(result_index),
+                    )
+                )
+                if _wants_explain_opened_result(prompt):
+                    actions.append(TerminalAction(kind="browser_read_page", target="current_page", resolved_target="current_page"))
+            return actions
+        actions.append(TerminalAction(kind="browser_new_tab", target="new_tab", resolved_target="new_tab"))
+        return actions
+    if browser_state.current_url and any(
+        token in normalized
+        for token in {"close tab", "close this tab", "close the tab", "close current tab"}
+    ):
+        actions.append(TerminalAction(kind="browser_close_tab", target="current_tab", resolved_target="current_tab"))
+        return actions
+    if browser_state.current_url and any(token in normalized for token in {"next tab", "previous tab", "prev tab", "switch tab", "switch to tab"}):
+        target = "next"
+        if any(token in normalized for token in {"previous tab", "prev tab"}):
+            target = "previous"
+        else:
+            match = re.search(r"\btab\s+(\d+)\b", normalized)
+            if match:
+                target = match.group(1)
+        actions.append(TerminalAction(kind="browser_switch_tab", target=target, resolved_target=target))
+        return actions
+    if browser_state.current_url and not related_engine and any(
+        token in normalized for token in {"extract page", "extract this page", "extract current page"}
+    ):
+        actions.append(TerminalAction(kind="browser_extract_page", target="current_page", resolved_target="current_page"))
+        return actions
+    if browser_state.current_url and not related_engine and _wants_browser_read(prompt):
         actions.append(TerminalAction(kind="browser_read_page", target="current_page", resolved_target="current_page"))
+        return actions
+    if browser_state.page_kind == "search_results" and _cached_cards(browser_state):
+        compare_hit = "compare" in normalized
+        rank_hit = any(
+            token in normalized
+            for token in {
+                "rank ",
+                "rank these",
+                "which repo",
+                "which result",
+                "best repo",
+                "best result",
+                "aligns most",
+                "matches most",
+                "fits best",
+            }
+        )
+        if related_engine and compare_hit:
+            indexes = _comparison_indexes_from_prompt(prompt)
+            if len(indexes) < 2:
+                indexes = [1, 2]
+            indexes = indexes[:2]
+            goal = _goal_text_from_prompt(_leading_clause_text(prompt))
+            actions.append(
+                TerminalAction(
+                    kind="browser_compare_cards",
+                    target=",".join(str(index) for index in indexes),
+                    resolved_target=",".join(str(index) for index in indexes),
+                    note=_encode_action_note({"goal": goal, "indexes": indexes}),
+                )
+            )
+            actions.append(
+                TerminalAction(
+                    kind="browser_search_subject",
+                    target=related_engine,
+                    resolved_target=related_engine,
+                    note=_encode_action_note({"engine": related_engine}),
+                )
+            )
+            if open_related_result:
+                result_index = _result_index_from_prompt(prompt)
+                actions.append(
+                    TerminalAction(
+                        kind="open_search_result",
+                        target=str(result_index),
+                        resolved_target=str(result_index),
+                    )
+                )
+                if explain_related_result:
+                    actions.append(TerminalAction(kind="browser_read_page", target="current_page", resolved_target="current_page"))
+            return actions
+        if related_engine and rank_hit:
+            goal = _goal_text_from_prompt(_leading_clause_text(prompt))
+            actions.append(
+                TerminalAction(
+                    kind="browser_rank_cards",
+                    target="current_cards",
+                    resolved_target="current_cards",
+                    note=_encode_action_note({"goal": goal}),
+                )
+            )
+            actions.append(
+                TerminalAction(
+                    kind="browser_search_subject",
+                    target=related_engine,
+                    resolved_target=related_engine,
+                    note=_encode_action_note({"engine": related_engine}),
+                )
+            )
+            if open_related_result:
+                result_index = _result_index_from_prompt(prompt)
+                actions.append(
+                    TerminalAction(
+                        kind="open_search_result",
+                        target=str(result_index),
+                        resolved_target=str(result_index),
+                    )
+                )
+                if explain_related_result:
+                    actions.append(TerminalAction(kind="browser_read_page", target="current_page", resolved_target="current_page"))
+            return actions
+        if compare_hit:
+            indexes = _comparison_indexes_from_prompt(prompt)
+            if len(indexes) < 2:
+                indexes = [1, 2]
+            indexes = indexes[:2]
+            goal = _goal_text_from_prompt(prompt)
+            actions.append(
+                TerminalAction(
+                    kind="browser_compare_cards",
+                    target=",".join(str(index) for index in indexes),
+                    resolved_target=",".join(str(index) for index in indexes),
+                    note=_encode_action_note({"goal": goal, "indexes": indexes}),
+                )
+            )
+            return actions
+        if rank_hit:
+            goal = _goal_text_from_prompt(prompt)
+            actions.append(
+                TerminalAction(
+                    kind="browser_rank_cards",
+                    target="current_cards",
+                    resolved_target="current_cards",
+                    note=_encode_action_note({"goal": goal}),
+                )
+            )
+            return actions
+    if related_engine and (_subject_from_browser_state(browser_state) or browser_state.page_kind == "repo_page"):
+        actions.append(
+            TerminalAction(
+                kind="browser_search_subject",
+                target=related_engine,
+                resolved_target=related_engine,
+                note=_encode_action_note({"engine": related_engine}),
+            )
+        )
+        if open_related_result:
+            result_index = _result_index_from_prompt(prompt)
+            actions.append(
+                TerminalAction(
+                    kind="open_search_result",
+                    target=str(result_index),
+                    resolved_target=str(result_index),
+                )
+            )
+            if explain_related_result:
+                actions.append(TerminalAction(kind="browser_read_page", target="current_page", resolved_target="current_page"))
+        return actions
+    if browser_state.current_url and any(
+        token in normalized
+        for token in {"extract cards", "extract results", "show results", "show top results", "list results", "top 5", "top five"}
+    ):
+        actions.append(TerminalAction(kind="browser_extract_cards", target="current_cards", resolved_target="current_cards"))
         return actions
     if any(token in normalized for token in {"go back", "back"}):
         actions.append(TerminalAction(kind="browser_back", target="back", resolved_target="back"))
+        return actions
+    if any(token in normalized for token in {"go forward", "forward"}):
+        actions.append(TerminalAction(kind="browser_forward", target="forward", resolved_target="forward"))
+        return actions
+    if browser_state.current_url and any(token in normalized for token in {"scroll down", "page down", "scroll up", "page up"}):
+        direction = "down" if any(token in normalized for token in {"scroll down", "page down"}) else "up"
+        actions.append(TerminalAction(kind="browser_scroll", target=direction, resolved_target=direction))
+        return actions
+    if browser_state.current_url and any(token in normalized for token in {"type ", "enter ", "fill "}):
+        match = re.search(r"\b(?:type|enter|fill)\s+(.+)$", normalized)
+        if match:
+            text = str(match.group(1) or "").strip().strip("\"'")
+            if text:
+                actions.append(TerminalAction(kind="browser_type_text", target=text, resolved_target=text))
+                return actions
+    if browser_state.current_url and any(token in normalized for token in {"submit", "press enter", "hit enter"}):
+        actions.append(TerminalAction(kind="browser_submit", target="submit", resolved_target="submit"))
         return actions
     if any(token in normalized for token in {"pause", "stop"}):
         actions.append(TerminalAction(kind="browser_media_pause", target="media", resolved_target="media"))
@@ -558,6 +2101,17 @@ def _follow_up_browser_actions(prompt: str, browser_state: BrowserSessionState |
                 ),
             )
         )
+        return actions
+    if browser_state.current_url:
+        explicit_index = re.search(r"\b(?:click|open|select)\s+(?:item|card|result)\s+(\d+)\b", normalized)
+        if explicit_index:
+            value = explicit_index.group(1)
+            actions.append(TerminalAction(kind="browser_click_index", target=value, resolved_target=value))
+            return actions
+    click_text = _text_target_from_prompt(prompt)
+    if browser_state.current_url and click_text and _cached_cards(browser_state):
+        actions.append(TerminalAction(kind="browser_click_text", target=click_text, resolved_target=click_text))
+        return actions
     return actions
 
 
@@ -572,6 +2126,9 @@ def _heuristic_plan(prompt: str, *, browser_state: BrowserSessionState | None = 
     follow_up_actions = _follow_up_browser_actions(prompt, browser_state)
     if follow_up_actions:
         return TerminalPlan(prompt=prompt, source="heuristic", actions=follow_up_actions)
+    initial_sequenced_actions = _initial_sequenced_browser_actions(prompt)
+    if initial_sequenced_actions:
+        return TerminalPlan(prompt=prompt, source="heuristic", actions=initial_sequenced_actions)
     app_alias_map = {key: tuple(spec.get("aliases") or ()) for key, spec in APP_SPECS.items()}
     path_alias_map = {key: (key,) for key in PATH_ALIASES}
     app_hits = _alias_hits(prompt, app_alias_map)
@@ -661,13 +2218,27 @@ def _llm_prompt(prompt: str, *, browser_state: BrowserSessionState | None = None
                 "Current browser search context: "
                 f"engine={browser_state.search_engine}; query={browser_state.search_query}"
             )
+        if browser_state.subject_title:
+            context_lines.append(
+                "Current browser subject: "
+                f"title={browser_state.subject_title}; url={browser_state.subject_url or '(none)'}"
+            )
+        if browser_state.research_subject_title:
+            context_lines.append(
+                "Current browser research subject: "
+                f"title={browser_state.research_subject_title}; url={browser_state.research_subject_url or '(none)'}"
+            )
         if browser_state.result_urls:
             context_lines.append(f"Cached browser results: {len(browser_state.result_urls)}")
         if context_lines:
             context_lines.append(
                 "If the user refers to the current browser page or asks to click a result/video/repo, "
-                "use open_search_result with a 1-based result index, browser_read_page for reading the current page, "
-                "or browser_back/browser_media_* when appropriate."
+                "use open_search_result or browser_click_index with a 1-based result index, browser_click_text for a known visible label, "
+                "browser_read_page/browser_extract_page for reading the current page, browser_extract_cards for current result cards, "
+                "browser_rank_cards for ranking current cached cards against a goal, browser_compare_cards for comparing cached cards against a goal, browser_search_subject for searching another site about the active subject, browser_retry_subject_result for reopening a stronger cached result, "
+                "browser_synthesize_evidence for choosing the best current source from accumulated evidence, "
+                "browser_new_tab/browser_close_tab/browser_switch_tab for tab control, browser_back/browser_forward/browser_scroll/browser_type_text/browser_submit/browser_wait/browser_screenshot for browser control, "
+                "or browser_media_* when appropriate."
             )
     context_block = ""
     if context_lines:
@@ -677,7 +2248,7 @@ def _llm_prompt(prompt: str, *, browser_state: BrowserSessionState | None = None
             role="system",
             content=(
                 "You translate natural terminal requests into a tiny safe JSON action plan.\n"
-                "Allowed action kinds: launch_app, open_url, open_search_result, browser_read_page, open_path, browser_back, browser_media_pause, browser_media_play, list_directory, system_info, unsupported.\n"
+                "Allowed action kinds: launch_app, open_url, browser_new_tab, browser_close_tab, browser_switch_tab, open_search_result, browser_click_index, browser_click_text, browser_read_page, browser_extract_page, browser_extract_cards, browser_rank_cards, browser_compare_cards, browser_search_subject, browser_retry_subject_result, browser_synthesize_evidence, open_path, browser_back, browser_forward, browser_scroll, browser_type_text, browser_submit, browser_wait, browser_screenshot, browser_media_pause, browser_media_play, list_directory, system_info, unsupported.\n"
                 f"Allowed app ids: {app_ids}.\n"
                 f"Allowed path ids: {path_ids}.\n"
                 f"Allowed system_info targets: {topics}.\n"
@@ -688,6 +2259,123 @@ def _llm_prompt(prompt: str, *, browser_state: BrowserSessionState | None = None
             ),
         ),
         ChatMessage(role="user", content=prompt),
+    ]
+
+
+def _language_llm_prompt(prompt: str, *, browser_state: BrowserSessionState | None = None) -> list[ChatMessage]:
+    app_ids = ", ".join(sorted(APP_SPECS))
+    path_ids = ", ".join(sorted(PATH_ALIASES))
+    topics = ", ".join(sorted(SUPPORTED_SYSTEM_INFO_TOPICS))
+    schema = {
+        "actions": [{"kind": "open_search_result", "target": "1"}],
+        "needs_confirmation": False,
+        "clarification": "",
+    }
+    context_lines: list[str] = []
+    if browser_state is not None:
+        if browser_state.current_url:
+            context_lines.append(f"Current browser URL: {browser_state.current_url}")
+        if browser_state.page_kind:
+            context_lines.append(f"Current browser page kind: {browser_state.page_kind}")
+        if browser_state.search_engine and browser_state.search_query:
+            context_lines.append(
+                "Current browser search context: "
+                f"engine={browser_state.search_engine}; query={browser_state.search_query}"
+            )
+        if browser_state.subject_title:
+            context_lines.append(
+                "Current browser subject: "
+                f"title={browser_state.subject_title}; url={browser_state.subject_url or '(none)'}"
+            )
+        if browser_state.research_subject_title:
+            context_lines.append(
+                "Current browser research subject: "
+                f"title={browser_state.research_subject_title}; url={browser_state.research_subject_url or '(none)'}"
+            )
+        if browser_state.result_urls:
+            context_lines.append(f"Cached browser results: {len(browser_state.result_urls)}")
+        if browser_state.evidence_items:
+            context_lines.append(f"Cached evidence items: {len(browser_state.evidence_items)}")
+    context_block = ""
+    if context_lines:
+        context_block = "\nBrowser session context:\n- " + "\n- ".join(context_lines) + "\n"
+    compiler_surface = _compiler_surface_text(prompt)
+    examples = [
+        {
+            "user": "yo open a tab and toss nine vicious on youtube",
+            "assistant": {"actions": [{"kind": "browser_new_tab", "target": "new_tab"}, {"kind": "open_url", "target": "https://www.youtube.com/results?search_query=nine+vicious"}], "needs_confirmation": False, "clarification": ""},
+        },
+        {
+            "user": "click he first vid you see",
+            "assistant": {"actions": [{"kind": "open_search_result", "target": "1"}], "needs_confirmation": False, "clarification": ""},
+        },
+        {
+            "user": "peep a youtube vid on this repo and open the first one",
+            "assistant": {"actions": [{"kind": "browser_search_subject", "target": "youtube"}, {"kind": "open_search_result", "target": "1"}], "needs_confirmation": False, "clarification": ""},
+        },
+        {
+            "user": "if that first one is bunk grab a better one and sum it up",
+            "assistant": {"actions": [{"kind": "browser_retry_subject_result", "target": "better_result"}, {"kind": "browser_read_page", "target": "current_page"}], "needs_confirmation": False, "clarification": ""},
+        },
+        {
+            "user": "find whatever repo best fits beginner weak laptop local llm",
+            "assistant": {"actions": [{"kind": "browser_rank_cards", "target": "beginner weak laptop local llm"}], "needs_confirmation": False, "clarification": ""},
+        },
+        {
+            "user": "compare the first two repos for cpp cpu inference",
+            "assistant": {"actions": [{"kind": "browser_compare_cards", "target": "1,2"}], "needs_confirmation": False, "clarification": ""},
+        },
+        {
+            "user": "find a youtube video about the winner and open the first one",
+            "assistant": {"actions": [{"kind": "browser_search_subject", "target": "youtube"}, {"kind": "open_search_result", "target": "1"}], "needs_confirmation": False, "clarification": ""},
+        },
+        {
+            "user": "tell me which source best explains what this repo is for",
+            "assistant": {"actions": [{"kind": "browser_synthesize_evidence", "target": "what this repo is for"}], "needs_confirmation": False, "clarification": ""},
+        },
+    ]
+    example_lines = []
+    for example in examples:
+        example_lines.append(f"User: {example['user']}")
+        example_lines.append(f"JSON: {json.dumps(example['assistant'], separators=(',', ':'))}")
+    return [
+        ChatMessage(
+            role="system",
+            content=(
+                "You are Memla Language Ontology V2.\n"
+                "Your job is only to compile messy human language into a tiny legal JSON action plan inside Memla's existing bounded world.\n"
+                "Do not solve the task yourself. Do not invent new capabilities. Do not emit shell commands.\n"
+                "Prefer canonical actions over free-form behavior.\n"
+                "If the wording is messy but the intent is recoverable, compile it.\n"
+                "If the request is still ambiguous or unsupported, return a single unsupported action with a short clarification.\n"
+                "Allowed action kinds: launch_app, open_url, browser_new_tab, browser_close_tab, browser_switch_tab, open_search_result, browser_click_index, browser_click_text, browser_read_page, browser_extract_page, browser_extract_cards, browser_rank_cards, browser_compare_cards, browser_search_subject, browser_retry_subject_result, browser_synthesize_evidence, open_path, browser_back, browser_forward, browser_scroll, browser_type_text, browser_submit, browser_wait, browser_screenshot, browser_media_pause, browser_media_play, list_directory, system_info, unsupported.\n"
+                f"Allowed app ids: {app_ids}.\n"
+                f"Allowed path ids: {path_ids}.\n"
+                f"Allowed system_info targets: {topics}.\n"
+                "Canonical conventions:\n"
+                "- use open_search_result with a 1-based index for first/second/third result language\n"
+                "- use browser_search_subject for 'video/post/thread about this repo/winner/it'\n"
+                "- use browser_rank_cards or browser_compare_cards only when the user is judging current search cards\n"
+                "- use browser_retry_subject_result when the user wants a better follow-on result because the first one is weak/off-topic\n"
+                "- use browser_synthesize_evidence when the user asks which source best explains something across already-read sources\n"
+                "- use open_url with a full URL only for direct page opens or direct site searches\n"
+                "- if a normalized translation surface is provided, use it as the main intent signal and only use the raw wording for nuance\n"
+                f"{context_block}"
+                "Examples:\n"
+                + "\n".join(example_lines)
+                + "\nReturn JSON only in this shape: "
+                + json.dumps(schema)
+            ),
+        ),
+        ChatMessage(
+            role="user",
+            content=(
+                "Raw request:\n"
+                f"{prompt}\n\n"
+                "Normalized translation surface:\n"
+                f"{compiler_surface}"
+            ),
+        ),
     ]
 
 
@@ -713,6 +2401,527 @@ def _plan_from_model_response(*, prompt: str, response: str, source: str) -> Ter
     )
 
 
+def _validate_language_actions(
+    actions: list[TerminalAction],
+    *,
+    browser_state: BrowserSessionState | None = None,
+) -> tuple[bool, list[str]]:
+    state = _browser_state_copy(browser_state or BrowserSessionState())
+    has_subject = bool(_research_subject_from_browser_state(state) or _subject_from_browser_state(state) or state.page_kind == "repo_page")
+    evidence_available = bool(state.evidence_items)
+    for action in actions:
+        if action.kind == "unsupported":
+            return True, []
+        if action.kind in {"browser_rank_cards", "browser_compare_cards"}:
+            if state.page_kind != "search_results" or not _cached_cards(state):
+                return False, ["browser_state_missing_search_results"]
+            has_subject = True
+            evidence_available = True
+            continue
+        if action.kind == "browser_search_subject":
+            if not has_subject:
+                return False, ["browser_subject_missing"]
+            note = _decode_action_note(action.note)
+            engine = str(note.get("engine") or action.resolved_target or action.target or "").strip()
+            query = _research_subject_query_from_browser_state(state) or _subject_query_from_browser_state(state) or "subject"
+            state = _browser_state_for_url(_search_url(engine, query), search_engine=engine, search_query=query)
+            continue
+        if action.kind == "open_url":
+            note = _decode_action_note(action.note)
+            state = _browser_state_for_url(
+                action.resolved_target or action.target,
+                search_engine=str(note.get("search_engine") or "").strip(),
+                search_query=str(note.get("search_query") or "").strip(),
+                research_subject_title=state.research_subject_title,
+                research_subject_url=state.research_subject_url,
+                research_subject_summary=state.research_subject_summary,
+            )
+            continue
+        if action.kind == "open_search_result":
+            if state.page_kind != "search_results":
+                return False, ["browser_state_missing_search_results"]
+            engine = state.search_engine
+            if engine == "youtube":
+                state = _browser_state_for_url("https://www.youtube.com/watch?v=placeholder")
+            elif engine == "github":
+                state = _browser_state_for_url("https://github.com/example/repo")
+            elif engine == "reddit":
+                state = _browser_state_for_url("https://www.reddit.com/r/example/comments/post")
+            else:
+                state = _browser_state_for_url("https://example.com")
+            evidence_available = evidence_available or state.page_kind in {"repo_page", "video_page", "post_page", "web_page"}
+            continue
+        if action.kind == "browser_retry_subject_result":
+            if not has_subject:
+                return False, ["browser_subject_missing"]
+            evidence_available = True
+            continue
+        if action.kind in {"browser_read_page", "browser_extract_page", "browser_screenshot"}:
+            if not state.current_url and state.page_kind not in {"repo_page", "video_page", "post_page", "web_page"}:
+                return False, ["browser_state_missing_page"]
+            evidence_available = True
+            continue
+        if action.kind == "browser_extract_cards":
+            if state.page_kind != "search_results":
+                return False, ["browser_state_missing_search_results"]
+            continue
+        if action.kind == "browser_synthesize_evidence":
+            if not evidence_available:
+                return False, ["browser_evidence_missing"]
+            continue
+        if action.kind in {"browser_new_tab", "browser_close_tab", "browser_switch_tab", "browser_back", "browser_forward", "browser_scroll", "browser_type_text", "browser_submit", "browser_wait", "browser_media_pause", "browser_media_play", "browser_click_index", "browser_click_text", "launch_app", "open_path", "list_directory", "system_info"}:
+            continue
+    return True, []
+
+
+def _surface_language_actions(prompt: str, *, browser_state: BrowserSessionState | None = None) -> list[TerminalAction]:
+    surface = _compiler_surface_text(prompt)
+    state = browser_state or BrowserSessionState()
+    if browser_state is not None:
+        sequenced = _sequenced_browser_actions(surface, state)
+        if sequenced:
+            return sequenced
+        follow_up = _follow_up_browser_actions(surface, state)
+        if follow_up:
+            return follow_up
+    initial = _initial_sequenced_browser_actions(surface)
+    if initial:
+        return initial
+    heuristic = _heuristic_plan(surface, browser_state=browser_state)
+    if heuristic is not None:
+        return list(heuristic.actions)
+    return []
+
+
+def _merge_language_actions(
+    current_actions: list[TerminalAction],
+    *,
+    prompt: str,
+    browser_state: BrowserSessionState | None = None,
+) -> list[TerminalAction]:
+    surface_actions = _surface_language_actions(prompt, browser_state=browser_state)
+    if not surface_actions:
+        return list(current_actions)
+    if not current_actions:
+        return surface_actions
+    current_signatures = {_action_signature(action) for action in current_actions}
+    surface_signatures = [_action_signature(action) for action in surface_actions]
+    if current_signatures.issubset(set(surface_signatures)) and len(surface_actions) > len(current_actions):
+        return surface_actions
+    return list(current_actions)
+
+
+def _language_prompt_tokens(prompt: str) -> list[str]:
+    normalized = _intent_text(prompt)
+    return [
+        token
+        for token in normalized.split()
+        if token and token not in LANGUAGE_MEMORY_STOPWORDS and len(token) > 1
+    ]
+
+
+def _language_context_profile(browser_state: BrowserSessionState | None) -> dict[str, Any]:
+    state = browser_state or BrowserSessionState()
+    return {
+        "page_kind": state.page_kind,
+        "search_engine": state.search_engine,
+        "has_search_results": bool(state.page_kind == "search_results" and _cached_cards(state)),
+        "has_subject": bool(_research_subject_from_browser_state(state) or _subject_from_browser_state(state) or state.page_kind == "repo_page"),
+        "has_evidence": bool(state.evidence_items),
+    }
+
+
+def _restore_terminal_actions(items: list[dict[str, Any]] | None) -> list[TerminalAction]:
+    actions: list[TerminalAction] = []
+    for item in list(items or []):
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "").strip()
+        target = str(item.get("target") or "").strip()
+        if not kind or not target:
+            continue
+        actions.append(
+            TerminalAction(
+                kind=kind,
+                target=target,
+                resolved_target=str(item.get("resolved_target") or "").strip(),
+                safe=bool(item.get("safe", True)),
+                note=str(item.get("note") or "").strip(),
+            )
+        )
+    return actions
+
+
+def _load_language_memory(path: str | Path | None = None, *, limit: int = 256) -> list[dict[str, Any]]:
+    memory_path = Path(path).expanduser().resolve() if path else terminal_language_memory_path()
+    if not memory_path.exists():
+        return []
+    try:
+        lines = memory_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in reversed(lines):
+        clean = str(line or "").strip()
+        if not clean:
+            continue
+        try:
+            payload = json.loads(clean)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            rows.append(payload)
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _language_context_compatible(stored: dict[str, Any], current: dict[str, Any]) -> bool:
+    stored_page = str(stored.get("page_kind") or "").strip()
+    current_page = str(current.get("page_kind") or "").strip()
+    if stored_page and current_page and stored_page != current_page:
+        return False
+    stored_engine = str(stored.get("search_engine") or "").strip()
+    current_engine = str(current.get("search_engine") or "").strip()
+    if stored_engine and current_engine and stored_engine != current_engine:
+        return False
+    if bool(stored.get("has_search_results")) and not bool(current.get("has_search_results")):
+        return False
+    if bool(stored.get("has_subject")) and not bool(current.get("has_subject")):
+        return False
+    if bool(stored.get("has_evidence")) and not bool(current.get("has_evidence")):
+        return False
+    return True
+
+
+def _language_memory_match_score(
+    entry: dict[str, Any],
+    *,
+    prompt: str,
+    browser_state: BrowserSessionState | None = None,
+) -> float:
+    current_profile = _language_context_profile(browser_state)
+    stored_profile = dict(entry.get("context_profile") or {})
+    if not _language_context_compatible(stored_profile, current_profile):
+        return 0.0
+    current_norm = _intent_text(prompt)
+    stored_norm = str(entry.get("normalized_prompt") or "").strip()
+    seq_score = SequenceMatcher(None, stored_norm, current_norm).ratio() if stored_norm and current_norm else 0.0
+    current_tokens = set(_language_prompt_tokens(prompt))
+    stored_tokens = {str(token).strip() for token in list(entry.get("tokens") or []) if str(token).strip()}
+    union = current_tokens | stored_tokens
+    token_score = (len(current_tokens & stored_tokens) / len(union)) if union else 0.0
+    score = max(seq_score, token_score)
+    if stored_profile.get("page_kind") and stored_profile.get("page_kind") == current_profile.get("page_kind"):
+        score += 0.05
+    if stored_profile.get("search_engine") and stored_profile.get("search_engine") == current_profile.get("search_engine"):
+        score += 0.05
+    return round(min(score, 1.0), 4)
+
+
+def _language_memory_plan(
+    prompt: str,
+    *,
+    browser_state: BrowserSessionState | None = None,
+    path: str | Path | None = None,
+) -> TerminalPlan | None:
+    best_score = 0.0
+    best_entry: dict[str, Any] | None = None
+    for entry in _load_language_memory(path):
+        score = _language_memory_match_score(entry, prompt=prompt, browser_state=browser_state)
+        if score > best_score:
+            best_score = score
+            best_entry = entry
+    if best_entry is None or best_score < 0.78:
+        return None
+    actions = _restore_terminal_actions(best_entry.get("actions"))
+    if not actions:
+        return None
+    valid, residuals = _validate_language_actions(actions, browser_state=browser_state)
+    if not valid:
+        return None
+    return TerminalPlan(
+        prompt=prompt,
+        source="language_memory",
+        actions=actions,
+        clarification=f"Reused a prior validated language compilation (similarity {best_score}).",
+        residual_constraints=residuals,
+    )
+
+
+def remember_language_compile(
+    *,
+    prompt: str,
+    browser_state: BrowserSessionState | None,
+    plan: TerminalPlan,
+    path: str | Path | None = None,
+) -> Path | None:
+    if plan.source not in {"language_model", "language_memory"} or not plan.actions:
+        return None
+    memory_path = Path(path).expanduser().resolve() if path else terminal_language_memory_path()
+    memory_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "generated_ts": int(time.time()),
+        "prompt": prompt,
+        "memory_source": plan.source,
+        "normalized_prompt": _intent_text(prompt),
+        "tokens": _language_prompt_tokens(prompt),
+        "context_profile": _language_context_profile(browser_state),
+        "action_signatures": [_action_signature(action) for action in plan.actions],
+        "actions": [asdict(action) for action in plan.actions],
+    }
+    with memory_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
+    return memory_path
+
+
+def _load_language_rules(path: str | Path | None = None) -> list[dict[str, Any]]:
+    rule_path = Path(path).expanduser().resolve() if path else terminal_language_rule_path()
+    if not rule_path.exists():
+        return []
+    try:
+        payload = json.loads(rule_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(payload, list):
+        return []
+    return [dict(item) for item in payload if isinstance(item, dict)]
+
+
+def _save_language_rules(entries: list[dict[str, Any]], path: str | Path | None = None) -> Path:
+    rule_path = Path(path).expanduser().resolve() if path else terminal_language_rule_path()
+    rule_path.parent.mkdir(parents=True, exist_ok=True)
+    clean_entries = [dict(entry) for entry in entries if isinstance(entry, dict)]
+    rule_path.write_text(json.dumps(clean_entries, ensure_ascii=True, indent=2), encoding="utf-8")
+    return rule_path
+
+
+def _canonical_clause_from_action_group(group: list[TerminalAction]) -> str:
+    if not group:
+        return ""
+    first = group[0]
+    if first.kind == "browser_rank_cards":
+        note = _decode_action_note(first.note)
+        goal = str(note.get("goal") or "").strip()
+        return f"find whatever repo fits best {goal}".strip()
+    if first.kind == "browser_compare_cards":
+        note = _decode_action_note(first.note)
+        goal = str(note.get("goal") or "").strip()
+        indexes = [int(item) for item in list(note.get("indexes") or []) if str(item).isdigit()]
+        if indexes:
+            label = " and ".join(
+                "first" if idx == 1 else "second" if idx == 2 else "third" if idx == 3 else str(idx)
+                for idx in indexes[:2]
+            )
+        else:
+            label = "first and second"
+        return f"compare the {label} repos for {goal}".strip()
+    if first.kind == "browser_search_subject":
+        note = _decode_action_note(first.note)
+        engine = str(note.get("engine") or first.resolved_target or first.target or "").strip() or "youtube"
+        subject_ref = "the winner" if any(token in engine for token in ()) else "this repo"
+        clause = f"find a {engine} result about {subject_ref}"
+        if engine == "youtube":
+            clause = "find a youtube video about the winner or this repo"
+        elif engine == "reddit":
+            clause = "find a reddit thread about the winner or this repo"
+        if any(action.kind == "open_search_result" for action in group):
+            clause += " and open the first one"
+        if any(action.kind == "browser_read_page" for action in group):
+            clause += " and tell me what it is"
+        return clause.strip()
+    if first.kind == "browser_retry_subject_result":
+        clause = "if the first one is weak open a better one"
+        if any(action.kind == "browser_read_page" for action in group):
+            clause += " and summarize it"
+        return clause
+    if first.kind == "browser_synthesize_evidence":
+        note = _decode_action_note(first.note)
+        goal = str(note.get("goal") or "").strip()
+        return f"tell me which source best explains {goal}".strip()
+    return ""
+
+
+def _canonical_clauses_from_actions(actions: list[TerminalAction]) -> list[str]:
+    clauses: list[str] = []
+    index = 0
+    while index < len(actions):
+        action = actions[index]
+        if action.kind in {"browser_rank_cards", "browser_compare_cards", "browser_synthesize_evidence"}:
+            clause = _canonical_clause_from_action_group([action])
+            if clause:
+                clauses.append(clause)
+            index += 1
+            continue
+        if action.kind == "browser_search_subject":
+            group = [action]
+            index += 1
+            if index < len(actions) and actions[index].kind == "open_search_result":
+                group.append(actions[index])
+                index += 1
+            if index < len(actions) and actions[index].kind == "browser_read_page":
+                group.append(actions[index])
+                index += 1
+            clause = _canonical_clause_from_action_group(group)
+            if clause:
+                clauses.append(clause)
+            continue
+        if action.kind == "browser_retry_subject_result":
+            group = [action]
+            index += 1
+            if index < len(actions) and actions[index].kind == "browser_read_page":
+                group.append(actions[index])
+                index += 1
+            clause = _canonical_clause_from_action_group(group)
+            if clause:
+                clauses.append(clause)
+            continue
+        index += 1
+    return clauses
+
+
+def _rule_context_compatible(stored: dict[str, Any], current: dict[str, Any]) -> bool:
+    stored_page = str(stored.get("page_kind") or "").strip()
+    current_page = str(current.get("page_kind") or "").strip()
+    if stored_page and current_page and stored_page != current_page:
+        return False
+    stored_engine = str(stored.get("search_engine") or "").strip()
+    current_engine = str(current.get("search_engine") or "").strip()
+    if stored_engine and current_engine and stored_engine != current_engine:
+        return False
+    return True
+
+
+def _promote_language_rules(
+    *,
+    prompt: str,
+    browser_state: BrowserSessionState | None,
+    plan: TerminalPlan,
+    path: str | Path | None = None,
+    threshold: int = 2,
+) -> Path | None:
+    if plan.source != "language_memory" or not plan.actions:
+        return None
+    raw_clauses = _split_prompt_clauses(prompt)
+    canonical_clauses = _canonical_clauses_from_actions(plan.actions)
+    if not raw_clauses or len(raw_clauses) != len(canonical_clauses):
+        return None
+    entries = _load_language_rules(path)
+    profile = _language_context_profile(browser_state)
+    changed = False
+    for raw_clause, canonical_clause in zip(raw_clauses, canonical_clauses):
+        normalized_raw = _intent_text(raw_clause)
+        normalized_canonical = _intent_text(canonical_clause)
+        if not normalized_raw or not normalized_canonical:
+            continue
+        existing: dict[str, Any] | None = None
+        for entry in entries:
+            if (
+                str(entry.get("normalized_raw_clause") or "").strip() == normalized_raw
+                and str(entry.get("normalized_canonical_clause") or "").strip() == normalized_canonical
+                and _rule_context_compatible(dict(entry.get("context_profile") or {}), profile)
+            ):
+                existing = entry
+                break
+        if existing is None:
+            existing = {
+                "raw_clause": raw_clause,
+                "normalized_raw_clause": normalized_raw,
+                "canonical_clause": canonical_clause,
+                "normalized_canonical_clause": normalized_canonical,
+                "context_profile": profile,
+                "hit_count": 0,
+                "active": False,
+                "last_promoted_ts": 0,
+            }
+            entries.append(existing)
+        existing["hit_count"] = int(existing.get("hit_count") or 0) + 1
+        if int(existing["hit_count"]) >= max(int(threshold), 1):
+            existing["active"] = True
+            existing["last_promoted_ts"] = int(time.time())
+        changed = True
+    if not changed:
+        return None
+    return _save_language_rules(entries, path)
+
+
+def _rule_match_score(
+    entry: dict[str, Any],
+    *,
+    clause: str,
+    browser_state: BrowserSessionState | None = None,
+) -> float:
+    profile = _language_context_profile(browser_state)
+    if not _rule_context_compatible(dict(entry.get("context_profile") or {}), profile):
+        return 0.0
+    normalized = _intent_text(clause)
+    stored = str(entry.get("normalized_raw_clause") or "").strip()
+    if not normalized or not stored:
+        return 0.0
+    seq_score = SequenceMatcher(None, stored, normalized).ratio()
+    current_tokens = {token for token in _language_prompt_tokens(clause)}
+    stored_tokens = {str(token).strip() for token in stored.split() if str(token).strip()}
+    union = current_tokens | stored_tokens
+    token_score = (len(current_tokens & stored_tokens) / len(union)) if union else 0.0
+    return round(max(seq_score, token_score), 4)
+
+
+def _rewrite_with_language_rules(
+    prompt: str,
+    *,
+    browser_state: BrowserSessionState | None = None,
+    path: str | Path | None = None,
+) -> str:
+    entries = [entry for entry in _load_language_rules(path) if bool(entry.get("active"))]
+    if not entries:
+        return ""
+    clauses = _split_prompt_clauses(prompt)
+    if not clauses:
+        return ""
+    rewritten: list[str] = []
+    changed = False
+    for clause in clauses:
+        best_score = 0.0
+        best_entry: dict[str, Any] | None = None
+        for entry in entries:
+            score = _rule_match_score(entry, clause=clause, browser_state=browser_state)
+            if score > best_score:
+                best_score = score
+                best_entry = entry
+        if best_entry is not None and best_score >= 0.84:
+            rewritten.append(str(best_entry.get("canonical_clause") or clause).strip())
+            changed = True
+        else:
+            rewritten.append(clause.strip())
+    if not changed:
+        return ""
+    return " then ".join(part for part in rewritten if part)
+
+
+def _language_rule_plan(
+    prompt: str,
+    *,
+    browser_state: BrowserSessionState | None = None,
+    path: str | Path | None = None,
+) -> TerminalPlan | None:
+    rewritten = _rewrite_with_language_rules(prompt, browser_state=browser_state, path=path)
+    if not rewritten:
+        return None
+    actions = _surface_language_actions(rewritten, browser_state=browser_state)
+    if not actions:
+        return None
+    valid, residuals = _validate_language_actions(actions, browser_state=browser_state)
+    if not valid:
+        return None
+    return TerminalPlan(
+        prompt=prompt,
+        source="language_rule",
+        actions=actions,
+        clarification="Reused promoted language rewrite rules before language memory/model fallback.",
+        residual_constraints=residuals,
+    )
+
+
 def _normalize_model_actions(payload: dict[str, Any]) -> list[TerminalAction]:
     actions: list[TerminalAction] = []
     for raw in list(payload.get("actions") or []):
@@ -722,6 +2931,10 @@ def _normalize_model_actions(payload: dict[str, Any]) -> list[TerminalAction]:
         target = str(raw.get("target") or "").strip()
         if kind not in SUPPORTED_ACTION_KINDS or not target:
             continue
+        url_target = _normalize_url(target)
+        if kind == "open_path" and url_target:
+            actions.append(TerminalAction(kind="open_url", target=target, resolved_target=url_target))
+            continue
         if kind == "launch_app":
             app_key = _resolve_app_key(target)
             if app_key:
@@ -730,9 +2943,56 @@ def _normalize_model_actions(payload: dict[str, Any]) -> list[TerminalAction]:
         if kind == "browser_read_page":
             actions.append(TerminalAction(kind=kind, target=target, resolved_target=target or "current_page"))
             continue
+        if kind in {"browser_extract_page", "browser_extract_cards", "browser_screenshot"}:
+            actions.append(TerminalAction(kind=kind, target=target, resolved_target=target or "current_page"))
+            continue
+        if kind == "browser_rank_cards":
+            note = _encode_action_note({"goal": target})
+            actions.append(TerminalAction(kind=kind, target="current_cards", resolved_target="current_cards", note=note))
+            continue
+        if kind == "browser_compare_cards":
+            compare_target = "1,2"
+            goal = target
+            indexes = _comparison_indexes_from_prompt(target)
+            if len(indexes) >= 2:
+                compare_target = ",".join(str(index) for index in indexes[:2])
+            note = _encode_action_note({"goal": goal, "indexes": [int(part) for part in compare_target.split(",") if part.isdigit()]})
+            actions.append(TerminalAction(kind=kind, target=compare_target, resolved_target=compare_target, note=note))
+            continue
+        if kind == "browser_search_subject":
+            engine = _normalize_label(target)
+            if engine in {"youtube", "reddit", "google", "web"}:
+                resolved_engine = "google" if engine == "web" else engine
+                note = _encode_action_note({"engine": resolved_engine})
+                actions.append(TerminalAction(kind=kind, target=target, resolved_target=resolved_engine, note=note))
+            continue
+        if kind == "browser_retry_subject_result":
+            note = _encode_action_note({"goal": target} if target else {})
+            actions.append(TerminalAction(kind=kind, target="better_result", resolved_target="better_result", note=note))
+            continue
+        if kind == "browser_synthesize_evidence":
+            note = _encode_action_note({"goal": target} if target else {})
+            actions.append(TerminalAction(kind=kind, target="current_evidence", resolved_target="current_evidence", note=note))
+            continue
+        if kind == "browser_new_tab":
+            actions.append(TerminalAction(kind=kind, target=target, resolved_target=target or "new_tab"))
+            continue
+        if kind == "browser_close_tab":
+            actions.append(TerminalAction(kind=kind, target=target, resolved_target=target or "current_tab"))
+            continue
+        if kind == "browser_switch_tab":
+            actions.append(TerminalAction(kind=kind, target=target, resolved_target=target or "next"))
+            continue
         if kind == "open_search_result":
             if target.isdigit():
                 actions.append(TerminalAction(kind=kind, target=target, resolved_target=target))
+            continue
+        if kind == "browser_click_index":
+            if target.isdigit():
+                actions.append(TerminalAction(kind=kind, target=target, resolved_target=target))
+            continue
+        if kind == "browser_click_text":
+            actions.append(TerminalAction(kind=kind, target=target, resolved_target=target))
             continue
         if kind in {"open_path", "list_directory"}:
             path_value = _resolve_path_target(target)
@@ -749,7 +3009,10 @@ def _normalize_model_actions(payload: dict[str, Any]) -> list[TerminalAction]:
             if topic in SUPPORTED_SYSTEM_INFO_TOPICS:
                 actions.append(TerminalAction(kind=kind, target=target, resolved_target=topic))
             continue
-        if kind in {"browser_back", "browser_media_pause", "browser_media_play"}:
+        if kind in {"browser_back", "browser_forward", "browser_media_pause", "browser_media_play", "browser_submit"}:
+            actions.append(TerminalAction(kind=kind, target=target, resolved_target=target))
+            continue
+        if kind in {"browser_scroll", "browser_type_text", "browser_wait"}:
             actions.append(TerminalAction(kind=kind, target=target, resolved_target=target))
             continue
         if kind == "unsupported":
@@ -813,7 +3076,23 @@ def _action_signature(action: TerminalAction) -> str:
         return f"{kind}:{app_key or _normalize_label(action.resolved_target or action.target)}"
     if kind == "browser_read_page":
         return f"{kind}:{_normalize_label(action.resolved_target or action.target or 'current_page')}"
+    if kind in {"browser_extract_page", "browser_extract_cards", "browser_screenshot"}:
+        return f"{kind}:{_normalize_label(action.resolved_target or action.target or 'current_page')}"
+    if kind == "browser_rank_cards":
+        return f"{kind}:{_normalize_label(action.resolved_target or action.target or 'current_cards')}"
+    if kind == "browser_compare_cards":
+        return f"{kind}:{_normalize_label(action.resolved_target or action.target or '1,2')}"
+    if kind == "browser_search_subject":
+        return f"{kind}:{_normalize_label(action.resolved_target or action.target or 'youtube')}"
+    if kind == "browser_retry_subject_result":
+        return f"{kind}:{_normalize_label(action.resolved_target or action.target or 'better_result')}"
+    if kind == "browser_synthesize_evidence":
+        return f"{kind}:{_normalize_label(action.resolved_target or action.target or 'current_evidence')}"
     if kind == "open_search_result":
+        return f"{kind}:{_normalize_label(action.resolved_target or action.target)}"
+    if kind in {"browser_click_index", "browser_switch_tab"}:
+        return f"{kind}:{_normalize_label(action.resolved_target or action.target)}"
+    if kind == "browser_click_text":
         return f"{kind}:{_normalize_label(action.resolved_target or action.target)}"
     if kind == "open_url":
         return f"{kind}:{_normalize_url(action.resolved_target or action.target)}"
@@ -865,6 +3144,31 @@ def build_terminal_plan(
     heuristic = _heuristic_plan(prompt, browser_state=browser_state)
     if heuristic is not None:
         return heuristic
+    return build_language_learning_plan(
+        prompt=prompt,
+        model=model,
+        client=client,
+        heuristic_only=heuristic_only,
+        temperature=temperature,
+        browser_state=browser_state,
+    )
+
+
+def build_language_learning_plan(
+    *,
+    prompt: str,
+    model: str = "",
+    client: UniversalLLMClient | None = None,
+    heuristic_only: bool = False,
+    temperature: float = 0.1,
+    browser_state: BrowserSessionState | None = None,
+) -> TerminalPlan:
+    rule_plan = _language_rule_plan(prompt, browser_state=browser_state)
+    if rule_plan is not None:
+        return rule_plan
+    memory_plan = _language_memory_plan(prompt, browser_state=browser_state)
+    if memory_plan is not None:
+        return memory_plan
     if heuristic_only or client is None or not str(model or "").strip():
         return TerminalPlan(
             prompt=prompt,
@@ -873,7 +3177,7 @@ def build_terminal_plan(
             residual_constraints=["unsupported_or_ambiguous_request"],
         )
     try:
-        response = client.chat(model=model, messages=_llm_prompt(prompt, browser_state=browser_state), temperature=temperature)
+        response = client.chat(model=model, messages=_language_llm_prompt(prompt, browser_state=browser_state), temperature=temperature)
     except Exception as exc:
         return TerminalPlan(
             prompt=prompt,
@@ -881,7 +3185,27 @@ def build_terminal_plan(
             clarification=f"Model fallback unavailable: {str(exc).strip() or 'unknown error'}",
             residual_constraints=["llm_fallback_unavailable"],
         )
-    return _plan_from_model_response(prompt=prompt, response=response, source="model")
+    plan = _plan_from_model_response(prompt=prompt, response=response, source="language_model")
+    augmented_actions = _merge_language_actions(plan.actions, prompt=prompt, browser_state=browser_state)
+    if augmented_actions != plan.actions:
+        plan = TerminalPlan(
+            prompt=plan.prompt,
+            source=plan.source,
+            actions=augmented_actions,
+            needs_confirmation=plan.needs_confirmation,
+            clarification=plan.clarification,
+            residual_constraints=list(plan.residual_constraints),
+        )
+    if plan.actions:
+        valid, residuals = _validate_language_actions(plan.actions, browser_state=browser_state)
+        if not valid:
+            return TerminalPlan(
+                prompt=prompt,
+                source="language_model",
+                clarification="Language fallback produced a plan that did not fit the current Memla browser state.",
+                residual_constraints=residuals or ["invalid_language_compile"],
+            )
+    return plan
 
 
 def build_raw_terminal_plan(
@@ -993,7 +3317,22 @@ def _system_info_record(topic: str) -> TerminalExecutionRecord:
     return TerminalExecutionRecord(kind="system_info", target=topic, status="failed", message="Unsupported system info topic.")
 
 
-def _browser_state_for_url(url: str, *, search_engine: str = "", search_query: str = "", result_urls: list[str] | None = None) -> BrowserSessionState:
+def _browser_state_for_url(
+    url: str,
+    *,
+    browser_app: str = "",
+    search_engine: str = "",
+    search_query: str = "",
+    result_urls: list[str] | None = None,
+    result_cards: list[dict[str, Any]] | None = None,
+    subject_title: str = "",
+    subject_url: str = "",
+    subject_summary: str = "",
+    research_subject_title: str = "",
+    research_subject_url: str = "",
+    research_subject_summary: str = "",
+    evidence_items: list[dict[str, Any]] | None = None,
+) -> BrowserSessionState:
     normalized_url = str(url or "").strip()
     lower_url = normalized_url.lower()
     page_kind = "web_page"
@@ -1011,12 +3350,23 @@ def _browser_state_for_url(url: str, *, search_engine: str = "", search_query: s
         page_kind = "post_page"
     elif "amazon.com/s?" in lower_url:
         page_kind = "search_results"
+    elif re.match(r"^https?://(?:www\.)?google\.[^/\s]+/search", lower_url):
+        page_kind = "search_results"
     return BrowserSessionState(
         current_url=normalized_url,
         page_kind=page_kind,
+        browser_app=str(browser_app or "").strip(),
         search_engine=str(search_engine or "").strip(),
         search_query=str(search_query or "").strip(),
         result_urls=list(result_urls or []),
+        result_cards=[dict(item) for item in list(result_cards or []) if isinstance(item, dict)],
+        subject_title=str(subject_title or "").strip(),
+        subject_url=str(subject_url or "").strip(),
+        subject_summary=str(subject_summary or "").strip(),
+        research_subject_title=str(research_subject_title or "").strip(),
+        research_subject_url=str(research_subject_url or "").strip(),
+        research_subject_summary=str(research_subject_summary or "").strip(),
+        evidence_items=_clone_evidence_items(evidence_items),
     )
 
 
@@ -1047,6 +3397,21 @@ def _fetch_github_search_result_urls(query: str, *, limit: int = 5) -> list[str]
         if len(results) >= limit:
             break
     return results
+
+
+def _fallback_cards_from_urls(urls: list[str]) -> list[dict[str, Any]]:
+    cards: list[dict[str, Any]] = []
+    for index, url in enumerate(list(urls or []), start=1):
+        preview = _preview_label_for_url(url) or url
+        cards.append(
+            {
+                "index": index,
+                "title": preview,
+                "url": url,
+                "summary": "",
+            }
+        )
+    return cards
 
 
 def _format_compact_count(value: int | float | str) -> str:
@@ -1097,6 +3462,53 @@ def _fetch_github_repo_snapshot(owner: str, repo: str) -> dict[str, Any]:
     if topics:
         snapshot["topics"] = ", ".join(topics[:6])
     return snapshot
+
+
+def _fetch_github_search_cards(query: str, *, limit: int = 5) -> list[dict[str, Any]]:
+    api_url = f"https://api.github.com/search/repositories?q={quote_plus(query)}&per_page={max(int(limit), 1)}"
+    try:
+        payload = json.loads(_fetch_url_text(api_url, accept="application/vnd.github+json"))
+    except (OSError, URLError, json.JSONDecodeError, ValueError):
+        return []
+    items = list(payload.get("items") or []) if isinstance(payload, dict) else []
+    cards: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("html_url") or "").strip()
+        if not url or url.lower() in seen:
+            continue
+        seen.add(url.lower())
+        stars = item.get("stargazers_count")
+        language = str(item.get("language") or "").strip()
+        meta_parts = []
+        if stars is not None:
+            meta_parts.append(f"stars {_format_compact_count(stars)}")
+        if language:
+            meta_parts.append(language)
+        cards.append(
+            {
+                "index": len(cards) + 1,
+                "title": str(item.get("full_name") or url).strip(),
+                "url": url,
+                "summary": str(item.get("description") or "").strip(),
+                "meta": " | ".join(meta_parts),
+            }
+        )
+        if len(cards) >= limit:
+            break
+    return cards
+
+
+def _fetch_search_result_cards(engine: str, query: str, *, limit: int = 5) -> list[dict[str, Any]]:
+    normalized_engine = _normalize_label(engine)
+    if normalized_engine == "github":
+        cards = _fetch_github_search_cards(query, limit=limit)
+        if cards:
+            return cards
+    urls = _fetch_search_result_urls(engine, query, limit=limit)
+    return _fallback_cards_from_urls(urls[:limit])
 
 
 def _fetch_search_result_urls(engine: str, query: str, *, limit: int = 5) -> list[str]:
@@ -1237,6 +3649,243 @@ def _browser_read_message(details: dict[str, Any], current_url: str) -> str:
     return f"Read current page: {summary}"
 
 
+def _is_browser_app(app_key: str) -> bool:
+    return _normalize_label(app_key) in {"brave", "chrome", "edge", "firefox"}
+
+
+def _powershell_single_quoted(value: str) -> str:
+    return str(value or "").replace("'", "''")
+
+
+def _preferred_browser_app(browser_app: str = "") -> str:
+    explicit = str(browser_app or "").strip()
+    if explicit:
+        return explicit
+    return str(os.environ.get(PREFERRED_BROWSER_ENV, "") or "").strip()
+
+
+def _windows_browser_window_titles(browser_app: str = "") -> list[str]:
+    preferred = _normalize_label(_preferred_browser_app(browser_app))
+    title_map = {
+        "brave": ["Brave"],
+        "chrome": ["Google Chrome", "Chrome"],
+        "edge": ["Microsoft Edge", "Edge"],
+        "firefox": ["Firefox"],
+    }
+    ordered: list[str] = []
+    for title in title_map.get(preferred, []):
+        if title not in ordered:
+            ordered.append(title)
+    for title in ["Brave", "Google Chrome", "Chrome", "Firefox", "Microsoft Edge", "Edge"]:
+        if title not in ordered:
+            ordered.append(title)
+    return ordered
+
+
+def _windows_browser_sendkeys_command(*, keys: list[str], clipboard_value: str = "", browser_app: str = "") -> list[str]:
+    titles = _windows_browser_window_titles(browser_app)
+    if not titles or not keys:
+        return []
+    titles_literal = ", ".join(f"'{_powershell_single_quoted(title)}'" for title in titles)
+    statements = [
+        "$wshell = New-Object -ComObject WScript.Shell",
+        f"$titles = @({titles_literal})",
+        "$activated = $false",
+        "foreach ($title in $titles) { if ($wshell.AppActivate($title)) { $activated = $true; break } }",
+        "if (-not $activated) { exit 17 }",
+        "Start-Sleep -Milliseconds 150",
+    ]
+    if clipboard_value:
+        statements.append(f"Set-Clipboard -Value '{_powershell_single_quoted(clipboard_value)}'")
+        statements.append("Start-Sleep -Milliseconds 75")
+    for key in keys:
+        statements.append(f"$wshell.SendKeys('{_powershell_single_quoted(key)}')")
+        statements.append("Start-Sleep -Milliseconds 75")
+    return [
+        "powershell.exe",
+        "-NoProfile",
+        "-Command",
+        "; ".join(statements),
+    ]
+
+
+def _run_command(command: list[str], *, wait: bool = False, timeout: float = 8.0) -> int | None:
+    process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    if not wait:
+        return None
+    try:
+        return process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def _browser_new_tab_command(*, platform_name: str, browser_app: str = "") -> list[str]:
+    platform_key = _platform_key(platform_name)
+    if platform_key == "linux":
+        xdotool = shutil.which("xdotool")
+        return [xdotool, "key", "ctrl+t"] if xdotool else []
+    if platform_key == "darwin":
+        return ["osascript", "-e", 'tell application "System Events" to keystroke "t" using command down']
+    if platform_key == "win32":
+        return _windows_browser_sendkeys_command(keys=["^t"], browser_app=browser_app)
+    return []
+
+
+def _browser_close_tab_command(*, platform_name: str, browser_app: str = "") -> list[str]:
+    platform_key = _platform_key(platform_name)
+    if platform_key == "linux":
+        xdotool = shutil.which("xdotool")
+        return [xdotool, "key", "ctrl+w"] if xdotool else []
+    if platform_key == "darwin":
+        return ["osascript", "-e", 'tell application "System Events" to keystroke "w" using command down']
+    if platform_key == "win32":
+        return _windows_browser_sendkeys_command(keys=["^w"], browser_app=browser_app)
+    return []
+
+
+def _browser_switch_tab_command(target: str, *, platform_name: str, browser_app: str = "") -> list[str]:
+    normalized = _normalize_label(target)
+    platform_key = _platform_key(platform_name)
+    if platform_key == "linux":
+        xdotool = shutil.which("xdotool")
+        if not xdotool:
+            return []
+        if normalized in {"previous", "prev"}:
+            return [xdotool, "key", "ctrl+shift+Tab"]
+        if normalized.isdigit():
+            return [xdotool, "key", f"ctrl+{normalized}"]
+        return [xdotool, "key", "ctrl+Tab"]
+    if platform_key == "darwin":
+        if normalized in {"previous", "prev"}:
+            return ["osascript", "-e", 'tell application "System Events" to keystroke tab using {command down, shift down}']
+        if normalized.isdigit():
+            return ["osascript", "-e", f'tell application "System Events" to keystroke "{normalized}" using command down']
+        return ["osascript", "-e", 'tell application "System Events" to keystroke tab using control down']
+    if platform_key == "win32":
+        key = "^+{TAB}" if normalized in {"previous", "prev"} else "^{TAB}"
+        if normalized.isdigit():
+            key = f"^{normalized}"
+        return _windows_browser_sendkeys_command(keys=[key], browser_app=browser_app)
+    return []
+
+
+def _browser_forward_command(*, platform_name: str, browser_app: str = "") -> list[str]:
+    platform_key = _platform_key(platform_name)
+    if platform_key == "linux":
+        xdotool = shutil.which("xdotool")
+        return [xdotool, "key", "alt+Right"] if xdotool else []
+    if platform_key == "darwin":
+        return ["osascript", "-e", 'tell application "System Events" to keystroke "]" using command down']
+    if platform_key == "win32":
+        return _windows_browser_sendkeys_command(keys=["%{RIGHT}"], browser_app=browser_app)
+    return []
+
+
+def _browser_scroll_command(direction: str, *, platform_name: str, browser_app: str = "") -> list[str]:
+    normalized = _normalize_label(direction)
+    platform_key = _platform_key(platform_name)
+    if platform_key == "linux":
+        xdotool = shutil.which("xdotool")
+        if not xdotool:
+            return []
+        return [xdotool, "key", "Page_Up" if normalized == "up" else "Page_Down"]
+    if platform_key == "darwin":
+        key = "page up" if normalized == "up" else "page down"
+        return ["osascript", "-e", f'tell application "System Events" to key code {"116" if normalized == "up" else "121"}']
+    if platform_key == "win32":
+        key = "{PGUP}" if normalized == "up" else "{PGDN}"
+        return _windows_browser_sendkeys_command(keys=[key], browser_app=browser_app)
+    return []
+
+
+def _browser_type_text_command(text: str, *, platform_name: str, browser_app: str = "") -> list[str]:
+    clean = str(text or "")
+    if not clean:
+        return []
+    platform_key = _platform_key(platform_name)
+    if platform_key == "linux":
+        xdotool = shutil.which("xdotool")
+        return [xdotool, "type", "--delay", "0", clean] if xdotool else []
+    if platform_key == "darwin":
+        escaped = clean.replace("\\", "\\\\").replace('"', '\\"')
+        return ["osascript", "-e", f'tell application "System Events" to keystroke "{escaped}"']
+    if platform_key == "win32":
+        return _windows_browser_sendkeys_command(keys=["^v"], clipboard_value=clean, browser_app=browser_app)
+    return []
+
+
+def _browser_submit_command(*, platform_name: str, browser_app: str = "") -> list[str]:
+    platform_key = _platform_key(platform_name)
+    if platform_key == "linux":
+        xdotool = shutil.which("xdotool")
+        return [xdotool, "key", "Return"] if xdotool else []
+    if platform_key == "darwin":
+        return ["osascript", "-e", 'tell application "System Events" to key code 36']
+    if platform_key == "win32":
+        return _windows_browser_sendkeys_command(keys=["~"], browser_app=browser_app)
+    return []
+
+
+def _browser_screenshot_command(output_path: Path, *, platform_name: str) -> list[str]:
+    platform_key = _platform_key(platform_name)
+    if platform_key == "linux":
+        for tool in ("gnome-screenshot", "scrot", "import"):
+            resolved = shutil.which(tool)
+            if not resolved:
+                continue
+            if tool == "gnome-screenshot":
+                return [resolved, "-f", str(output_path)]
+            if tool == "scrot":
+                return [resolved, str(output_path)]
+            return [resolved, str(output_path)]
+        return []
+    if platform_key == "darwin":
+        return ["screencapture", "-x", str(output_path)]
+    if platform_key == "win32":
+        escaped = str(output_path).replace("'", "''")
+        return [
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            (
+                "Add-Type -AssemblyName System.Windows.Forms; "
+                "Add-Type -AssemblyName System.Drawing; "
+                "$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; "
+                "$bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height; "
+                "$graphics = [System.Drawing.Graphics]::FromImage($bitmap); "
+                "$graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size); "
+                f"$bitmap.Save('{escaped}', [System.Drawing.Imaging.ImageFormat]::Png); "
+                "$graphics.Dispose(); $bitmap.Dispose()"
+            ),
+        ]
+    return []
+
+
+def _navigate_active_browser_command(url: str, *, platform_name: str, browser_app: str = "") -> list[str]:
+    clean_url = str(url or "").strip()
+    if not clean_url:
+        return []
+    platform_key = _platform_key(platform_name)
+    if platform_key == "linux":
+        xdotool = shutil.which("xdotool")
+        if not xdotool:
+            return []
+        return [xdotool, "key", "ctrl+l", "type", "--delay", "0", clean_url, "key", "Return"]
+    if platform_key == "darwin":
+        return [
+            "osascript",
+            "-e",
+            'tell application "System Events" to keystroke "l" using command down',
+            "-e",
+            f'tell application "System Events" to keystroke "{clean_url}"',
+            "-e",
+            'tell application "System Events" to key code 36',
+        ]
+    if platform_key == "win32":
+        return _windows_browser_sendkeys_command(keys=["^l", "^v", "~"], clipboard_value=clean_url, browser_app=browser_app)
+    return []
+
+
 def _browser_media_command(action_kind: str, *, platform_name: str) -> list[str]:
     if _platform_key(platform_name) != "linux":
         return []
@@ -1261,7 +3910,9 @@ def execute_terminal_plan(
     records: list[TerminalExecutionRecord] = []
     residuals = list(plan.residual_constraints)
     current_browser_state = browser_state or load_browser_session_state(state_path)
-    for action in plan.actions:
+    initial_browser_state = _browser_state_copy(current_browser_state)
+    for index, action in enumerate(plan.actions):
+        next_action = plan.actions[index + 1] if index + 1 < len(plan.actions) else None
         if action.kind == "launch_app":
             command = _resolve_launch_command(action.resolved_target or action.target, platform_name=platform_key)
             if not command:
@@ -1285,6 +3936,9 @@ def execute_terminal_plan(
                     command=command,
                 )
             )
+            app_key = _resolve_app_key(action.resolved_target or action.target)
+            if _is_browser_app(app_key):
+                current_browser_state = _browser_state_copy(current_browser_state, browser_app=app_key)
             continue
         if action.kind in {"open_url", "open_path"}:
             target = action.resolved_target or action.target
@@ -1301,7 +3955,18 @@ def execute_terminal_plan(
                         )
                     )
                     continue
-            command = _open_in_browser(target, platform_name=platform_key)
+            note_payload = _decode_action_note(action.note)
+            tab_mode = str(note_payload.get("tab_mode") or "").strip().lower()
+            use_active_tab = action.kind == "open_url" and tab_mode == "new_tab" and current_browser_state.page_kind == "blank_tab"
+            command = (
+                _navigate_active_browser_command(
+                    target,
+                    platform_name=platform_key,
+                    browser_app=current_browser_state.browser_app,
+                )
+                if use_active_tab
+                else _open_in_browser(target, platform_name=platform_key)
+            )
             if not command:
                 residuals.append(f"open_command_unavailable:{platform_key}")
                 records.append(
@@ -1313,30 +3978,193 @@ def execute_terminal_plan(
                     )
                 )
                 continue
-            subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-            note_payload = _decode_action_note(action.note)
+            exit_code = _run_command(command, wait=use_active_tab and platform_key == "win32")
+            fallback_used = False
+            if use_active_tab and platform_key == "win32" and exit_code not in (None, 0):
+                command = _open_in_browser(target, platform_name=platform_key)
+                if not command:
+                    residuals.append("browser_focus_unavailable")
+                    records.append(
+                        TerminalExecutionRecord(
+                            kind=action.kind,
+                            target=action.target,
+                            status="failed",
+                            message="Could not activate a browser window safely, so Memla skipped typing into the terminal.",
+                        )
+                    )
+                    continue
+                _run_command(command)
+                use_active_tab = False
+                fallback_used = True
             search_engine = str(note_payload.get("search_engine") or "").strip()
             search_query = str(note_payload.get("search_query") or "").strip()
             if search_engine and search_query:
                 result_urls: list[str] = []
+                result_cards: list[dict[str, Any]] = []
                 try:
-                    result_urls = _fetch_search_result_urls(search_engine, search_query, limit=5)
+                    result_cards = _fetch_search_result_cards(search_engine, search_query, limit=5)
+                    result_urls = [str(card.get("url") or "").strip() for card in result_cards if str(card.get("url") or "").strip()]
+                    if not result_urls:
+                        result_urls = _fetch_search_result_urls(search_engine, search_query, limit=5)
+                        result_cards = _fallback_cards_from_urls(result_urls)
                 except Exception:
                     result_urls = []
+                    result_cards = []
                 current_browser_state = _browser_state_for_url(
                     target,
+                    browser_app=current_browser_state.browser_app,
                     search_engine=search_engine,
                     search_query=search_query,
                     result_urls=result_urls,
+                    result_cards=result_cards,
                 )
             else:
-                current_browser_state = _browser_state_for_url(target)
+                current_browser_state = _browser_state_for_url(target, browser_app=current_browser_state.browser_app)
             records.append(
                 TerminalExecutionRecord(
                     kind=action.kind,
                     target=action.target,
                     status="ok",
-                    message=f"Opened {target}.",
+                    message=(
+                        "Could not safely target the active browser tab, so opened "
+                        if fallback_used
+                        else ("Navigated the active browser tab to " if use_active_tab else "Opened ")
+                    )
+                    + f"{target}.",
+                    command=command,
+                )
+            )
+            continue
+        if action.kind == "browser_new_tab":
+            command = _browser_new_tab_command(platform_name=platform_key, browser_app=current_browser_state.browser_app)
+            if not command:
+                residuals.append(f"browser_new_tab_unavailable:{platform_key}")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message=f"Opening a new browser tab is not wired for platform {platform_key}.",
+                    )
+                )
+                continue
+            exit_code = _run_command(command, wait=platform_key == "win32")
+            if platform_key == "win32" and exit_code not in (None, 0):
+                if next_action is not None and next_action.kind == "open_url":
+                    records.append(
+                        TerminalExecutionRecord(
+                            kind=action.kind,
+                            target=action.target,
+                            status="ok",
+                            message="Skipped the raw new-tab shortcut because no browser window could be activated safely; Memla will open the requested page directly instead.",
+                            command=command,
+                        )
+                    )
+                    continue
+                residuals.append("browser_focus_unavailable")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message="Could not activate a browser window safely, so Memla skipped the new-tab shortcut instead of typing into the terminal.",
+                        command=command,
+                    )
+                )
+                continue
+            current_browser_state = BrowserSessionState(
+                current_url="browser://new-tab",
+                page_kind="blank_tab",
+                browser_app=current_browser_state.browser_app,
+                research_subject_title=current_browser_state.research_subject_title,
+                research_subject_url=current_browser_state.research_subject_url,
+                research_subject_summary=current_browser_state.research_subject_summary,
+                evidence_items=_clone_evidence_items(current_browser_state.evidence_items),
+            )
+            records.append(
+                TerminalExecutionRecord(
+                    kind=action.kind,
+                    target=action.target,
+                    status="ok",
+                    message="Sent browser new-tab shortcut.",
+                    command=command,
+                )
+            )
+            continue
+        if action.kind == "browser_close_tab":
+            command = _browser_close_tab_command(platform_name=platform_key, browser_app=current_browser_state.browser_app)
+            if not command:
+                residuals.append(f"browser_close_tab_unavailable:{platform_key}")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message=f"Closing the browser tab is not wired for platform {platform_key}.",
+                    )
+                )
+                continue
+            exit_code = _run_command(command, wait=platform_key == "win32")
+            if platform_key == "win32" and exit_code not in (None, 0):
+                residuals.append("browser_focus_unavailable")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message="Could not activate a browser window safely, so Memla skipped the close-tab shortcut.",
+                        command=command,
+                    )
+                )
+                continue
+            current_browser_state = BrowserSessionState()
+            records.append(
+                TerminalExecutionRecord(
+                    kind=action.kind,
+                    target=action.target,
+                    status="ok",
+                    message="Sent browser close-tab shortcut.",
+                    command=command,
+                )
+            )
+            continue
+        if action.kind == "browser_switch_tab":
+            command = _browser_switch_tab_command(
+                action.resolved_target or action.target,
+                platform_name=platform_key,
+                browser_app=current_browser_state.browser_app,
+            )
+            if not command:
+                residuals.append(f"browser_switch_tab_unavailable:{platform_key}")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message=f"Switching browser tabs is not wired for platform {platform_key}.",
+                    )
+                )
+                continue
+            exit_code = _run_command(command, wait=platform_key == "win32")
+            if platform_key == "win32" and exit_code not in (None, 0):
+                residuals.append("browser_focus_unavailable")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message="Could not activate a browser window safely, so Memla skipped the switch-tab shortcut.",
+                        command=command,
+                    )
+                )
+                continue
+            current_browser_state = BrowserSessionState()
+            records.append(
+                TerminalExecutionRecord(
+                    kind=action.kind,
+                    target=action.target,
+                    status="ok",
+                    message=f"Sent browser switch-tab shortcut ({action.resolved_target or action.target}).",
                     command=command,
                 )
             )
@@ -1358,13 +4186,22 @@ def execute_terminal_plan(
             except ValueError:
                 result_index = 1
             result_urls = list(current_browser_state.result_urls or [])
+            result_cards = [dict(item) for item in list(current_browser_state.result_cards or []) if isinstance(item, dict)]
             if len(result_urls) < result_index:
                 try:
-                    result_urls = _fetch_search_result_urls(
+                    result_cards = _fetch_search_result_cards(
                         current_browser_state.search_engine,
                         current_browser_state.search_query,
                         limit=max(result_index, 5),
                     )
+                    result_urls = [str(card.get("url") or "").strip() for card in result_cards if str(card.get("url") or "").strip()]
+                    if len(result_urls) < result_index:
+                        result_urls = _fetch_search_result_urls(
+                            current_browser_state.search_engine,
+                            current_browser_state.search_query,
+                            limit=max(result_index, 5),
+                        )
+                        result_cards = _fallback_cards_from_urls(result_urls)
                 except Exception as exc:
                     residuals.append("search_result_fetch_failed")
                     records.append(
@@ -1388,6 +4225,17 @@ def execute_terminal_plan(
                 )
                 continue
             target_url = result_urls[result_index - 1]
+            chosen_card = _resolve_card_by_index(
+                BrowserSessionState(
+                    current_url=current_browser_state.current_url,
+                    page_kind=current_browser_state.page_kind,
+                    search_engine=current_browser_state.search_engine,
+                    search_query=current_browser_state.search_query,
+                    result_urls=result_urls,
+                    result_cards=result_cards,
+                ),
+                result_index,
+            )
             command = _open_in_browser(target_url, platform_name=platform_key)
             if not command:
                 residuals.append(f"open_command_unavailable:{platform_key}")
@@ -1403,9 +4251,18 @@ def execute_terminal_plan(
             subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
             current_browser_state = _browser_state_for_url(
                 target_url,
+                browser_app=current_browser_state.browser_app,
                 search_engine=current_browser_state.search_engine,
                 search_query=current_browser_state.search_query,
                 result_urls=result_urls,
+                result_cards=result_cards,
+                subject_title=str(chosen_card.get("title") or "").strip(),
+                subject_url=str(chosen_card.get("url") or target_url).strip(),
+                subject_summary=str(chosen_card.get("summary") or "").strip(),
+                research_subject_title=current_browser_state.research_subject_title,
+                research_subject_url=current_browser_state.research_subject_url,
+                research_subject_summary=current_browser_state.research_subject_summary,
+                evidence_items=current_browser_state.evidence_items,
             )
             records.append(
                 TerminalExecutionRecord(
@@ -1417,7 +4274,63 @@ def execute_terminal_plan(
                 )
             )
             continue
-        if action.kind == "browser_read_page":
+        if action.kind in {"browser_click_index", "browser_click_text"}:
+            card: dict[str, Any] = {}
+            if action.kind == "browser_click_index":
+                try:
+                    card = _resolve_card_by_index(current_browser_state, max(int(action.resolved_target or action.target), 1))
+                except ValueError:
+                    card = {}
+            else:
+                card = _resolve_card_by_text(current_browser_state, action.resolved_target or action.target)
+            target_url = str(card.get("url") or "").strip()
+            if not target_url:
+                residuals.append("click_target_unavailable")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message="Could not resolve a clickable card for that target in the current browser state.",
+                    )
+                )
+                continue
+            command = _open_in_browser(target_url, platform_name=platform_key)
+            if not command:
+                residuals.append(f"open_command_unavailable:{platform_key}")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message=f"No opener command is configured for platform {platform_key}.",
+                    )
+                )
+                continue
+            subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            current_browser_state = _browser_state_for_url(
+                target_url,
+                browser_app=current_browser_state.browser_app,
+                subject_title=str(card.get("title") or "").strip(),
+                subject_url=str(card.get("url") or target_url).strip(),
+                subject_summary=str(card.get("summary") or "").strip(),
+                research_subject_title=current_browser_state.research_subject_title,
+                research_subject_url=current_browser_state.research_subject_url,
+                research_subject_summary=current_browser_state.research_subject_summary,
+                evidence_items=current_browser_state.evidence_items,
+            )
+            records.append(
+                TerminalExecutionRecord(
+                    kind=action.kind,
+                    target=action.target,
+                    status="ok",
+                    message=f"Opened {card.get('title') or target_url}.",
+                    command=command,
+                    details=card,
+                )
+            )
+            continue
+        if action.kind in {"browser_read_page", "browser_extract_page"}:
             if not current_browser_state.current_url:
                 residuals.append("browser_state_missing_current_url")
                 records.append(
@@ -1448,9 +4361,417 @@ def execute_terminal_plan(
                     kind=action.kind,
                     target=action.target,
                     status="ok",
-                    message=_browser_read_message(details, current_browser_state.current_url),
+                    message=(
+                        _browser_read_message(details, current_browser_state.current_url)
+                        if action.kind == "browser_read_page"
+                        else f"Extracted current page: {str(details.get('summary') or details.get('title') or current_browser_state.current_url).strip()}"
+                    ),
                     details=details,
                 )
+            )
+            current_browser_state = _append_browser_evidence(
+                current_browser_state,
+                _evidence_item_from_details(current_browser_state, details),
+            )
+            continue
+        if action.kind == "browser_extract_cards":
+            if current_browser_state.page_kind != "search_results":
+                residuals.append("browser_state_missing_search_results")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message="There is no active search-results page to extract cards from.",
+                    )
+                )
+                continue
+            cards = _cached_cards(current_browser_state)
+            if not cards and current_browser_state.search_engine and current_browser_state.search_query:
+                try:
+                    cards = _fetch_search_result_cards(current_browser_state.search_engine, current_browser_state.search_query, limit=5)
+                except Exception:
+                    cards = []
+            current_browser_state = BrowserSessionState(
+                current_url=current_browser_state.current_url,
+                page_kind=current_browser_state.page_kind,
+                browser_app=current_browser_state.browser_app,
+                search_engine=current_browser_state.search_engine,
+                search_query=current_browser_state.search_query,
+                result_urls=[str(card.get("url") or "").strip() for card in cards if str(card.get("url") or "").strip()],
+                result_cards=cards,
+                subject_title=current_browser_state.subject_title,
+                subject_url=current_browser_state.subject_url,
+                subject_summary=current_browser_state.subject_summary,
+                research_subject_title=current_browser_state.research_subject_title,
+                research_subject_url=current_browser_state.research_subject_url,
+                research_subject_summary=current_browser_state.research_subject_summary,
+                evidence_items=_clone_evidence_items(current_browser_state.evidence_items),
+            )
+            records.append(
+                TerminalExecutionRecord(
+                    kind=action.kind,
+                    target=action.target,
+                    status="ok",
+                    message=f"Extracted {len(cards)} result cards from the current search page.",
+                    details={"cards": cards},
+                )
+            )
+            continue
+        if action.kind == "browser_rank_cards":
+            if current_browser_state.page_kind != "search_results":
+                residuals.append("browser_state_missing_search_results")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message="There is no active search-results page to rank.",
+                    )
+                )
+                continue
+            cards = _cached_cards(current_browser_state)
+            if not cards:
+                residuals.append("browser_cards_missing")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message="There are no cached browser cards to rank yet.",
+                    )
+                )
+                continue
+            note_payload = _decode_action_note(action.note)
+            goal = str(note_payload.get("goal") or plan.prompt or "").strip()
+            ranked = _rank_cards_against_goal(cards, goal)
+            best = dict(ranked[0]) if ranked else {}
+            current_browser_state = _browser_state_with_subject(current_browser_state, best)
+            current_browser_state = _browser_state_with_research_subject(current_browser_state, best)
+            current_browser_state = _append_browser_evidence(
+                current_browser_state,
+                _evidence_item_from_subject(best, source_kind="repo_page", meta="github repo"),
+            )
+            message = (
+                f"Best match for \"{goal}\": {str(best.get('title') or best.get('url') or 'none').strip()}"
+                if goal
+                else f"Best available result: {str(best.get('title') or best.get('url') or 'none').strip()}"
+            )
+            records.append(
+                TerminalExecutionRecord(
+                    kind=action.kind,
+                    target=action.target,
+                    status="ok",
+                    message=message,
+                    details={
+                        "goal": goal,
+                        "best_title": str(best.get("title") or "").strip(),
+                        "best_url": str(best.get("url") or "").strip(),
+                        "best_score": float(best.get("score") or 0.0),
+                        "best_matching_terms": list(best.get("matching_terms") or []),
+                        "ranking": ranked,
+                    },
+                )
+            )
+            continue
+        if action.kind == "browser_compare_cards":
+            if current_browser_state.page_kind != "search_results":
+                residuals.append("browser_state_missing_search_results")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message="There is no active search-results page to compare cards from.",
+                    )
+                )
+                continue
+            cards = _cached_cards(current_browser_state)
+            if not cards:
+                residuals.append("browser_cards_missing")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message="There are no cached browser cards to compare yet.",
+                    )
+                )
+                continue
+            note_payload = _decode_action_note(action.note)
+            goal = str(note_payload.get("goal") or plan.prompt or "").strip()
+            requested_indexes = [int(item) for item in list(note_payload.get("indexes") or []) if str(item).isdigit()]
+            if not requested_indexes:
+                requested_indexes = [int(part) for part in re.findall(r"\d+", action.resolved_target or action.target or "")][:2]
+            if not requested_indexes:
+                requested_indexes = [1, 2]
+            selected_cards = []
+            for index in requested_indexes[:2]:
+                card = _resolve_card_by_index(current_browser_state, index)
+                if card:
+                    selected_cards.append(card)
+            if len(selected_cards) < 2:
+                residuals.append("compare_target_unavailable")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message="Could not resolve two cached cards to compare.",
+                    )
+                )
+                continue
+            comparison = _compare_cards_against_goal(selected_cards, goal)
+            winner_subject = {
+                "title": comparison.get("winner_title"),
+                "url": comparison.get("winner_url"),
+                "summary": "",
+            }
+            current_browser_state = _browser_state_with_subject(current_browser_state, winner_subject)
+            current_browser_state = _browser_state_with_research_subject(current_browser_state, winner_subject)
+            current_browser_state = _append_browser_evidence(
+                current_browser_state,
+                _evidence_item_from_subject(winner_subject, source_kind="repo_page", meta="github repo"),
+            )
+            winner = str(comparison.get("winner_title") or comparison.get("winner_url") or "none").strip()
+            records.append(
+                TerminalExecutionRecord(
+                    kind=action.kind,
+                    target=action.target,
+                    status="ok",
+                    message=f"Comparison winner for \"{goal}\": {winner}" if goal else f"Comparison winner: {winner}",
+                    details=comparison,
+                )
+            )
+            continue
+        if action.kind == "browser_search_subject":
+            note_payload = _decode_action_note(action.note)
+            engine = str(note_payload.get("engine") or action.resolved_target or action.target or "").strip()
+            if current_browser_state.page_kind == "repo_page":
+                current_browser_state = _append_browser_evidence(
+                    current_browser_state,
+                    _evidence_item_from_subject(
+                        _research_subject_from_browser_state(current_browser_state),
+                        source_kind="repo_page",
+                        fallback_url=current_browser_state.current_url,
+                        meta="github repo",
+                    ),
+                )
+            subject = _research_subject_from_browser_state(current_browser_state)
+            subject_query = _research_subject_query_from_browser_state(current_browser_state)
+            subject_title = str(subject.get("title") or "").strip()
+            subject_url = str(subject.get("url") or "").strip()
+            if not engine:
+                residuals.append("browser_subject_search_engine_missing")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message="No target search engine was provided for the active subject search.",
+                    )
+                )
+                continue
+            if not subject_query:
+                residuals.append("browser_subject_missing")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message="There is no active subject in browser state to search for yet.",
+                    )
+                )
+                continue
+            target_url = _search_url(engine, subject_query)
+            if not target_url:
+                residuals.append("browser_subject_search_url_invalid")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message=f"Could not build a {engine} search URL for the active subject.",
+                    )
+                )
+                continue
+            command = _open_in_browser(target_url, platform_name=platform_key)
+            if not command:
+                residuals.append(f"open_command_unavailable:{platform_key}")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message=f"No opener command is configured for platform {platform_key}.",
+                    )
+                )
+                continue
+            result_cards: list[dict[str, Any]] = []
+            result_urls: list[str] = []
+            try:
+                result_cards = _fetch_search_result_cards(engine, subject_query, limit=5)
+                result_urls = [str(card.get("url") or "").strip() for card in result_cards if str(card.get("url") or "").strip()]
+                if not result_urls:
+                    result_urls = _fetch_search_result_urls(engine, subject_query, limit=5)
+                    result_cards = _fallback_cards_from_urls(result_urls)
+            except Exception:
+                result_cards = []
+                result_urls = []
+            subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            current_browser_state = _browser_state_for_url(
+                target_url,
+                search_engine=engine,
+                search_query=subject_query,
+                result_urls=result_urls,
+                result_cards=result_cards,
+                subject_title=current_browser_state.subject_title,
+                subject_url=current_browser_state.subject_url,
+                subject_summary=current_browser_state.subject_summary,
+                research_subject_title=subject_title,
+                research_subject_url=subject_url,
+                research_subject_summary=str(subject.get("summary") or "").strip(),
+                evidence_items=current_browser_state.evidence_items,
+            )
+            records.append(
+                TerminalExecutionRecord(
+                    kind=action.kind,
+                    target=action.target,
+                    status="ok",
+                    message=f"Searched {engine} for {subject_title or subject_query}.",
+                    command=command,
+                    details={
+                        "subject_title": subject_title,
+                        "subject_url": subject_url,
+                        "search_engine": engine,
+                        "search_query": subject_query,
+                        "search_url": target_url,
+                    },
+                )
+            )
+            continue
+        if action.kind == "browser_retry_subject_result":
+            cards = _cached_cards(current_browser_state)
+            if not cards:
+                residuals.append("browser_cards_missing")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message="There are no cached results to recover from yet.",
+                    )
+                )
+                continue
+            note_payload = _decode_action_note(action.note)
+            goal = str(note_payload.get("goal") or "").strip()
+            if not goal:
+                goal = _research_subject_query_from_browser_state(current_browser_state) or current_browser_state.search_query or plan.prompt
+            selected = _select_better_cached_result(current_browser_state, goal)
+            target_url = str(selected.get("url") or "").strip()
+            if not target_url:
+                residuals.append("browser_retry_result_unavailable")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message="Could not find a stronger cached alternative result to open.",
+                    )
+                )
+                continue
+            command = _open_in_browser(target_url, platform_name=platform_key)
+            if not command:
+                residuals.append(f"open_command_unavailable:{platform_key}")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message=f"No opener command is configured for platform {platform_key}.",
+                    )
+                )
+                continue
+            subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            current_browser_state = _browser_state_for_url(
+                target_url,
+                search_engine=current_browser_state.search_engine,
+                search_query=current_browser_state.search_query,
+                result_urls=[str(card.get("url") or "").strip() for card in cards if str(card.get("url") or "").strip()],
+                result_cards=cards,
+                subject_title=str(selected.get("title") or "").strip(),
+                subject_url=str(selected.get("url") or target_url).strip(),
+                subject_summary=str(selected.get("summary") or "").strip(),
+                research_subject_title=current_browser_state.research_subject_title,
+                research_subject_url=current_browser_state.research_subject_url,
+                research_subject_summary=current_browser_state.research_subject_summary,
+                evidence_items=current_browser_state.evidence_items,
+            )
+            records.append(
+                TerminalExecutionRecord(
+                    kind=action.kind,
+                    target=action.target,
+                    status="ok",
+                    message=f"Recovered to a stronger result: {str(selected.get('title') or target_url).strip()}",
+                    command=command,
+                    details={
+                        "goal": goal,
+                        "selected_index": int(selected.get("index") or 0),
+                        "selected_title": str(selected.get("title") or "").strip(),
+                        "selected_url": target_url,
+                        "ranking": list(selected.get("ranking") or []),
+                    },
+                )
+            )
+            continue
+        if action.kind == "browser_synthesize_evidence":
+            if not current_browser_state.evidence_items:
+                residuals.append("browser_evidence_missing")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message="There is no accumulated browser evidence to synthesize yet.",
+                    )
+                )
+                continue
+            note_payload = _decode_action_note(action.note)
+            goal = str(note_payload.get("goal") or plan.prompt or "").strip()
+            synthesis = _synthesize_browser_evidence(
+                current_browser_state.evidence_items,
+                goal,
+                _research_subject_from_browser_state(current_browser_state),
+            )
+            if not synthesis:
+                residuals.append("browser_evidence_missing")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message="Memla could not resolve a best source from the current evidence set.",
+                    )
+                )
+                continue
+            records.append(
+                TerminalExecutionRecord(
+                    kind=action.kind,
+                    target=action.target,
+                    status="ok",
+                    message=(
+                        f"Best source for \"{goal}\": {str(synthesis.get('best_source_title') or 'unknown').strip()}"
+                        if goal
+                        else f"Best source: {str(synthesis.get('best_source_title') or 'unknown').strip()}"
+                    ),
+                    details=synthesis,
+                )
+            )
+            current_browser_state = _browser_state_copy(
+                current_browser_state,
+                subject_title=str(synthesis.get("best_source_title") or current_browser_state.subject_title).strip(),
+                subject_url=str(synthesis.get("best_source_url") or current_browser_state.subject_url).strip(),
+                subject_summary=str(synthesis.get("synthesis") or current_browser_state.subject_summary).strip(),
             )
             continue
         if action.kind == "list_directory":
@@ -1484,6 +4805,42 @@ def execute_terminal_plan(
             continue
         if action.kind == "browser_back":
             if platform_key != "linux":
+                if platform_key == "win32":
+                    command = _windows_browser_sendkeys_command(keys=["%{LEFT}"], browser_app=current_browser_state.browser_app)
+                    if not command:
+                        residuals.append(f"browser_back_unavailable:{platform_key}")
+                        records.append(
+                            TerminalExecutionRecord(
+                                kind=action.kind,
+                                target=action.target,
+                                status="failed",
+                                message="Browser back is unavailable on this platform.",
+                            )
+                        )
+                        continue
+                    exit_code = _run_command(command, wait=True)
+                    if exit_code not in (None, 0):
+                        residuals.append("browser_focus_unavailable")
+                        records.append(
+                            TerminalExecutionRecord(
+                                kind=action.kind,
+                                target=action.target,
+                                status="failed",
+                                message="Could not activate a browser window safely, so Memla skipped the back shortcut.",
+                                command=command,
+                            )
+                        )
+                        continue
+                    records.append(
+                        TerminalExecutionRecord(
+                            kind=action.kind,
+                            target=action.target,
+                            status="ok",
+                            message="Sent browser back shortcut.",
+                            command=command,
+                        )
+                    )
+                    continue
                 residuals.append(f"browser_back_unsupported:{platform_key}")
                 records.append(
                     TerminalExecutionRecord(
@@ -1507,7 +4864,7 @@ def execute_terminal_plan(
                 )
                 continue
             command = [xdotool, "key", "alt+Left"]
-            subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            _run_command(command)
             records.append(
                 TerminalExecutionRecord(
                     kind=action.kind,
@@ -1515,6 +4872,200 @@ def execute_terminal_plan(
                     status="ok",
                     message="Sent browser back shortcut.",
                     command=command,
+                )
+            )
+            continue
+        if action.kind == "browser_forward":
+            command = _browser_forward_command(platform_name=platform_key, browser_app=current_browser_state.browser_app)
+            if not command:
+                residuals.append(f"browser_forward_unavailable:{platform_key}")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message="Browser forward is unavailable on this platform.",
+                    )
+                )
+                continue
+            exit_code = _run_command(command, wait=platform_key == "win32")
+            if platform_key == "win32" and exit_code not in (None, 0):
+                residuals.append("browser_focus_unavailable")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message="Could not activate a browser window safely, so Memla skipped the forward shortcut.",
+                        command=command,
+                    )
+                )
+                continue
+            current_browser_state = BrowserSessionState()
+            records.append(
+                TerminalExecutionRecord(
+                    kind=action.kind,
+                    target=action.target,
+                    status="ok",
+                    message="Sent browser forward shortcut.",
+                    command=command,
+                )
+            )
+            continue
+        if action.kind == "browser_scroll":
+            command = _browser_scroll_command(
+                action.resolved_target or action.target,
+                platform_name=platform_key,
+                browser_app=current_browser_state.browser_app,
+            )
+            if not command:
+                residuals.append(f"browser_scroll_unavailable:{platform_key}")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message="Browser scroll is unavailable on this platform.",
+                    )
+                )
+                continue
+            exit_code = _run_command(command, wait=platform_key == "win32")
+            if platform_key == "win32" and exit_code not in (None, 0):
+                residuals.append("browser_focus_unavailable")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message="Could not activate a browser window safely, so Memla skipped the scroll shortcut.",
+                        command=command,
+                    )
+                )
+                continue
+            records.append(
+                TerminalExecutionRecord(
+                    kind=action.kind,
+                    target=action.target,
+                    status="ok",
+                    message=f"Scrolled browser {action.resolved_target or action.target}.",
+                    command=command,
+                )
+            )
+            continue
+        if action.kind == "browser_type_text":
+            command = _browser_type_text_command(
+                action.resolved_target or action.target,
+                platform_name=platform_key,
+                browser_app=current_browser_state.browser_app,
+            )
+            if not command:
+                residuals.append(f"browser_type_text_unavailable:{platform_key}")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message="Typing into the active browser is unavailable on this platform.",
+                    )
+                )
+                continue
+            exit_code = _run_command(command, wait=platform_key == "win32")
+            if platform_key == "win32" and exit_code not in (None, 0):
+                residuals.append("browser_focus_unavailable")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message="Could not activate a browser window safely, so Memla skipped typing instead of pasting into the terminal.",
+                        command=command,
+                    )
+                )
+                continue
+            records.append(
+                TerminalExecutionRecord(
+                    kind=action.kind,
+                    target=action.target,
+                    status="ok",
+                    message=f"Typed text into the active browser: {action.resolved_target or action.target}",
+                    command=command,
+                )
+            )
+            continue
+        if action.kind == "browser_submit":
+            command = _browser_submit_command(platform_name=platform_key, browser_app=current_browser_state.browser_app)
+            if not command:
+                residuals.append(f"browser_submit_unavailable:{platform_key}")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message="Submitting the active browser form is unavailable on this platform.",
+                    )
+                )
+                continue
+            exit_code = _run_command(command, wait=platform_key == "win32")
+            if platform_key == "win32" and exit_code not in (None, 0):
+                residuals.append("browser_focus_unavailable")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message="Could not activate a browser window safely, so Memla skipped the submit shortcut.",
+                        command=command,
+                    )
+                )
+                continue
+            records.append(
+                TerminalExecutionRecord(
+                    kind=action.kind,
+                    target=action.target,
+                    status="ok",
+                    message="Sent browser submit/enter shortcut.",
+                    command=command,
+                )
+            )
+            continue
+        if action.kind == "browser_wait":
+            try:
+                seconds = max(float(action.resolved_target or action.target), 0.0)
+            except ValueError:
+                seconds = 1.0
+            time.sleep(min(seconds, 10.0))
+            records.append(
+                TerminalExecutionRecord(
+                    kind=action.kind,
+                    target=action.target,
+                    status="ok",
+                    message=f"Waited {round(min(seconds, 10.0), 2)} seconds.",
+                )
+            )
+            continue
+        if action.kind == "browser_screenshot":
+            screenshot_path = terminal_browser_state_path().parent / f"browser_screenshot_{int(time.time())}.png"
+            command = _browser_screenshot_command(screenshot_path, platform_name=platform_key)
+            if not command:
+                residuals.append(f"browser_screenshot_unavailable:{platform_key}")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message="Screenshot capture is unavailable on this platform.",
+                    )
+                )
+                continue
+            subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True).wait(timeout=8)
+            records.append(
+                TerminalExecutionRecord(
+                    kind=action.kind,
+                    target=action.target,
+                    status="ok",
+                    message=f"Captured a screenshot to {screenshot_path}.",
+                    command=command,
+                    details={"path": str(screenshot_path)},
                 )
             )
             continue
@@ -1557,6 +5108,23 @@ def execute_terminal_plan(
             save_browser_session_state(current_browser_state, state_path)
         except OSError:
             residuals.append("browser_state_persist_failed")
+    if ok:
+        try:
+            remember_language_compile(
+                prompt=plan.prompt,
+                browser_state=initial_browser_state,
+                plan=plan,
+            )
+        except OSError:
+            residuals.append("language_memory_persist_failed")
+        try:
+            _promote_language_rules(
+                prompt=plan.prompt,
+                browser_state=initial_browser_state,
+                plan=plan,
+            )
+        except OSError:
+            residuals.append("language_rule_persist_failed")
     return TerminalExecutionResult(
         prompt=plan.prompt,
         plan_source=plan.source,
@@ -1570,11 +5138,39 @@ def execute_terminal_plan(
 def _terminal_available_transmutations(browser_state: BrowserSessionState) -> list[str]:
     actions: list[str] = []
     if browser_state.current_url:
-        actions.append("browser_read_page")
+        actions.extend(
+            [
+                "browser_read_page",
+                "browser_extract_page",
+                "browser_new_tab",
+                "browser_close_tab",
+                "browser_switch_tab",
+                "browser_back",
+                "browser_forward",
+                "browser_scroll",
+                "browser_type_text",
+                "browser_submit",
+                "browser_wait",
+                "browser_screenshot",
+            ]
+        )
+        if _cached_cards(browser_state):
+            actions.append("browser_retry_subject_result")
+        if browser_state.evidence_items:
+            actions.append("browser_synthesize_evidence")
     if browser_state.page_kind == "search_results":
-        actions.extend(["open_search_result", "browser_back"])
-    elif browser_state.current_url:
-        actions.append("browser_back")
+        actions.extend(
+            [
+                "open_search_result",
+                "browser_click_index",
+                "browser_click_text",
+                "browser_extract_cards",
+                "browser_rank_cards",
+                "browser_compare_cards",
+            ]
+        )
+    if browser_state.subject_title or browser_state.research_subject_title or browser_state.page_kind == "repo_page":
+        actions.append("browser_search_subject")
     if browser_state.page_kind == "video_page":
         actions.extend(["browser_media_pause", "browser_media_play"])
     return actions
@@ -1589,6 +5185,12 @@ def _terminal_constraints_snapshot(prompt: str, browser_state: BrowserSessionSta
         "search_engine": browser_state.search_engine,
         "search_query": browser_state.search_query,
         "cached_result_count": len(browser_state.result_urls or []),
+        "cached_card_count": len(browser_state.result_cards or []),
+        "subject_title": browser_state.subject_title,
+        "subject_url": browser_state.subject_url,
+        "research_subject_title": browser_state.research_subject_title,
+        "research_subject_url": browser_state.research_subject_url,
+        "evidence_count": len(browser_state.evidence_items or []),
         "available_transmutations": _terminal_available_transmutations(browser_state),
     }
 
@@ -1601,9 +5203,11 @@ def _plan_label(plan: TerminalPlan) -> str:
     if not plan.actions:
         return "No actionable transmutation"
     if len(plan.actions) > 1:
-        first = _plan_label(TerminalPlan(prompt=plan.prompt, source=plan.source, actions=[plan.actions[0]]))
-        second = _plan_label(TerminalPlan(prompt=plan.prompt, source=plan.source, actions=[plan.actions[1]]))
-        return f"{first} + {second}"
+        labels = [
+            _plan_label(TerminalPlan(prompt=plan.prompt, source=plan.source, actions=[action]))
+            for action in plan.actions[:4]
+        ]
+        return " + ".join(labels)
     action = plan.actions[0]
     target = str(action.resolved_target or action.target).strip()
     if action.kind == "launch_app":
@@ -1615,12 +5219,57 @@ def _plan_label(plan: TerminalPlan) -> str:
         if engine and query:
             return f"Open {engine} search for \"{query}\""
         return f"Open {target}"
+    if action.kind == "browser_new_tab":
+        return "Open a new tab"
+    if action.kind == "browser_close_tab":
+        return "Close the current tab"
+    if action.kind == "browser_switch_tab":
+        target_text = target or "next"
+        return f"Switch to {target_text} tab"
     if action.kind == "open_search_result":
         return f"Open search result #{target or '1'}"
+    if action.kind == "browser_click_index":
+        return f"Click card #{target or '1'}"
+    if action.kind == "browser_click_text":
+        return f"Click \"{target}\""
     if action.kind == "browser_read_page":
         return "Read the current page"
+    if action.kind == "browser_extract_page":
+        return "Extract the current page"
+    if action.kind == "browser_extract_cards":
+        return "Extract visible result cards"
+    if action.kind == "browser_rank_cards":
+        note = _decode_action_note(action.note)
+        goal = str(note.get("goal") or "").strip()
+        return f"Rank current cards for \"{goal}\"" if goal else "Rank current cards"
+    if action.kind == "browser_compare_cards":
+        note = _decode_action_note(action.note)
+        goal = str(note.get("goal") or "").strip()
+        return f"Compare selected cards for \"{goal}\"" if goal else "Compare selected cards"
+    if action.kind == "browser_search_subject":
+        engine = target or str(_decode_action_note(action.note).get("engine") or "google").strip()
+        return f"Search {engine} for the active subject"
+    if action.kind == "browser_retry_subject_result":
+        return "Recover to a better result"
+    if action.kind == "browser_synthesize_evidence":
+        note = _decode_action_note(action.note)
+        goal = str(note.get("goal") or "").strip()
+        return f"Synthesize sources for \"{goal}\"" if goal else "Synthesize the current evidence"
     if action.kind == "browser_back":
         return "Go back"
+    if action.kind == "browser_forward":
+        return "Go forward"
+    if action.kind == "browser_scroll":
+        return f"Scroll {target or 'down'}"
+    if action.kind == "browser_type_text":
+        preview = target if len(target) <= 24 else target[:21] + "..."
+        return f"Type \"{preview}\""
+    if action.kind == "browser_submit":
+        return "Submit the current form"
+    if action.kind == "browser_wait":
+        return f"Wait {target or '1'} seconds"
+    if action.kind == "browser_screenshot":
+        return "Take a screenshot"
     if action.kind == "browser_media_pause":
         return "Pause media"
     if action.kind == "browser_media_play":
@@ -1669,8 +5318,104 @@ def _candidate_preview_from_plan(plan: TerminalPlan, browser_state: BrowserSessi
     if not plan.actions:
         return "", "", []
     if len(plan.actions) > 1:
-        labels = [_plan_label(TerminalPlan(prompt=plan.prompt, source=plan.source, actions=[action])) for action in plan.actions]
-        return ", then ".join(labels[:2]), "Run the first two transmutations in sequence.", []
+        first, second = plan.actions[0], plan.actions[1]
+        third = plan.actions[2] if len(plan.actions) > 2 else None
+        fourth = plan.actions[3] if len(plan.actions) > 3 else None
+        if first.kind == "browser_new_tab" and second.kind == "open_url":
+            note = _decode_action_note(second.note)
+            engine = str(note.get("search_engine") or "").strip()
+            query = str(note.get("search_query") or "").strip()
+            if engine and query:
+                return (
+                    f"Active browser -> {engine.title()} search for \"{query}\"",
+                    "Open a fresh tab, then navigate it to the requested search results.",
+                    [],
+                )
+        if (
+            first.kind in {"browser_rank_cards", "browser_compare_cards"}
+            and second.kind == "browser_search_subject"
+            and third
+            and third.kind == "open_search_result"
+            and fourth
+            and fourth.kind == "browser_read_page"
+        ):
+            note = _decode_action_note(second.note)
+            engine = str(note.get("engine") or second.resolved_target or second.target or "google").strip()
+            index = str(third.resolved_target or third.target or "1").strip()
+            return (
+                f"Best subject -> {engine.title()} -> result #{index} -> read",
+                f"Judge the strongest current subject, search {engine.title()} for it, open result #{index}, then read the resulting page.",
+                ["subject_title", "search_engine", "search_query", "title", "summary", "url"],
+            )
+        if first.kind == "browser_search_subject" and second.kind == "open_search_result" and third and third.kind == "browser_read_page":
+            note = _decode_action_note(first.note)
+            engine = str(note.get("engine") or first.resolved_target or first.target or "google").strip()
+            index = str(second.resolved_target or second.target or "1").strip()
+            subject = _subject_from_browser_state(browser_state)
+            subject_title = str(subject.get("title") or browser_state.current_url or "active subject").strip()
+            return (
+                f"{subject_title} -> {engine.title()} -> result #{index} -> read",
+                f"Search {engine.title()} for the active subject, open result #{index}, then read the resulting page.",
+                ["subject_title", "search_engine", "search_query", "title", "summary", "url"],
+            )
+        if (
+            first.kind == "browser_search_subject"
+            and second.kind == "open_search_result"
+            and third
+            and third.kind == "browser_read_page"
+            and fourth
+            and fourth.kind == "browser_retry_subject_result"
+        ):
+            note = _decode_action_note(first.note)
+            engine = str(note.get("engine") or first.resolved_target or first.target or "google").strip()
+            subject = _research_subject_from_browser_state(browser_state) or _subject_from_browser_state(browser_state)
+            subject_title = str(subject.get("title") or browser_state.current_url or "active subject").strip()
+            return (
+                f"{subject_title} -> {engine.title()} -> recover",
+                f"Search {engine.title()} for the active subject, inspect the first result, then reopen a stronger cached result if needed.",
+                ["research_subject_title", "search_engine", "search_query", "subject_title", "current_url"],
+            )
+        if any(action.kind == "browser_synthesize_evidence" for action in plan.actions):
+            synth_action = next(action for action in plan.actions if action.kind == "browser_synthesize_evidence")
+            note = _decode_action_note(synth_action.note)
+            goal = str(note.get("goal") or plan.prompt or "").strip()
+            return (
+                "Cross-source evidence -> answer",
+                f"Carry the subject across multiple sources, then choose the best source for \"{goal}\" and synthesize a grounded answer.",
+                ["best_source_title", "best_source_kind", "source_count", "synthesis"],
+            )
+        if first.kind in {"browser_rank_cards", "browser_compare_cards"} and second.kind == "browser_search_subject" and third and third.kind == "open_search_result":
+            note = _decode_action_note(second.note)
+            engine = str(note.get("engine") or second.resolved_target or second.target or "google").strip()
+            index = str(third.resolved_target or third.target or "1").strip()
+            return (
+                f"Best subject -> {engine.title()} -> result #{index}",
+                f"Judge the strongest current subject, search {engine.title()} for it, then open result #{index}.",
+                ["subject_title", "search_engine", "search_query", "current_url"],
+            )
+        if first.kind == "browser_search_subject" and second.kind == "open_search_result":
+            note = _decode_action_note(first.note)
+            engine = str(note.get("engine") or first.resolved_target or first.target or "google").strip()
+            index = str(second.resolved_target or second.target or "1").strip()
+            subject = _subject_from_browser_state(browser_state)
+            subject_title = str(subject.get("title") or browser_state.current_url or "active subject").strip()
+            return (
+                f"{subject_title} -> {engine.title()} -> result #{index}",
+                f"Search {engine.title()} for the active subject, then open result #{index}.",
+                ["subject_title", "search_engine", "search_query", "current_url"],
+            )
+        if first.kind in {"browser_rank_cards", "browser_compare_cards"} and second.kind == "browser_search_subject":
+            note = _decode_action_note(second.note)
+            engine = str(note.get("engine") or second.resolved_target or second.target or "google").strip()
+            subject = _subject_from_browser_state(browser_state)
+            subject_title = str(subject.get("title") or "best match").strip()
+            return (
+                f"{subject_title} -> {engine.title()}",
+                f"Judge the strongest current subject, then search {engine.title()} for related coverage.",
+                ["subject_title", "search_engine", "search_query"],
+            )
+        labels = [_plan_label(TerminalPlan(prompt=plan.prompt, source=plan.source, actions=[action])) for action in plan.actions[:4]]
+        return ", then ".join(labels), "Run the proposed transmutations in sequence.", []
     action = plan.actions[0]
     target = str(action.resolved_target or action.target).strip()
     if action.kind == "open_url":
@@ -1684,6 +5429,12 @@ def _candidate_preview_from_plan(plan: TerminalPlan, browser_state: BrowserSessi
                 [],
             )
         return target, "Open the target URL in the browser.", []
+    if action.kind == "browser_new_tab":
+        return "Active browser", "Open a fresh blank tab in the current browser.", []
+    if action.kind == "browser_close_tab":
+        return browser_state.current_url or "Active browser", "Close the active browser tab.", []
+    if action.kind == "browser_switch_tab":
+        return "Active browser", f"Switch the active browser tab to {target or 'next'}.", []
     if action.kind == "open_search_result":
         try:
             index = max(int(target or "1"), 1)
@@ -1696,6 +5447,18 @@ def _candidate_preview_from_plan(plan: TerminalPlan, browser_state: BrowserSessi
         if search_engine:
             outcome = f"Open result #{index} from the current {search_engine} search."
         return target_preview, outcome, []
+    if action.kind == "browser_click_index":
+        try:
+            index = max(int(target or "1"), 1)
+        except ValueError:
+            index = 1
+        card = _resolve_card_by_index(browser_state, index)
+        target_preview = str(card.get("title") or card.get("url") or f"Card #{index}").strip()
+        return target_preview, f"Open card #{index} from the cached browser results.", []
+    if action.kind == "browser_click_text":
+        card = _resolve_card_by_text(browser_state, target)
+        target_preview = str(card.get("title") or target or "matching card").strip()
+        return target_preview, f"Open the visible card that matches \"{target}\".", []
     if action.kind == "browser_read_page":
         page_kind = str(browser_state.page_kind or "web_page").strip()
         current_target = browser_state.current_url or "current page"
@@ -1707,8 +5470,82 @@ def _candidate_preview_from_plan(plan: TerminalPlan, browser_state: BrowserSessi
         else:
             outcome = "Read the current page and build a concise structured summary."
         return target_preview, outcome, _read_page_expected_fields(browser_state)
+    if action.kind == "browser_extract_page":
+        current_target = browser_state.current_url or "current page"
+        target_preview = _preview_label_for_url(current_target) or current_target
+        return target_preview, "Extract structured fields from the current browser page.", _read_page_expected_fields(browser_state)
+    if action.kind == "browser_extract_cards":
+        cards = _cached_cards(browser_state)
+        return (
+            f"{len(cards)} cached result cards" if cards else "current search results",
+            "Extract the visible result cards from the current search page.",
+            ["cards[index]", "cards.title", "cards.url", "cards.summary"],
+        )
+    if action.kind == "browser_rank_cards":
+        note = _decode_action_note(action.note)
+        goal = str(note.get("goal") or plan.prompt or "").strip()
+        cards = _cached_cards(browser_state)
+        return (
+            f"{len(cards)} cached result cards" if cards else "current search results",
+            f"Rank the current result cards against \"{goal}\"." if goal else "Rank the current result cards against the current goal.",
+            ["goal", "best_title", "best_url", "best_score", "ranking"],
+        )
+    if action.kind == "browser_compare_cards":
+        note = _decode_action_note(action.note)
+        goal = str(note.get("goal") or plan.prompt or "").strip()
+        indexes = [int(item) for item in list(note.get("indexes") or []) if str(item).isdigit()]
+        if not indexes:
+            indexes = [int(part) for part in re.findall(r"\d+", target)][:2]
+        label = " vs ".join(f"card #{index}" for index in indexes[:2]) if indexes else "selected cards"
+        return (
+            label,
+            f"Compare the selected cards against \"{goal}\" and return the stronger match." if goal else "Compare the selected cards and return the stronger match.",
+            ["goal", "winner_title", "winner_score", "comparison"],
+        )
+    if action.kind == "browser_search_subject":
+        note = _decode_action_note(action.note)
+        engine = str(note.get("engine") or target or "google").strip()
+        subject = _research_subject_from_browser_state(browser_state)
+        subject_title = str(subject.get("title") or browser_state.current_url or "active subject").strip()
+        return (
+            f"{subject_title} -> {engine.title()}",
+            f"Search {engine.title()} for content about the active subject.",
+            ["subject_title", "subject_url", "search_engine", "search_query"],
+        )
+    if action.kind == "browser_retry_subject_result":
+        subject = _research_subject_from_browser_state(browser_state) or _subject_from_browser_state(browser_state)
+        subject_title = str(subject.get("title") or browser_state.current_url or "active subject").strip()
+        return (
+            subject_title,
+            "Re-rank the cached follow-on results and open a stronger alternative than the current page.",
+            ["research_subject_title", "selected_title", "selected_url", "ranking"],
+        )
+    if action.kind == "browser_synthesize_evidence":
+        note = _decode_action_note(action.note)
+        goal = str(note.get("goal") or plan.prompt or "").strip()
+        subject = _research_subject_from_browser_state(browser_state) or _subject_from_browser_state(browser_state)
+        subject_title = str(subject.get("title") or browser_state.current_url or "active subject").strip()
+        evidence_count = len(browser_state.evidence_items or [])
+        return (
+            f"{evidence_count} evidence sources for {subject_title}",
+            f"Choose the strongest current source for \"{goal}\" and synthesize a grounded answer." if goal else "Choose the strongest current source and synthesize a grounded answer.",
+            ["best_source_title", "best_source_kind", "source_count", "synthesis"],
+        )
     if action.kind == "browser_back":
         return browser_state.current_url or "browser history", "Return to the previous browser page.", []
+    if action.kind == "browser_forward":
+        return browser_state.current_url or "browser history", "Move forward in browser history.", []
+    if action.kind == "browser_scroll":
+        return browser_state.current_url or "current page", f"Scroll the current page {target or 'down'}.", []
+    if action.kind == "browser_type_text":
+        preview = target if len(target) <= 40 else target[:37] + "..."
+        return "active input", f"Type \"{preview}\" into the active browser field.", []
+    if action.kind == "browser_submit":
+        return "active form", "Submit the active browser form or press enter.", []
+    if action.kind == "browser_wait":
+        return "browser runtime", f"Pause briefly for {target or '1'} seconds before the next action.", []
+    if action.kind == "browser_screenshot":
+        return browser_state.current_url or "desktop", "Capture a screenshot of the current desktop/browser view.", ["path"]
     if action.kind == "browser_media_pause":
         return browser_state.current_url or "current media page", "Pause the current browser media playback.", []
     if action.kind == "browser_media_play":
@@ -1781,7 +5618,146 @@ def _contextual_terminal_candidates(browser_state: BrowserSessionState, prompt: 
         )
         if second is not None:
             candidates.append(second)
+        extract_cards = _candidate_from_plan(
+            candidate_id="extract_cards",
+            plan=TerminalPlan(
+                prompt=prompt_text,
+                source="state_candidate",
+                actions=[TerminalAction(kind="browser_extract_cards", target="current_cards", resolved_target="current_cards")],
+            ),
+            rationale="Extracting the current cards gives Memla structured results to compare, click by text, or rank.",
+            origin="browser_state",
+            browser_state=browser_state,
+        )
+        if extract_cards is not None:
+            candidates.append(extract_cards)
+        rank_cards = _candidate_from_plan(
+            candidate_id="rank_cards",
+            plan=TerminalPlan(
+                prompt=prompt_text,
+                source="state_candidate",
+                actions=[
+                    TerminalAction(
+                        kind="browser_rank_cards",
+                        target="current_cards",
+                        resolved_target="current_cards",
+                        note=_encode_action_note({"goal": _goal_text_from_prompt(prompt_text) or prompt_text}),
+                    )
+                ],
+            ),
+            rationale="Ranking the current cards turns extracted browser state into a best-match judgment for the active goal.",
+            origin="browser_state",
+            browser_state=browser_state,
+        )
+        if rank_cards is not None:
+            candidates.append(rank_cards)
+        compare_cards = _candidate_from_plan(
+            candidate_id="compare_cards",
+            plan=TerminalPlan(
+                prompt=prompt_text,
+                source="state_candidate",
+                actions=[
+                    TerminalAction(
+                        kind="browser_compare_cards",
+                        target="1,2",
+                        resolved_target="1,2",
+                        note=_encode_action_note({"goal": _goal_text_from_prompt(prompt_text) or prompt_text, "indexes": [1, 2]}),
+                    )
+                ],
+            ),
+            rationale="Comparing the strongest visible candidates is a useful next move when you want Memla to judge fit rather than navigate immediately.",
+            origin="browser_state",
+            browser_state=browser_state,
+        )
+        if compare_cards is not None:
+            candidates.append(compare_cards)
     if browser_state.current_url:
+        new_tab = _candidate_from_plan(
+            candidate_id="new_tab",
+            plan=TerminalPlan(
+                prompt=prompt_text,
+                source="state_candidate",
+                actions=[TerminalAction(kind="browser_new_tab", target="new_tab", resolved_target="new_tab")],
+            ),
+            rationale="Opening a fresh tab is a useful branch when you want to keep the current page and start a new path.",
+            origin="browser_state",
+            browser_state=browser_state,
+        )
+        if new_tab is not None:
+            candidates.append(new_tab)
+        close_tab = _candidate_from_plan(
+            candidate_id="close_tab",
+            plan=TerminalPlan(
+                prompt=prompt_text,
+                source="state_candidate",
+                actions=[TerminalAction(kind="browser_close_tab", target="current_tab", resolved_target="current_tab")],
+            ),
+            rationale="Closing the current tab is a useful cleanup transmutation when you are done with this branch.",
+            origin="browser_state",
+            browser_state=browser_state,
+        )
+        if close_tab is not None:
+            candidates.append(close_tab)
+        search_subject_youtube = _candidate_from_plan(
+            candidate_id="search_subject_youtube",
+            plan=TerminalPlan(
+                prompt=prompt_text,
+                source="state_candidate",
+                actions=[
+                    TerminalAction(
+                        kind="browser_search_subject",
+                        target="youtube",
+                        resolved_target="youtube",
+                        note=_encode_action_note({"engine": "youtube"}),
+                    )
+                ],
+            ),
+            rationale="Searching YouTube for the active subject is a strong next transmutation when you want a related video or walkthrough.",
+            origin="browser_state",
+            browser_state=browser_state,
+        )
+        if search_subject_youtube is not None and (_subject_from_browser_state(browser_state) or browser_state.page_kind == "repo_page"):
+            candidates.append(search_subject_youtube)
+        retry_subject_result = _candidate_from_plan(
+            candidate_id="retry_subject_result",
+            plan=TerminalPlan(
+                prompt=prompt_text,
+                source="state_candidate",
+                actions=[
+                    TerminalAction(
+                        kind="browser_retry_subject_result",
+                        target="better_result",
+                        resolved_target="better_result",
+                        note=_encode_action_note({"goal": _research_subject_query_from_browser_state(browser_state) or prompt_text}),
+                    )
+                ],
+            ),
+            rationale="If the current opened result is weak, Memla can recover by reopening a stronger cached result for the same subject.",
+            origin="browser_state",
+            browser_state=browser_state,
+        )
+        if retry_subject_result is not None and _cached_cards(browser_state):
+            candidates.append(retry_subject_result)
+        synthesize_evidence = _candidate_from_plan(
+            candidate_id="synthesize_evidence",
+            plan=TerminalPlan(
+                prompt=prompt_text,
+                source="state_candidate",
+                actions=[
+                    TerminalAction(
+                        kind="browser_synthesize_evidence",
+                        target="current_evidence",
+                        resolved_target="current_evidence",
+                        note=_encode_action_note({"goal": _goal_text_from_prompt(prompt_text) or prompt_text}),
+                    )
+                ],
+            ),
+            rationale="Once Memla has evidence from multiple sources, it can choose the strongest one and answer from that bounded evidence set.",
+            origin="browser_state",
+            browser_state=browser_state,
+        )
+        if synthesize_evidence is not None and browser_state.evidence_items:
+            candidates.append(synthesize_evidence)
         read_page = _candidate_from_plan(
             candidate_id="read_page",
             plan=TerminalPlan(
@@ -1829,9 +5805,42 @@ def _plan_starts_new_terminal_branch(plan: TerminalPlan) -> bool:
     if not plan.actions:
         return False
     return any(
-        action.kind in {"open_url", "launch_app", "open_path", "list_directory", "system_info"}
+        action.kind
+        in {
+            "open_url",
+            "browser_new_tab",
+            "browser_close_tab",
+            "browser_switch_tab",
+            "browser_click_index",
+            "browser_click_text",
+            "browser_extract_page",
+            "browser_extract_cards",
+            "browser_rank_cards",
+            "browser_compare_cards",
+            "browser_search_subject",
+            "browser_retry_subject_result",
+            "browser_synthesize_evidence",
+            "browser_forward",
+            "browser_scroll",
+            "browser_type_text",
+            "browser_submit",
+            "browser_wait",
+            "browser_screenshot",
+            "launch_app",
+            "open_path",
+            "list_directory",
+            "system_info",
+        }
         for action in plan.actions
     )
+
+
+def _should_offer_contextual_candidates(prompt: str, prompt_plan: TerminalPlan, browser_state: BrowserSessionState) -> bool:
+    if _plan_starts_new_terminal_branch(prompt_plan):
+        return False
+    if prompt_plan.actions:
+        return True
+    return bool(_follow_up_browser_actions(prompt, browser_state))
 
 
 def build_terminal_step_report(
@@ -1870,7 +5879,9 @@ def build_terminal_step_report(
             seen.add(signature)
             candidates.append(prompt_candidate)
 
-    if not _plan_starts_new_terminal_branch(prompt_plan):
+    if not prompt_plan.actions and prompt_plan.clarification:
+        constraints["planner_clarification"] = prompt_plan.clarification
+    if _should_offer_contextual_candidates(prompt, prompt_plan, current_state):
         for candidate in _contextual_terminal_candidates(current_state, prompt):
             signature = _plan_signature(candidate.plan)
             if not signature or signature in seen:
@@ -2227,7 +6238,30 @@ def build_llm_client(
         return UniversalLLMClient.from_env()
     resolved_provider = str(provider or os.environ.get("LLM_PROVIDER", "ollama")).strip()
     normalized_provider = UniversalLLMClient._normalize_provider(resolved_provider)
-    resolved_base_url = str(base_url or os.environ.get("LLM_BASE_URL", "http://127.0.0.1:11434")).strip()
+    resolved_base_url = str(base_url or "").strip()
+    if not resolved_base_url and normalized_provider == "ollama":
+        candidates: list[str] = []
+        for raw in (
+            os.environ.get("OLLAMA_URL", ""),
+            os.environ.get("LLM_BASE_URL", ""),
+            "http://127.0.0.1:11434",
+            "http://127.0.0.1:11435",
+        ):
+            clean = str(raw or "").strip().rstrip("/")
+            if clean and clean not in candidates:
+                candidates.append(clean)
+        selected = ""
+        for candidate in candidates:
+            try:
+                req = urllib_request.Request(f"{candidate}/api/tags", headers={"Accept": "application/json"})
+                with urllib_request.urlopen(req, timeout=0.35):
+                    selected = candidate
+                    break
+            except Exception:
+                continue
+        resolved_base_url = selected or (candidates[0] if candidates else "http://127.0.0.1:11434")
+    if not resolved_base_url:
+        resolved_base_url = str(os.environ.get("LLM_BASE_URL", "http://127.0.0.1:11434")).strip()
     resolved_api_key = api_key or os.environ.get("LLM_API_KEY")
     if normalized_provider == "github_models" and not resolved_api_key:
         resolved_api_key = os.environ.get("GITHUB_MODELS_TOKEN") or os.environ.get("GITHUB_TOKEN")
