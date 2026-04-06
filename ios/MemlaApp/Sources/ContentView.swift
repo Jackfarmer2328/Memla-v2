@@ -19,8 +19,11 @@ struct ContentView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     connectionCard
+                    missionControlCard
+                    chatCard
                     scoutCard
                     stateCard
+                    memoryCard
                     followupCard
                     activityCard
                 }
@@ -30,6 +33,7 @@ struct ContentView: View {
             .task {
                 await viewModel.refreshHealth()
                 await viewModel.refreshState()
+                await viewModel.refreshMemory()
             }
         }
     }
@@ -53,6 +57,7 @@ struct ContentView: View {
                     Task {
                         await viewModel.refreshHealth()
                         await viewModel.refreshState()
+                        await viewModel.refreshMemory()
                     }
                 }
             }
@@ -60,6 +65,67 @@ struct ContentView: View {
                 Text(viewModel.errorMessage)
                     .foregroundStyle(.red)
                     .font(.footnote)
+            }
+        }
+        .padding()
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var missionControlCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Mission Control")
+                .font(.headline)
+            Text("Tap once and Memla will scout repos, follow the winner to YouTube and Reddit, then bring back a final comparison.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Button(viewModel.isLoading ? "Running Mission..." : "Run Local LLM Demo") {
+                Task { await viewModel.runLocalLLMDemo() }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(viewModel.isLoading)
+            Text("Voice note: iPhone keyboard dictation already works in the prompt fields. Siri can use the existing \"Scout with Memla\" App Intent after install/Shortcuts validation.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding()
+        .background(
+            LinearGradient(
+                colors: [
+                    Color.blue.opacity(0.18),
+                    Color.teal.opacity(0.10),
+                    Color(.secondarySystemBackground),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ),
+            in: RoundedRectangle(cornerRadius: 20, style: .continuous)
+        )
+    }
+
+    private var chatCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Conversation")
+                    .font(.headline)
+                Spacer()
+                if !viewModel.chatItems.isEmpty {
+                    Button("Clear") {
+                        viewModel.clearChat()
+                    }
+                    .font(.caption)
+                }
+            }
+
+            if viewModel.chatItems.isEmpty {
+                Text("Run the demo or a scout and Memla will write the agent trace here.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(spacing: 10) {
+                    ForEach(viewModel.chatItems) { message in
+                        chatBubble(message)
+                    }
+                }
             }
         }
         .padding()
@@ -170,6 +236,58 @@ struct ContentView: View {
                 }
             } else {
                 Text("No browser state yet.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding()
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var memoryCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Memory")
+                        .font(.headline)
+                    Text("Governed operational memory")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Refresh") {
+                    Task { await viewModel.refreshMemory() }
+                }
+                .font(.caption)
+            }
+
+            if let memory = viewModel.memorySummary {
+                HStack(spacing: 10) {
+                    memoryMetric(title: "Episodic", value: "\(memory.episodicCount)")
+                    memoryMetric(title: "Semantic", value: "\(memory.semanticCount)")
+                    memoryMetric(title: "Rule", value: "\(memory.ruleCount)")
+                }
+                HStack(spacing: 10) {
+                    memoryMetric(title: "Active", value: "\(memory.activeCount)")
+                    memoryMetric(title: "Stale", value: "\(memory.staleCount)")
+                    memoryMetric(title: "Invalid", value: "\(memory.invalidCount)")
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Trust")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(String(format: "%.2f", memory.avgTrust))
+                            .font(.caption.weight(.semibold))
+                    }
+                    ProgressView(value: min(max(memory.avgTrust, 0.0), 1.0))
+                }
+                Text("Memla writes down successful structure, tests reuse, and promotes repeated wins into rules.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("No memory summary loaded yet. Refresh after a scout or follow-up to see the lifecycle state.")
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
         }
@@ -293,6 +411,52 @@ struct ContentView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             .background(Color(.tertiarySystemBackground), in: Capsule())
+    }
+
+    private func memoryMetric(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.headline)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func chatBubble(_ message: MemlaChatMessage) -> some View {
+        HStack(alignment: .top) {
+            if message.isUser {
+                Spacer(minLength: 42)
+            }
+            VStack(alignment: .leading, spacing: 5) {
+                HStack {
+                    Text(message.speaker)
+                        .font(.caption.weight(.semibold))
+                    Spacer(minLength: 8)
+                    Text(message.timestamp.formatted(date: .omitted, time: .shortened))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Text(message.title)
+                    .font(.subheadline.weight(.semibold))
+                if !message.detail.isEmpty {
+                    Text(message.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(12)
+            .background(
+                message.isUser ? Color.accentColor.opacity(0.14) : Color(.secondarySystemBackground),
+                in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+            )
+            if !message.isUser {
+                Spacer(minLength: 42)
+            }
+        }
     }
 }
 

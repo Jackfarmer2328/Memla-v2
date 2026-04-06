@@ -9,11 +9,13 @@ import time
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from .memory.ontology import adjudicate_memory_trace, summarize_memory_ontology
 from .natural_terminal import (
     BrowserSessionState,
     TerminalPlan,
     _action_signature,
     _append_browser_evidence,
+    _canonical_clauses_from_actions,
     _browser_state_for_url,
     _browser_state_copy,
     _canonical_expected_action,
@@ -21,6 +23,9 @@ from .natural_terminal import (
     _evidence_item_from_details,
     _evidence_item_from_subject,
     _fallback_cards_from_urls,
+    _intent_text,
+    _language_context_profile,
+    _language_prompt_tokens,
     _normalize_label,
     _normalize_url,
     _rank_cards_against_goal,
@@ -42,6 +47,7 @@ from .natural_terminal import (
     build_terminal_plan,
     remember_language_compile,
     BROWSER_STATE_ENV,
+    terminal_memory_ontology_path,
 )
 
 
@@ -1136,6 +1142,7 @@ def run_language_rule_benchmark(
             seed_prompt = str(case.seed_prompt or case.prompt).strip()
             warm_prompt = str(case.prompt or "").strip()
             rule_prompt = str(case.rule_prompt or warm_prompt).strip()
+            case_context_profile = _language_context_profile(case.browser_state)
             try:
                 raw_start = time.perf_counter()
                 raw_plan = build_raw_terminal_plan(
@@ -1281,9 +1288,317 @@ def run_language_rule_benchmark(
     }
 
 
+def run_memory_ontology_benchmark(
+    *,
+    cases_path: str,
+    raw_model: str,
+    memla_model: str,
+    raw_provider: str = "",
+    raw_base_url: str = "",
+    memla_provider: str = "",
+    memla_base_url: str = "",
+    temperature: float = 0.1,
+    case_ids: list[str] | None = None,
+    limit: int | None = None,
+    memory_root: str = "",
+) -> dict[str, Any]:
+    cases = load_browser_benchmark_cases(cases_path)
+    selected_ids = {str(item).strip() for item in list(case_ids or []) if str(item).strip()}
+    if selected_ids:
+        cases = [case for case in cases if case.case_id in selected_ids]
+    if limit is not None:
+        cases = cases[: max(int(limit), 0)]
+
+    raw_client = build_llm_client(provider=raw_provider or None, base_url=raw_base_url or None)
+    memla_client = build_llm_client(provider=memla_provider or None, base_url=memla_base_url or None)
+
+    rows: list[dict[str, Any]] = []
+    failed_cases: list[dict[str, Any]] = []
+    raw_model_calls = 0
+    memla_cold_language_model_calls = 0
+    memla_warm_language_memory_hits = 0
+    memla_rule_hits = 0
+    cold_episodic_transitions = 0
+    warm_semantic_transitions = 0
+    rule_stage_transitions = 0
+
+    root_dir = Path(memory_root).resolve() if str(memory_root or "").strip() else Path(tempfile.mkdtemp(prefix="memla_memory_v1_"))
+    root_dir.mkdir(parents=True, exist_ok=True)
+    original_state_env = os.environ.get(BROWSER_STATE_ENV)
+
+    try:
+        for case in cases:
+            case_dir = (root_dir / case.case_id).resolve()
+            case_dir.mkdir(parents=True, exist_ok=True)
+            case_state_path = (case_dir / "browser_state.json").resolve()
+            if case_state_path.exists():
+                case_state_path.unlink()
+            case_memory_path = (case_dir / "terminal_language_memory.jsonl").resolve()
+            if case_memory_path.exists():
+                case_memory_path.unlink()
+            case_rule_path = (case_dir / "terminal_language_rules.json").resolve()
+            if case_rule_path.exists():
+                case_rule_path.unlink()
+            case_ontology_path = (case_dir / "terminal_memory_ontology.json").resolve()
+            if case_ontology_path.exists():
+                case_ontology_path.unlink()
+            os.environ[BROWSER_STATE_ENV] = str(case_state_path)
+            seed_prompt = str(case.seed_prompt or case.prompt).strip()
+            warm_prompt = str(case.prompt or "").strip()
+            rule_prompt = str(case.rule_prompt or warm_prompt).strip()
+            case_context_profile = _language_context_profile(case.browser_state)
+            try:
+                raw_start = time.perf_counter()
+                raw_plan = build_raw_terminal_plan(
+                    prompt=rule_prompt,
+                    model=raw_model,
+                    client=raw_client,
+                    temperature=temperature,
+                    browser_state=case.browser_state,
+                )
+                raw_latency_ms = round((time.perf_counter() - raw_start) * 1000.0, 2)
+                raw_backtest = backtest_browser_plan(case, raw_plan)
+
+                cold_start = time.perf_counter()
+                cold_plan = build_language_learning_plan(
+                    prompt=seed_prompt,
+                    model=memla_model,
+                    client=memla_client,
+                    temperature=temperature,
+                    browser_state=case.browser_state,
+                )
+                cold_latency_ms = round((time.perf_counter() - cold_start) * 1000.0, 2)
+                cold_backtest = backtest_browser_plan(case, cold_plan)
+                if cold_backtest.execution_passed and cold_plan.source in {"language_model", "language_memory"}:
+                    remember_language_compile(prompt=seed_prompt, browser_state=case.browser_state, plan=cold_plan)
+                if cold_backtest.execution_passed and cold_plan.source in {"language_model", "language_memory", "language_rule"}:
+                    adjudicate_memory_trace(
+                        prompt=seed_prompt,
+                        normalized_prompt=_intent_text(seed_prompt),
+                        tokens=_language_prompt_tokens(seed_prompt),
+                        context_profile=case_context_profile,
+                        action_signatures=[_action_signature(action) for action in cold_plan.actions],
+                        source=cold_plan.source,
+                        success=True,
+                        path=terminal_memory_ontology_path(),
+                        canonical_clauses=_canonical_clauses_from_actions(cold_plan.actions),
+                    )
+                cold_summary = summarize_memory_ontology(terminal_memory_ontology_path())
+
+                warm_start = time.perf_counter()
+                warm_plan = build_language_learning_plan(
+                    prompt=warm_prompt,
+                    model=memla_model,
+                    client=memla_client,
+                    temperature=temperature,
+                    browser_state=case.browser_state,
+                )
+                warm_latency_ms = round((time.perf_counter() - warm_start) * 1000.0, 2)
+                warm_backtest = backtest_browser_plan(case, warm_plan)
+                if warm_backtest.execution_passed and warm_plan.source in {"language_model", "language_memory"}:
+                    remember_language_compile(prompt=warm_prompt, browser_state=case.browser_state, plan=warm_plan)
+                if warm_backtest.execution_passed and warm_plan.source == "language_memory":
+                    _promote_language_rules(prompt=warm_prompt, browser_state=case.browser_state, plan=warm_plan)
+                if warm_backtest.execution_passed and warm_plan.source in {"language_model", "language_memory", "language_rule"}:
+                    adjudicate_memory_trace(
+                        prompt=warm_prompt,
+                        normalized_prompt=_intent_text(warm_prompt),
+                        tokens=_language_prompt_tokens(warm_prompt),
+                        context_profile=case_context_profile,
+                        action_signatures=[_action_signature(action) for action in warm_plan.actions],
+                        source=warm_plan.source,
+                        success=True,
+                        path=terminal_memory_ontology_path(),
+                        canonical_clauses=_canonical_clauses_from_actions(warm_plan.actions),
+                    )
+
+                warm2_start = time.perf_counter()
+                warm2_plan = build_language_learning_plan(
+                    prompt=warm_prompt,
+                    model=memla_model,
+                    client=memla_client,
+                    temperature=temperature,
+                    browser_state=case.browser_state,
+                )
+                warm2_latency_ms = round((time.perf_counter() - warm2_start) * 1000.0, 2)
+                warm2_backtest = backtest_browser_plan(case, warm2_plan)
+                if warm2_backtest.execution_passed and warm2_plan.source in {"language_model", "language_memory"}:
+                    remember_language_compile(prompt=warm_prompt, browser_state=case.browser_state, plan=warm2_plan)
+                if warm2_backtest.execution_passed and warm2_plan.source in {"language_model", "language_memory", "language_rule"}:
+                    adjudicate_memory_trace(
+                        prompt=warm_prompt,
+                        normalized_prompt=_intent_text(warm_prompt),
+                        tokens=_language_prompt_tokens(warm_prompt),
+                        context_profile=case_context_profile,
+                        action_signatures=[_action_signature(action) for action in warm2_plan.actions],
+                        source=warm2_plan.source,
+                        success=True,
+                        path=terminal_memory_ontology_path(),
+                        canonical_clauses=_canonical_clauses_from_actions(warm2_plan.actions),
+                    )
+                warm_summary = summarize_memory_ontology(terminal_memory_ontology_path())
+                if warm2_backtest.execution_passed and warm2_plan.source == "language_memory":
+                    _promote_language_rules(prompt=warm_prompt, browser_state=case.browser_state, plan=warm2_plan)
+
+                rule_seed_memory_hit = False
+                rule_start = time.perf_counter()
+                rule_plan = build_language_learning_plan(
+                    prompt=rule_prompt,
+                    model=memla_model,
+                    client=memla_client,
+                    temperature=temperature,
+                    browser_state=case.browser_state,
+                )
+                rule_latency_ms = round((time.perf_counter() - rule_start) * 1000.0, 2)
+                rule_backtest = backtest_browser_plan(case, rule_plan)
+                if rule_backtest.execution_passed and rule_plan.source in {"language_model", "language_memory", "language_rule"}:
+                    adjudicate_memory_trace(
+                        prompt=rule_prompt,
+                        normalized_prompt=_intent_text(rule_prompt),
+                        tokens=_language_prompt_tokens(rule_prompt),
+                        context_profile=case_context_profile,
+                        action_signatures=[_action_signature(action) for action in rule_plan.actions],
+                        source=rule_plan.source,
+                        success=True,
+                        path=terminal_memory_ontology_path(),
+                        canonical_clauses=_canonical_clauses_from_actions(rule_plan.actions),
+                    )
+                rule_summary = summarize_memory_ontology(terminal_memory_ontology_path())
+                if int(warm_summary.get("semantic_count", 0)) <= 0 and int(rule_summary.get("semantic_count", 0)) > 0:
+                    warm_summary = rule_summary
+                if rule_backtest.execution_passed and rule_plan.source == "language_memory":
+                    rule_seed_memory_hit = True
+                    _promote_language_rules(prompt=rule_prompt, browser_state=case.browser_state, plan=rule_plan)
+                    promoted_rule_start = time.perf_counter()
+                    promoted_rule_plan = build_language_learning_plan(
+                        prompt=rule_prompt,
+                        model=memla_model,
+                        client=memla_client,
+                        temperature=temperature,
+                        browser_state=case.browser_state,
+                    )
+                    promoted_rule_latency_ms = round((time.perf_counter() - promoted_rule_start) * 1000.0, 2)
+                    promoted_rule_backtest = backtest_browser_plan(case, promoted_rule_plan)
+                    if promoted_rule_backtest.execution_passed and promoted_rule_plan.source in {"language_model", "language_memory", "language_rule"}:
+                        adjudicate_memory_trace(
+                            prompt=rule_prompt,
+                            normalized_prompt=_intent_text(rule_prompt),
+                            tokens=_language_prompt_tokens(rule_prompt),
+                            context_profile=case_context_profile,
+                            action_signatures=[_action_signature(action) for action in promoted_rule_plan.actions],
+                            source=promoted_rule_plan.source,
+                            success=True,
+                            path=terminal_memory_ontology_path(),
+                            canonical_clauses=_canonical_clauses_from_actions(promoted_rule_plan.actions),
+                        )
+                    rule_plan = promoted_rule_plan
+                    rule_latency_ms = promoted_rule_latency_ms
+                    rule_backtest = promoted_rule_backtest
+                    rule_summary = summarize_memory_ontology(terminal_memory_ontology_path())
+            except Exception as exc:
+                failed_cases.append({"case_id": case.case_id, "error_type": type(exc).__name__, "message": str(exc)})
+                continue
+
+            if raw_plan.source == "raw_model":
+                raw_model_calls += 1
+            if cold_plan.source == "language_model":
+                memla_cold_language_model_calls += 1
+            if warm_plan.source == "language_memory":
+                memla_warm_language_memory_hits += 1
+            if warm2_plan.source == "language_memory":
+                memla_warm_language_memory_hits += 1
+            if rule_seed_memory_hit:
+                memla_warm_language_memory_hits += 1
+            if rule_plan.source == "language_rule":
+                memla_rule_hits += 1
+            if int(cold_summary.get("episodic_count", 0)) > 0:
+                cold_episodic_transitions += 1
+            if int(warm_summary.get("semantic_count", 0)) > 0:
+                warm_semantic_transitions += 1
+            if int(rule_summary.get("rule_count", 0)) > 0:
+                rule_stage_transitions += 1
+
+            rows.append(
+                {
+                    "case_id": case.case_id,
+                    "seed_prompt": seed_prompt,
+                    "warm_prompt": warm_prompt,
+                    "rule_prompt": rule_prompt,
+                    "accepted_action_sets": [list(items) for items in case.accepted_action_sets],
+                    "raw_source": raw_plan.source,
+                    "raw_latency_ms": raw_latency_ms,
+                    "raw_actions": [_action_signature(action) for action in raw_plan.actions],
+                    "raw_semantic_success": 1.0 if raw_backtest.semantic_success else 0.0,
+                    "memla_cold_source": cold_plan.source,
+                    "memla_cold_latency_ms": cold_latency_ms,
+                    "memla_cold_actions": [_action_signature(action) for action in cold_plan.actions],
+                    "memla_cold_semantic_success": 1.0 if cold_backtest.semantic_success else 0.0,
+                    "memla_warm_source": warm2_plan.source,
+                    "memla_warm_latency_ms": warm2_latency_ms,
+                    "memla_warm_actions": [_action_signature(action) for action in warm2_plan.actions],
+                    "memla_warm_semantic_success": 1.0 if warm2_backtest.semantic_success else 0.0,
+                    "memla_rule_source": rule_plan.source,
+                    "memla_rule_latency_ms": rule_latency_ms,
+                    "memla_rule_actions": [_action_signature(action) for action in rule_plan.actions],
+                    "memla_rule_semantic_success": 1.0 if rule_backtest.semantic_success else 0.0,
+                    "cold_memory_summary": cold_summary,
+                    "warm_memory_summary": warm_summary,
+                    "rule_memory_summary": rule_summary,
+                }
+            )
+    finally:
+        if original_state_env is None:
+            os.environ.pop(BROWSER_STATE_ENV, None)
+        else:
+            os.environ[BROWSER_STATE_ENV] = original_state_env
+
+    count = len(rows) or 1
+    avg_raw_latency_ms = round(sum(float(row["raw_latency_ms"]) for row in rows) / count, 2)
+    avg_memla_rule_latency_ms = round(sum(float(row["memla_rule_latency_ms"]) for row in rows) / count, 2)
+    speedup = round(avg_raw_latency_ms / avg_memla_rule_latency_ms, 4) if avg_memla_rule_latency_ms > 0 else None
+    return {
+        "generated_ts": int(time.time()),
+        "ontology_version": "memory_v1",
+        "cases_path": str(Path(cases_path).resolve()),
+        "memory_root": str(root_dir),
+        "case_ids": [case.case_id for case in cases],
+        "raw_model": raw_model,
+        "memla_model": memla_model,
+        "raw_provider": raw_client.provider,
+        "memla_provider": memla_client.provider,
+        "cases": len(rows),
+        "cases_requested": len(cases),
+        "failed_case_count": len(failed_cases),
+        "avg_raw_latency_ms": avg_raw_latency_ms,
+        "avg_memla_cold_latency_ms": round(sum(float(row["memla_cold_latency_ms"]) for row in rows) / count, 2),
+        "avg_memla_warm_latency_ms": round(sum(float(row["memla_warm_latency_ms"]) for row in rows) / count, 2),
+        "avg_memla_rule_latency_ms": avg_memla_rule_latency_ms,
+        "memla_vs_raw_speedup": speedup,
+        "avg_raw_semantic_success": round(sum(float(row["raw_semantic_success"]) for row in rows) / count, 4),
+        "avg_memla_cold_semantic_success": round(sum(float(row["memla_cold_semantic_success"]) for row in rows) / count, 4),
+        "avg_memla_warm_semantic_success": round(sum(float(row["memla_warm_semantic_success"]) for row in rows) / count, 4),
+        "avg_memla_rule_semantic_success": round(sum(float(row["memla_rule_semantic_success"]) for row in rows) / count, 4),
+        "raw_model_call_count": raw_model_calls,
+        "memla_cold_language_model_call_count": memla_cold_language_model_calls,
+        "memla_warm_language_memory_hit_count": memla_warm_language_memory_hits,
+        "memla_rule_hit_count": memla_rule_hits,
+        "cold_episodic_transition_count": cold_episodic_transitions,
+        "warm_semantic_transition_count": warm_semantic_transitions,
+        "rule_stage_transition_count": rule_stage_transitions,
+        "avg_cold_episodic_count": round(sum(float(row["cold_memory_summary"].get("episodic_count", 0)) for row in rows) / count, 4),
+        "avg_warm_semantic_count": round(sum(float(row["warm_memory_summary"].get("semantic_count", 0)) for row in rows) / count, 4),
+        "avg_rule_rule_count": round(sum(float(row["rule_memory_summary"].get("rule_count", 0)) for row in rows) / count, 4),
+        "avg_rule_avg_trust": round(sum(float(row["rule_memory_summary"].get("avg_trust", 0.0)) for row in rows) / count, 4),
+        "rows": rows,
+        "failed_cases": failed_cases,
+    }
+
+
 def render_browser_benchmark_markdown(report: dict[str, Any]) -> str:
     ontology_version = str(report.get("ontology_version", "browser_v1") or "browser_v1")
-    if ontology_version == "language_v4":
+    if ontology_version == "memory_v1":
+        title = "# Memory Ontology V1 Benchmark"
+    elif ontology_version == "language_v4":
         title = "# Language Ontology V4 Benchmark"
     elif ontology_version == "language_v3":
         title = "# Language Ontology V3 Benchmark"
@@ -1320,7 +1635,28 @@ def render_browser_benchmark_markdown(report: dict[str, Any]) -> str:
         "## Lane summary",
         "",
     ]
-    if ontology_version == "language_v4":
+    if ontology_version == "memory_v1":
+        lines.extend(
+            [
+                "| Metric | Raw | Memla Cold | Memla Warm | Memla Rule |",
+                "| --- | --- | --- | --- | --- |",
+                f"| Avg latency (ms) | `{report.get('avg_raw_latency_ms', 0.0)}` | `{report.get('avg_memla_cold_latency_ms', 0.0)}` | `{report.get('avg_memla_warm_latency_ms', 0.0)}` | `{report.get('avg_memla_rule_latency_ms', 0.0)}` |",
+                f"| Semantic success | `{report.get('avg_raw_semantic_success', 0.0)}` | `{report.get('avg_memla_cold_semantic_success', 0.0)}` | `{report.get('avg_memla_warm_semantic_success', 0.0)}` | `{report.get('avg_memla_rule_semantic_success', 0.0)}` |",
+                "",
+                f"- Raw model calls: `{report.get('raw_model_call_count', 0)}`",
+                f"- Memla cold language-model calls: `{report.get('memla_cold_language_model_call_count', 0)}`",
+                f"- Memla warm language-memory hits: `{report.get('memla_warm_language_memory_hit_count', 0)}`",
+                f"- Memla rule hits: `{report.get('memla_rule_hit_count', 0)}`",
+                f"- Cold episodic transitions: `{report.get('cold_episodic_transition_count', 0)}`",
+                f"- Warm semantic transitions: `{report.get('warm_semantic_transition_count', 0)}`",
+                f"- Rule-stage transitions: `{report.get('rule_stage_transition_count', 0)}`",
+                f"- Avg cold episodic count: `{report.get('avg_cold_episodic_count', 0.0)}`",
+                f"- Avg warm semantic count: `{report.get('avg_warm_semantic_count', 0.0)}`",
+                f"- Avg rule count: `{report.get('avg_rule_rule_count', 0.0)}`",
+                f"- Avg rule-stage trust: `{report.get('avg_rule_avg_trust', 0.0)}`",
+            ]
+        )
+    elif ontology_version == "language_v4":
         lines.extend(
             [
                 "| Metric | Raw | Memla Cold | Memla Warm | Memla Rule |",
@@ -1379,7 +1715,30 @@ def render_browser_benchmark_markdown(report: dict[str, Any]) -> str:
             lines.append(f"- `{failure.get('case_id', '')}` [{failure.get('error_type', '')}] {failure.get('message', '')}".rstrip())
     lines.extend(["", "## Case rows", ""])
     for row in report.get("rows", []):
-        if ontology_version == "language_v4":
+        if ontology_version == "memory_v1":
+            lines.extend(
+                [
+                    f"### {row.get('case_id', '')}",
+                    "",
+                    f"- Seed prompt: `{row.get('seed_prompt', '')}`",
+                    f"- Warm prompt: `{row.get('warm_prompt', '')}`",
+                    f"- Rule prompt: `{row.get('rule_prompt', '')}`",
+                    f"- Accepted actions: `{json.dumps(row.get('accepted_action_sets', []), ensure_ascii=True)}`",
+                    f"- Raw source/actions: `{row.get('raw_source', '')}` / `{', '.join(row.get('raw_actions', []))}`",
+                    f"- Memla cold source/actions: `{row.get('memla_cold_source', '')}` / `{', '.join(row.get('memla_cold_actions', []))}`",
+                    f"- Memla warm source/actions: `{row.get('memla_warm_source', '')}` / `{', '.join(row.get('memla_warm_actions', []))}`",
+                    f"- Memla rule source/actions: `{row.get('memla_rule_source', '')}` / `{', '.join(row.get('memla_rule_actions', []))}`",
+                    f"- Cold memory summary: `{json.dumps(row.get('cold_memory_summary', {}), ensure_ascii=True)}`",
+                    f"- Warm memory summary: `{json.dumps(row.get('warm_memory_summary', {}), ensure_ascii=True)}`",
+                    f"- Rule memory summary: `{json.dumps(row.get('rule_memory_summary', {}), ensure_ascii=True)}`",
+                    f"- Raw semantic success: `{row.get('raw_semantic_success', 0.0)}`",
+                    f"- Memla cold semantic success: `{row.get('memla_cold_semantic_success', 0.0)}`",
+                    f"- Memla warm semantic success: `{row.get('memla_warm_semantic_success', 0.0)}`",
+                    f"- Memla rule semantic success: `{row.get('memla_rule_semantic_success', 0.0)}`",
+                    "",
+                ]
+            )
+        elif ontology_version == "language_v4":
             lines.extend(
                 [
                     f"### {row.get('case_id', '')}",

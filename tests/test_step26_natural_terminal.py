@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from memory_system.cli import main
+from memory_system.memory.ontology import load_memory_ontology
 from memory_system.natural_terminal import (
     BROWSER_STATE_ENV,
     BrowserSessionState,
@@ -30,6 +31,7 @@ from memory_system.natural_terminal import (
     run_terminal_scout,
     save_browser_session_state,
     terminal_language_memory_path,
+    terminal_memory_ontology_path,
     terminal_language_rule_path,
     run_terminal_benchmark,
 )
@@ -171,7 +173,8 @@ def test_terminal_heuristic_plan_reads_current_repo_page():
     assert [action.kind for action in plan.actions] == ["browser_read_page"]
 
 
-def test_terminal_scout_fetches_and_ranks_repo_results(monkeypatch):
+def test_terminal_scout_fetches_and_ranks_repo_results(monkeypatch, tmp_path):
+    monkeypatch.setenv(BROWSER_STATE_ENV, str(tmp_path / "browser_state.json"))
     cards = [
         {
             "index": 1,
@@ -833,6 +836,84 @@ def test_execute_terminal_plan_persists_language_memory_after_success(monkeypatc
     assert terminal_language_memory_path().exists() is True
 
 
+def test_execute_terminal_plan_persists_memory_ontology_after_success(monkeypatch, tmp_path):
+    monkeypatch.setenv(BROWSER_STATE_ENV, str(tmp_path / "browser_state.json"))
+    launched: list[list[str]] = []
+
+    class DummyProcess:
+        def __init__(self, command, **kwargs):
+            launched.append(list(command))
+
+    monkeypatch.setattr("memory_system.natural_terminal.subprocess.Popen", DummyProcess)
+
+    browser_state = BrowserSessionState(
+        current_url="https://github.com/ggml-org/llama.cpp",
+        page_kind="repo_page",
+    )
+    plan = TerminalPlan(
+        prompt="pull some yt coverage on this repo and crack open the opener",
+        source="language_model",
+        actions=[
+            TerminalAction(kind="browser_search_subject", target="youtube", resolved_target="youtube", note=json.dumps({"engine": "youtube"})),
+        ],
+    )
+
+    result = execute_terminal_plan(plan, platform_name="linux", browser_state=browser_state)
+
+    assert result.ok is True
+    ontology_entries = load_memory_ontology(terminal_memory_ontology_path())
+    assert len(ontology_entries) == 1
+    assert ontology_entries[0]["memory_kind"] == "language_compilation"
+    assert ontology_entries[0]["promotion_stage"] == "episodic"
+    assert ontology_entries[0]["status"] == "active"
+
+
+def test_execute_terminal_plan_promotes_memory_ontology_to_semantic_after_reuse(monkeypatch, tmp_path):
+    monkeypatch.setenv(BROWSER_STATE_ENV, str(tmp_path / "browser_state.json"))
+    launched: list[list[str]] = []
+
+    class DummyProcess:
+        def __init__(self, command, **kwargs):
+            launched.append(list(command))
+
+    monkeypatch.setattr("memory_system.natural_terminal.subprocess.Popen", DummyProcess)
+
+    browser_state = BrowserSessionState(
+        current_url="https://github.com/ggml-org/llama.cpp",
+        page_kind="repo_page",
+    )
+    seed_plan = TerminalPlan(
+        prompt="pull some yt coverage on this repo and crack open the opener",
+        source="language_model",
+        actions=[
+            TerminalAction(
+                kind="open_url",
+                target="https://www.youtube.com/results?search_query=llama.cpp",
+                resolved_target="https://www.youtube.com/results?search_query=llama.cpp",
+            ),
+        ],
+    )
+    remember_language_compile(
+        prompt=seed_plan.prompt,
+        browser_state=browser_state,
+        plan=seed_plan,
+    )
+    reused_plan = TerminalPlan(
+        prompt="find a youtube video about this repo and open the first one",
+        source="language_memory",
+        actions=seed_plan.actions,
+    )
+
+    execute_terminal_plan(reused_plan, platform_name="linux", browser_state=browser_state)
+    execute_terminal_plan(reused_plan, platform_name="linux", browser_state=browser_state)
+
+    ontology_entries = load_memory_ontology(terminal_memory_ontology_path())
+    assert len(ontology_entries) == 1
+    assert ontology_entries[0]["promotion_stage"] == "semantic"
+    assert ontology_entries[0]["reuse_count"] >= 2
+    assert ontology_entries[0]["successful_reuse_count"] >= 2
+
+
 def test_language_rule_plan_activates_after_repeated_memory_hits(monkeypatch, tmp_path):
     monkeypatch.setenv(BROWSER_STATE_ENV, str(tmp_path / "browser_state.json"))
     browser_state = BrowserSessionState(
@@ -870,6 +951,9 @@ def test_language_rule_plan_activates_after_repeated_memory_hits(monkeypatch, tm
     assert terminal_language_rule_path().exists() is True
     assert promoted is not None
     assert promoted.source == "language_rule"
+    ontology_entries = load_memory_ontology(terminal_memory_ontology_path())
+    assert len(ontology_entries) == 1
+    assert ontology_entries[0]["promotion_stage"] == "rule"
     assert [action.kind for action in promoted.actions] == [
         "browser_rank_cards",
         "browser_search_subject",

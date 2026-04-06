@@ -98,6 +98,7 @@ memla math benchmark --cases cases/math_linear_c2a_v2_harder.jsonl --teacher-mod
 Thin-client HTTP bridge:
 - `GET /health`
 - `GET /state`
+- `GET /memory`
 - `POST /run`
 - `POST /scout`
 - `POST /followup`

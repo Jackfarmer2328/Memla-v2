@@ -7,6 +7,15 @@ struct MemlaActivityItem: Identifiable {
     let timestamp: Date
 }
 
+struct MemlaChatMessage: Identifiable {
+    let id = UUID()
+    let speaker: String
+    let title: String
+    let detail: String
+    let timestamp: Date
+    let isUser: Bool
+}
+
 @MainActor
 final class MemlaViewModel: ObservableObject {
     @Published var baseURL: String {
@@ -18,8 +27,10 @@ final class MemlaViewModel: ObservableObject {
     @Published var followupPrompt: String = "find a youtube video about it then open the first one and summarize it"
     @Published var healthStatus: String = "Unknown"
     @Published var currentState: BrowserState?
+    @Published var memorySummary: MemorySummary?
     @Published var scoutResult: ScoutResult?
     @Published var followupResult: MemlaRunEnvelope?
+    @Published var chatItems: [MemlaChatMessage] = []
     @Published var activityItems: [MemlaActivityItem] = []
     @Published var errorMessage: String = ""
     @Published var isLoading: Bool = false
@@ -44,23 +55,86 @@ final class MemlaViewModel: ObservableObject {
         }
     }
 
+    func refreshMemory() async {
+        await runTask { [self] in
+            let response = try await MemlaClient.shared.memory(baseURL: self.baseURL)
+            self.memorySummary = response.summary
+            self.appendActivity(title: "Memory Refresh", detail: "rule \(response.summary.ruleCount), semantic \(response.summary.semanticCount), episodic \(response.summary.episodicCount)")
+        }
+    }
+
     func runScout() async {
         await runTask { [self] in
+            self.appendChat(speaker: "You", title: "Scout", detail: self.scoutPrompt, isUser: true)
             let envelope = try await MemlaClient.shared.scout(prompt: self.scoutPrompt, baseURL: self.baseURL)
             self.scoutResult = envelope.result
             self.followupResult = nil
-            self.currentState = try await MemlaClient.shared.state(baseURL: self.baseURL).state
+            try await self.refreshRuntimeSnapshots()
+            self.appendChat(
+                speaker: "Memla",
+                title: self.scoutTitle(for: envelope.result),
+                detail: envelope.result.summary,
+                isUser: false
+            )
             self.appendActivity(title: "Scout", detail: envelope.result.summary)
         }
     }
 
     func runFollowup() async {
         await runTask { [self] in
+            self.appendChat(speaker: "You", title: "Follow-up", detail: self.followupPrompt, isUser: true)
             let envelope = try await MemlaClient.shared.followup(prompt: self.followupPrompt, baseURL: self.baseURL, heuristicOnly: false)
             self.followupResult = envelope
-            self.currentState = try await MemlaClient.shared.state(baseURL: self.baseURL).state
-            let detail = envelope.execution?.records.first?.message ?? envelope.plan.clarification
+            try await self.refreshRuntimeSnapshots()
+            let detail = self.summaryLine(for: envelope)
+            self.appendChat(speaker: "Memla", title: "Follow-up Result", detail: detail, isUser: false)
             self.appendActivity(title: "Follow-up", detail: detail)
+        }
+    }
+
+    func runLocalLLMDemo() async {
+        await runTask { [self] in
+            let demoScoutPrompt = "find the top 10 github repos for local llms and tell me which best fits weak hardware"
+            self.scoutPrompt = demoScoutPrompt
+            self.appendChat(speaker: "You", title: "One-Tap Demo", detail: demoScoutPrompt, isUser: true)
+
+            let scoutEnvelope = try await MemlaClient.shared.scout(prompt: demoScoutPrompt, baseURL: self.baseURL)
+            self.scoutResult = scoutEnvelope.result
+            self.followupResult = nil
+            try await self.refreshRuntimeSnapshots()
+            self.appendChat(
+                speaker: "Memla",
+                title: self.scoutTitle(for: scoutEnvelope.result),
+                detail: scoutEnvelope.result.summary,
+                isUser: false
+            )
+
+            let winner = self.demoWinnerTitle(from: scoutEnvelope.result)
+
+            let youtubePrompt = "find a youtube video about \(winner) then open the first one and summarize it"
+            self.followupPrompt = youtubePrompt
+            self.appendChat(speaker: "You", title: "YouTube Follow-up", detail: youtubePrompt, isUser: true)
+            let youtubeEnvelope = try await MemlaClient.shared.followup(prompt: youtubePrompt, baseURL: self.baseURL, heuristicOnly: false)
+            self.followupResult = youtubeEnvelope
+            try await self.refreshRuntimeSnapshots()
+            self.appendChat(speaker: "Memla", title: "YouTube Result", detail: self.summaryLine(for: youtubeEnvelope), isUser: false)
+
+            let redditPrompt = "find a reddit post about \(winner) then open the first one and explain it"
+            self.followupPrompt = redditPrompt
+            self.appendChat(speaker: "You", title: "Reddit Follow-up", detail: redditPrompt, isUser: true)
+            let redditEnvelope = try await MemlaClient.shared.followup(prompt: redditPrompt, baseURL: self.baseURL, heuristicOnly: false)
+            self.followupResult = redditEnvelope
+            try await self.refreshRuntimeSnapshots()
+            self.appendChat(speaker: "Memla", title: "Reddit Result", detail: self.summaryLine(for: redditEnvelope), isUser: false)
+
+            let synthesisPrompt = "tell me which source best explains what \(winner) is for"
+            self.followupPrompt = synthesisPrompt
+            self.appendChat(speaker: "You", title: "Final Compare", detail: synthesisPrompt, isUser: true)
+            let synthesisEnvelope = try await MemlaClient.shared.followup(prompt: synthesisPrompt, baseURL: self.baseURL, heuristicOnly: false)
+            self.followupResult = synthesisEnvelope
+            try await self.refreshRuntimeSnapshots()
+            self.appendChat(speaker: "Memla", title: "Final Answer", detail: self.summaryLine(for: synthesisEnvelope), isUser: false)
+            self.appendActivity(title: "One-Tap Demo", detail: "Completed local LLM scout, YouTube, Reddit, and final comparison.")
         }
     }
 
@@ -92,6 +166,10 @@ final class MemlaViewModel: ObservableObject {
         activityItems.removeAll()
     }
 
+    func clearChat() {
+        chatItems.removeAll()
+    }
+
     private func runTask(_ operation: @escaping () async throws -> Void) async {
         isLoading = true
         errorMessage = ""
@@ -100,6 +178,68 @@ final class MemlaViewModel: ObservableObject {
             try await operation()
         } catch {
             errorMessage = error.localizedDescription
+            appendChat(speaker: "Memla", title: "Error", detail: error.localizedDescription, isUser: false)
+        }
+    }
+
+    private func refreshRuntimeSnapshots() async throws {
+        currentState = try await MemlaClient.shared.state(baseURL: baseURL).state
+        memorySummary = try await MemlaClient.shared.memory(baseURL: baseURL).summary
+    }
+
+    private func scoutTitle(for result: ScoutResult) -> String {
+        if let title = result.bestMatch?.title, !title.isEmpty {
+            return "Best Match: \(title)"
+        }
+        return "Scout Result"
+    }
+
+    private func demoWinnerTitle(from result: ScoutResult) -> String {
+        if let title = result.bestMatch?.title, !title.isEmpty {
+            return title
+        }
+        if let title = result.topResults.first?.title, !title.isEmpty {
+            return title
+        }
+        if !result.query.isEmpty {
+            return result.query
+        }
+        return "the winning repo"
+    }
+
+    private func summaryLine(for envelope: MemlaRunEnvelope) -> String {
+        if let records = envelope.execution?.records, !records.isEmpty {
+            let messages = records.map { $0.message.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+            if !messages.isEmpty {
+                return messages.joined(separator: "\n")
+            }
+        }
+        if !envelope.plan.clarification.isEmpty {
+            return envelope.plan.clarification
+        }
+        if !envelope.plan.residualConstraints.isEmpty {
+            return envelope.plan.residualConstraints.joined(separator: ", ")
+        }
+        return envelope.ok ? "Done." : "Memla could not complete that follow-up yet."
+    }
+
+    private func appendChat(speaker: String, title: String, detail: String, isUser: Bool) {
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanDetail = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanTitle.isEmpty || !cleanDetail.isEmpty else {
+            return
+        }
+        chatItems.append(
+            MemlaChatMessage(
+                speaker: speaker,
+                title: cleanTitle.isEmpty ? speaker : cleanTitle,
+                detail: cleanDetail,
+                timestamp: Date(),
+                isUser: isUser
+            )
+        )
+        if chatItems.count > 30 {
+            chatItems = Array(chatItems.suffix(30))
         }
     }
 

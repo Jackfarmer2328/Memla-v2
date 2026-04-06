@@ -4,6 +4,7 @@ from dataclasses import asdict
 
 from fastapi.testclient import TestClient
 
+from memory_system.memory.ontology import record_memory_trace
 from memory_system.natural_terminal import (
     BrowserSessionState,
     TerminalAction,
@@ -53,6 +54,35 @@ def test_memla_api_state_reads_browser_state(tmp_path):
     assert payload["ok"] is True
     assert payload["state"]["page_kind"] == "repo_page"
     assert payload["state"]["subject_title"] == "ggml-org/llama.cpp"
+
+
+def test_memla_api_memory_exposes_ontology_summary(tmp_path):
+    state_path = tmp_path / "terminal_browser_state.json"
+    record_memory_trace(
+        prompt="find a youtube video about this repo and open the first one",
+        normalized_prompt="find a youtube video about this repo and open the first one",
+        tokens=["youtube", "repo", "first"],
+        context_profile={
+            "page_kind": "repo_page",
+            "search_engine": "",
+            "has_search_results": False,
+            "has_subject": True,
+            "has_evidence": False,
+        },
+        action_signatures=["browser_search_subject:youtube", "open_search_result:1"],
+        source="language_model",
+        path=tmp_path / "terminal_memory_ontology.json",
+    )
+    app = create_memla_app(state_path=state_path)
+    client = TestClient(app)
+
+    response = client.get("/memory")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["summary"]["memory_count"] == 1
+    assert payload["summary"]["episodic_count"] == 1
 
 
 def test_memla_api_scout_returns_structured_result(monkeypatch, tmp_path):

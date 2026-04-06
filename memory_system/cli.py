@@ -73,6 +73,7 @@ from .browser_ontology_benchmark import (
     run_browser_benchmark,
     run_language_learning_benchmark,
     run_language_rule_benchmark,
+    run_memory_ontology_benchmark,
 )
 from .natural_terminal import (
     build_terminal_step_report,
@@ -164,6 +165,10 @@ def _language_v3_cases_default() -> str:
 
 def _language_v4_cases_default() -> str:
     return "cases/language_eval_cases_v4.jsonl"
+
+
+def _memory_v1_cases_default() -> str:
+    return "cases/memory_eval_cases_v1.jsonl"
 
 
 def _user_id_default() -> str:
@@ -1093,7 +1098,7 @@ def _handle_memla_serve(args: argparse.Namespace) -> int:
     host = str(args.host or "127.0.0.1").strip() or "127.0.0.1"
     port = int(args.port)
     print(f"Serving Memla API at http://{host}:{port}")
-    print("Routes: GET /health, GET /state, POST /run, POST /scout, POST /followup")
+    print("Routes: GET /health, GET /state, GET /memory, POST /run, POST /scout, POST /followup")
     print("Press Ctrl+C to stop the local API server.")
     try:
         _serve_memla_api(
@@ -1203,7 +1208,9 @@ def _handle_terminal_browser_benchmark(args: argparse.Namespace) -> int:
     raw_model = _resolve_shared_terminal_model(args, "raw_model")
     memla_model = _resolve_shared_terminal_model(args, "memla_model")
     ontology_version = str(getattr(args, "ontology_version", "browser_v1") or "browser_v1")
-    if ontology_version == "language_v4":
+    if ontology_version == "memory_v1":
+        benchmark_slug = "memory_benchmark_v1"
+    elif ontology_version == "language_v4":
         benchmark_slug = "language_benchmark_v4"
     elif ontology_version == "language_v3":
         benchmark_slug = "language_benchmark_v3"
@@ -1228,7 +1235,21 @@ def _handle_terminal_browser_benchmark(args: argparse.Namespace) -> int:
     else:
         benchmark_slug = "browser_benchmark"
     out_dir = Path(args.out_dir).resolve() if args.out_dir else _default_report_dir(benchmark_slug)
-    if ontology_version == "language_v4":
+    if ontology_version == "memory_v1":
+        report = run_memory_ontology_benchmark(
+            cases_path=args.cases,
+            raw_model=raw_model,
+            memla_model=memla_model,
+            raw_provider=args.raw_provider,
+            raw_base_url=args.raw_base_url,
+            memla_provider=args.memla_provider,
+            memla_base_url=args.memla_base_url,
+            temperature=args.temperature,
+            case_ids=args.case_id,
+            limit=args.limit,
+            memory_root=str(out_dir),
+        )
+    elif ontology_version == "language_v4":
         report = run_language_rule_benchmark(
             cases_path=args.cases,
             raw_model=raw_model,
@@ -2004,6 +2025,24 @@ def _build_parser() -> argparse.ArgumentParser:
     terminal_language_bench_v4.add_argument("--temperature", type=float, default=0.1)
     terminal_language_bench_v4.add_argument("--out-dir", default="", help="Directory for report artifacts and temporary language memory/rules. Defaults to ./memla_reports/<timestamp>.")
     terminal_language_bench_v4.set_defaults(func=_handle_terminal_browser_benchmark, ontology_version="language_v4")
+
+    terminal_memory_bench_v1 = terminal_sub.add_parser(
+        "benchmark-memory-v1",
+        help="Benchmark Memory Ontology V1 as episodic -> semantic -> rule lifecycle transitions over the language stack.",
+    )
+    terminal_memory_bench_v1.add_argument("--cases", default=_memory_v1_cases_default(), help="Memory Ontology V1 benchmark case JSONL path.")
+    terminal_memory_bench_v1.add_argument("--case-id", action="append", default=[], help="Optional case id filter. Repeat to benchmark only specific prompts.")
+    terminal_memory_bench_v1.add_argument("--limit", type=int, default=None, help="Optional max number of benchmark prompts to run after filtering.")
+    terminal_memory_bench_v1.add_argument("--model", default="", help="Shared model for both lanes.")
+    terminal_memory_bench_v1.add_argument("--raw-model", default="", help="Raw baseline model. Defaults to --model or the small terminal default.")
+    terminal_memory_bench_v1.add_argument("--memla-model", default="", help="Memla model. Defaults to --model or the small terminal default.")
+    terminal_memory_bench_v1.add_argument("--raw-provider", default="ollama", help="Provider override for the raw lane.")
+    terminal_memory_bench_v1.add_argument("--raw-base-url", default="", help="Optional base URL override for the raw lane.")
+    terminal_memory_bench_v1.add_argument("--memla-provider", default="ollama", help="Provider override for the Memla lane.")
+    terminal_memory_bench_v1.add_argument("--memla-base-url", dest="memla_base_url", default="", help="Optional base URL override for the Memla lane.")
+    terminal_memory_bench_v1.add_argument("--temperature", type=float, default=0.1)
+    terminal_memory_bench_v1.add_argument("--out-dir", default="", help="Directory for report artifacts and temporary memory ontology state. Defaults to ./memla_reports/<timestamp>.")
+    terminal_memory_bench_v1.set_defaults(func=_handle_terminal_browser_benchmark, ontology_version="memory_v1")
 
     pack_parser = subparsers.add_parser("pack", help="Build Memla proof and buyer packs.")
     pack_sub = pack_parser.add_subparsers(dest="pack_command")

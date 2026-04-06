@@ -15,6 +15,11 @@ from urllib.parse import quote_plus
 from urllib import request as urllib_request
 from urllib.error import URLError
 
+from .memory.ontology import (
+    adjudicate_memory_trace,
+    promote_memory_rule,
+    record_memory_trace,
+)
 from .ollama_client import ChatMessage, UniversalLLMClient
 
 
@@ -77,6 +82,7 @@ BROWSER_STATE_FILENAME = "terminal_browser_state.json"
 TERMINAL_TRACE_FILENAME = "terminal_transmutation_traces.jsonl"
 TERMINAL_LANGUAGE_MEMORY_FILENAME = "terminal_language_memory.jsonl"
 TERMINAL_LANGUAGE_RULE_FILENAME = "terminal_language_rules.json"
+TERMINAL_MEMORY_ONTOLOGY_FILENAME = "terminal_memory_ontology.json"
 DEFAULT_USER_AGENT = "Mozilla/5.0 (compatible; MemlaTerminal/1.0; +https://github.com/Jackfarmer2328/Memla-v2)"
 PREFERRED_BROWSER_ENV = "MEMLA_BROWSER_APP"
 
@@ -579,6 +585,10 @@ def terminal_language_memory_path() -> Path:
 
 def terminal_language_rule_path() -> Path:
     return (terminal_browser_state_path().parent / TERMINAL_LANGUAGE_RULE_FILENAME).resolve()
+
+
+def terminal_memory_ontology_path() -> Path:
+    return (terminal_browser_state_path().parent / TERMINAL_MEMORY_ONTOLOGY_FILENAME).resolve()
 
 
 def load_browser_session_state(path: str | Path | None = None) -> BrowserSessionState:
@@ -2699,6 +2709,16 @@ def remember_language_compile(
     }
     with memory_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
+    record_memory_trace(
+        prompt=prompt,
+        normalized_prompt=_intent_text(prompt),
+        tokens=_language_prompt_tokens(prompt),
+        context_profile=_language_context_profile(browser_state),
+        action_signatures=[_action_signature(action) for action in plan.actions],
+        source=plan.source,
+        path=terminal_memory_ontology_path(),
+        canonical_clauses=_canonical_clauses_from_actions(plan.actions),
+    )
     return memory_path
 
 
@@ -2836,6 +2856,7 @@ def _promote_language_rules(
     entries = _load_language_rules(path)
     profile = _language_context_profile(browser_state)
     changed = False
+    activated_rule = False
     for raw_clause, canonical_clause in zip(raw_clauses, canonical_clauses):
         normalized_raw = _intent_text(raw_clause)
         normalized_canonical = _intent_text(canonical_clause)
@@ -2866,10 +2887,23 @@ def _promote_language_rules(
         if int(existing["hit_count"]) >= max(int(threshold), 1):
             existing["active"] = True
             existing["last_promoted_ts"] = int(time.time())
+            activated_rule = True
         changed = True
     if not changed:
         return None
-    return _save_language_rules(entries, path)
+    saved_path = _save_language_rules(entries, path)
+    if activated_rule:
+        promote_memory_rule(
+            prompt=prompt,
+            normalized_prompt=_intent_text(prompt),
+            tokens=_language_prompt_tokens(prompt),
+            context_profile=profile,
+            action_signatures=[_action_signature(action) for action in plan.actions],
+            source="language_rule",
+            path=terminal_memory_ontology_path(),
+            canonical_clauses=canonical_clauses,
+        )
+    return saved_path
 
 
 def _rule_match_score(
@@ -5554,6 +5588,21 @@ def execute_terminal_plan(
             )
         except OSError:
             residuals.append("language_rule_persist_failed")
+    if plan.source in {"language_model", "language_memory", "language_rule"} and plan.actions:
+        try:
+            adjudicate_memory_trace(
+                prompt=plan.prompt,
+                normalized_prompt=_intent_text(plan.prompt),
+                tokens=_language_prompt_tokens(plan.prompt),
+                context_profile=_language_context_profile(initial_browser_state),
+                action_signatures=[_action_signature(action) for action in plan.actions],
+                source=plan.source,
+                success=ok,
+                path=terminal_memory_ontology_path(),
+                canonical_clauses=_canonical_clauses_from_actions(plan.actions),
+            )
+        except OSError:
+            residuals.append("memory_ontology_persist_failed")
     return TerminalExecutionResult(
         prompt=plan.prompt,
         plan_source=plan.source,

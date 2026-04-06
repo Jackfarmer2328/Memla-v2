@@ -220,6 +220,7 @@ memla serve --host 0.0.0.0 --port 8080 --model phi3:mini
 Available routes:
 - `GET /health`
 - `GET /state`
+- `GET /memory`
 - `POST /run`
 - `POST /scout`
 - `POST /followup`

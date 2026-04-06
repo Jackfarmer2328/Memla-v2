@@ -49,6 +49,34 @@ struct MemlaStateEnvelope: Codable {
     let state: BrowserState
 }
 
+struct MemlaMemoryEnvelope: Codable {
+    let ok: Bool
+    let path: String
+    let summary: MemorySummary
+}
+
+struct MemorySummary: Codable {
+    let memoryCount: Int
+    let activeCount: Int
+    let staleCount: Int
+    let invalidCount: Int
+    let episodicCount: Int
+    let semanticCount: Int
+    let ruleCount: Int
+    let avgTrust: Double
+
+    enum CodingKeys: String, CodingKey {
+        case memoryCount = "memory_count"
+        case activeCount = "active_count"
+        case staleCount = "stale_count"
+        case invalidCount = "invalid_count"
+        case episodicCount = "episodic_count"
+        case semanticCount = "semantic_count"
+        case ruleCount = "rule_count"
+        case avgTrust = "avg_trust"
+    }
+}
+
 struct BrowserState: Codable {
     let currentURL: String?
     let pageKind: String?

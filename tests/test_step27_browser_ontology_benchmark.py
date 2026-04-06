@@ -10,6 +10,7 @@ from memory_system.browser_ontology_benchmark import (
     run_browser_benchmark,
     run_language_learning_benchmark,
     run_language_rule_benchmark,
+    run_memory_ontology_benchmark,
 )
 from memory_system.cli import main
 from memory_system.natural_terminal import TerminalAction, TerminalPlan, build_terminal_plan
@@ -153,6 +154,16 @@ def test_language_benchmark_v4_pack_loads_expected_cases():
         "language_v4_cpp_repo_chain",
         "language_v4_current_repo_chain",
         "language_v4_compare_winner_chain",
+    }
+    assert all(case.seed_prompt for case in cases)
+    assert all(case.rule_prompt for case in cases)
+
+
+def test_memory_benchmark_v1_pack_loads_expected_cases():
+    cases = load_browser_benchmark_cases("cases/memory_eval_cases_v1.jsonl")
+
+    assert {case.case_id for case in cases} == {
+        "memory_v1_repo_to_youtube",
     }
     assert all(case.seed_prompt for case in cases)
     assert all(case.rule_prompt for case in cases)
@@ -393,6 +404,109 @@ def test_language_v4_benchmark_reports_rule_hits(monkeypatch, tmp_path):
     markdown = render_browser_benchmark_markdown(report)
     assert "Language Ontology V4 Benchmark" in markdown
     assert "Memla promoted rule hits" in markdown
+
+
+def test_memory_v1_benchmark_reports_lifecycle_transitions(monkeypatch, tmp_path):
+    cases_path = tmp_path / "memory_v1_cases.jsonl"
+    cases_path.write_text(
+        json.dumps(
+            {
+                "case_id": "memory_v1_demo",
+                "seed_prompt": "pull some yt coverage on this repo and crack open the opener",
+                "prompt": "pull some yt coverage on this repo and crack open the opener please",
+                "rule_prompt": "pull some yt coverage on this repo and crack open the opener please",
+                "browser_state": {
+                    "current_url": "https://github.com/ggml-org/llama.cpp",
+                    "page_kind": "repo_page",
+                },
+                "accepted_action_sets": [["browser_search_subject:youtube", "open_search_result:1"]],
+                "expected_page_kind": "video_page",
+                "expected_url_contains": "https://www.youtube.com/watch?v=llama-cpp-overview",
+                "expected_search_engine": "youtube",
+                "expected_search_query": "ggml org llama cpp",
+                "expected_research_subject_title": "ggml-org/llama.cpp",
+                "subject_search_steps": [
+                    {
+                        "engine": "youtube",
+                        "cards": [
+                            {
+                                "index": 1,
+                                "title": "llama.cpp overview",
+                                "url": "https://www.youtube.com/watch?v=llama-cpp-overview",
+                                "summary": "An overview of the llama.cpp project.",
+                            }
+                        ],
+                    }
+                ],
+                "page_snapshots": {
+                    "https://www.youtube.com/watch?v=llama-cpp-overview": {
+                        "url": "https://www.youtube.com/watch?v=llama-cpp-overview",
+                        "page_kind": "video_page",
+                        "title": "llama.cpp overview",
+                        "summary": "An overview of the llama.cpp project.",
+                        "channel": "Repo Scout",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class DummyClient:
+        provider = "ollama"
+
+    monkeypatch.setattr("memory_system.browser_ontology_benchmark.build_llm_client", lambda **kwargs: DummyClient())
+
+    call_count = {"warm": 0}
+
+    def fake_raw(**kwargs):
+        return TerminalPlan(prompt=kwargs["prompt"], source="raw_model", actions=[])
+
+    def fake_learning(**kwargs):
+        prompt = kwargs["prompt"]
+        if prompt == "pull some yt coverage on this repo and crack open the opener":
+            return TerminalPlan(
+                prompt=prompt,
+                source="language_model",
+                actions=[
+                    TerminalAction(kind="browser_search_subject", target="youtube", resolved_target="youtube"),
+                    TerminalAction(kind="open_search_result", target="1", resolved_target="1"),
+                ],
+            )
+        if prompt.endswith("please"):
+            call_count["warm"] += 1
+            source = "language_rule" if call_count["warm"] >= 3 else "language_memory"
+            return TerminalPlan(
+                prompt=prompt,
+                source=source,
+                actions=[
+                    TerminalAction(kind="browser_search_subject", target="youtube", resolved_target="youtube"),
+                    TerminalAction(kind="open_search_result", target="1", resolved_target="1"),
+                ],
+            )
+        return TerminalPlan(prompt=prompt, source="language_model", actions=[])
+
+    monkeypatch.setattr("memory_system.browser_ontology_benchmark.build_raw_terminal_plan", fake_raw)
+    monkeypatch.setattr("memory_system.browser_ontology_benchmark.build_language_learning_plan", fake_learning)
+
+    report = run_memory_ontology_benchmark(
+        cases_path=str(cases_path),
+        raw_model="phi3:mini",
+        memla_model="phi3:mini",
+        memory_root=str(tmp_path / "memroot"),
+    )
+
+    assert report["ontology_version"] == "memory_v1"
+    assert report["avg_memla_rule_semantic_success"] == 1.0
+    assert report["cold_episodic_transition_count"] == 1
+    assert report["warm_semantic_transition_count"] == 1
+    assert report["rule_stage_transition_count"] == 1
+    assert report["memla_warm_language_memory_hit_count"] == 2
+    assert report["memla_rule_hit_count"] == 1
+
+    markdown = render_browser_benchmark_markdown(report)
+    assert "Memory Ontology V1 Benchmark" in markdown
+    assert "Warm semantic transitions" in markdown
 
 
 def test_browser_backtest_treats_github_search_url_variants_as_equivalent():

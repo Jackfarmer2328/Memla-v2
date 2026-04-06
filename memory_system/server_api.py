@@ -9,8 +9,10 @@ from fastapi import FastAPI
 from pydantic import BaseModel, Field
 import uvicorn
 
+from .memory.ontology import summarize_memory_ontology
 from .natural_terminal import (
     BrowserSessionState,
+    TERMINAL_MEMORY_ONTOLOGY_FILENAME,
     TerminalExecutionResult,
     TerminalPlan,
     build_llm_client,
@@ -20,6 +22,7 @@ from .natural_terminal import (
     load_browser_session_state,
     run_terminal_scout,
     terminal_execution_to_dict,
+    terminal_memory_ontology_path,
     terminal_model_default,
     terminal_plan_to_dict,
     terminal_scout_to_dict,
@@ -64,6 +67,12 @@ def _resolve_terminal_defaults(
 
 def _resolve_request_value(raw: str, default: str) -> str:
     return str(raw or "").strip() or default
+
+
+def _resolve_memory_ontology_path(state_path: str | Path | None) -> Path:
+    if state_path is None:
+        return terminal_memory_ontology_path()
+    return (Path(state_path).expanduser().resolve().parent / TERMINAL_MEMORY_ONTOLOGY_FILENAME).resolve()
 
 
 def _build_run_payload(
@@ -163,6 +172,15 @@ def create_memla_app(
         return {
             "ok": True,
             "state": asdict(browser_state),
+        }
+
+    @app.get("/memory")
+    def memory() -> dict[str, Any]:
+        ontology_path = _resolve_memory_ontology_path(state_path)
+        return {
+            "ok": True,
+            "path": str(ontology_path),
+            "summary": summarize_memory_ontology(ontology_path),
         }
 
     @app.post("/scout")
