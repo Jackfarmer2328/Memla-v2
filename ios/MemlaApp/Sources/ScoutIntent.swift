@@ -1,3 +1,4 @@
+import Foundation
 import AppIntents
 
 struct ScoutIntent: AppIntent {
@@ -7,10 +8,8 @@ struct ScoutIntent: AppIntent {
     @Parameter(title: "Goal")
     var goal: String
 
-    @AppStorage("memlaBaseURL")
-    private var baseURL: String = "http://192.168.1.10:8080"
-
     func perform() async throws -> some IntentResult & ReturnsValue<String> {
+        let baseURL = UserDefaults.standard.string(forKey: "memlaBaseURL") ?? "http://192.168.1.10:8080"
         let result = try await MemlaClient.shared.scout(prompt: goal, baseURL: baseURL)
         return .result(value: result.result.summary)
     }

@@ -11,12 +11,19 @@ on:
 jobs:
   build-ios:
     runs-on: macos-latest
+    permissions:
+      contents: read
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install XcodeGen
         run: brew install xcodegen
+
+      - name: Show Xcode version
+        run: xcodebuild -version
 
       - name: Generate Xcode project
         working-directory: ios/MemlaApp
@@ -25,20 +32,28 @@ jobs:
       - name: Build app for iPhone Simulator
         working-directory: ios/MemlaApp
         run: |
+          set -o pipefail
           xcodebuild \
             -project MemlaApp.xcodeproj \
             -scheme MemlaApp \
             -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO \
-            build
+            build | tee xcodebuild.log
 
       - name: Package build logs
+        if: always()
         run: |
           mkdir -p ios-artifacts
-          cp -R ~/Library/Developer/Xcode/DerivedData ios-artifacts/DerivedData
+          if [ -d ~/Library/Developer/Xcode/DerivedData ]; then
+            cp -R ~/Library/Developer/Xcode/DerivedData ios-artifacts/DerivedData
+          fi
+          if [ -f ios/MemlaApp/xcodebuild.log ]; then
+            cp ios/MemlaApp/xcodebuild.log ios-artifacts/xcodebuild.log
+          fi
 
       - name: Upload iOS build artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: memla-ios-build
