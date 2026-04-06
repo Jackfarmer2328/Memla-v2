@@ -4,7 +4,7 @@ import json
 import tomllib
 from pathlib import Path
 
-from memory_system.cli import main
+from memory_system.cli import _build_parser, _rewrite_bare_terminal_argv, main
 from memory_system.distillation.coding_proxy import ProxyResult
 from memory_system.distillation.workflow_planner import WorkflowPlan
 
@@ -377,6 +377,90 @@ def test_memla_bare_prompt_preserves_terminal_flags(monkeypatch):
     assert captured["prompt"] == "open github and search llama.cpp"
     assert captured["heuristic_only"] is True
     assert captured["model"] == "phi3:mini"
+
+
+def test_memla_bare_repo_scout_prompt_routes_to_terminal_scout():
+    parser = _build_parser()
+
+    rewritten = _rewrite_bare_terminal_argv(
+        parser,
+        ["find", "the", "top", "10", "github", "repos", "for", "local", "llms"],
+    )
+
+    assert rewritten[:3] == ["terminal", "scout", "--prompt"]
+    assert rewritten[3] == "find the top 10 github repos for local llms"
+
+
+def test_memla_serve_dispatches_to_api_server(monkeypatch, capsys):
+    captured: dict[str, object] = {}
+
+    def _fake_serve(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("memory_system.cli.serve_memla_api", _fake_serve)
+
+    rc = main(
+        [
+            "serve",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "8080",
+            "--model",
+            "phi3:mini",
+            "--heuristic-only",
+        ]
+    )
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Serving Memla API at http://0.0.0.0:8080" in out
+    assert captured["host"] == "0.0.0.0"
+    assert captured["port"] == 8080
+    assert captured["default_model"] == "phi3:mini"
+    assert captured["default_heuristic_only"] is True
+
+
+def test_memla_terminal_serve_alias_dispatches_to_api_server(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _fake_serve(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("memory_system.cli.serve_memla_api", _fake_serve)
+
+    rc = main(
+        [
+            "terminal",
+            "serve",
+            "--port",
+            "9090",
+            "--provider",
+            "ollama",
+            "--base-url",
+            "http://127.0.0.1:11435",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["port"] == 9090
+    assert captured["default_provider"] == "ollama"
+    assert captured["default_base_url"] == "http://127.0.0.1:11435"
+
+
+def test_memla_top_level_scout_command_dispatches(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _fake_terminal_scout(args):
+        captured["prompt"] = " ".join(args.prompt_text)
+        return 0
+
+    monkeypatch.setattr("memory_system.cli._handle_terminal_scout", _fake_terminal_scout)
+
+    rc = main(["scout", "find", "the", "top", "5", "github", "repos", "for", "local", "llms"])
+
+    assert rc == 0
+    assert captured["prompt"] == "find the top 5 github repos for local llms"
 
 
 def test_pyproject_exposes_memla_console_script():

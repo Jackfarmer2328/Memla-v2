@@ -25,7 +25,9 @@ from memory_system.natural_terminal import (
     execute_terminal_step,
     execute_terminal_plan,
     load_terminal_benchmark_cases,
+    render_terminal_scout_text,
     remember_language_compile,
+    run_terminal_scout,
     save_browser_session_state,
     terminal_language_memory_path,
     terminal_language_rule_path,
@@ -167,6 +169,116 @@ def test_terminal_heuristic_plan_reads_current_repo_page():
 
     assert plan.source == "heuristic"
     assert [action.kind for action in plan.actions] == ["browser_read_page"]
+
+
+def test_terminal_scout_fetches_and_ranks_repo_results(monkeypatch):
+    cards = [
+        {
+            "index": 1,
+            "title": "ollama/ollama",
+            "url": "https://github.com/ollama/ollama",
+            "summary": "Run local language models with a simple CLI.",
+            "meta": "beginner | local models",
+        },
+        {
+            "index": 2,
+            "title": "ggml-org/llama.cpp",
+            "url": "https://github.com/ggml-org/llama.cpp",
+            "summary": "Portable C/C++ LLM inference runtime with strong CPU support for weak hardware.",
+            "meta": "c++ | cpu | portable",
+        },
+        {
+            "index": 3,
+            "title": "oobabooga/text-generation-webui",
+            "url": "https://github.com/oobabooga/text-generation-webui",
+            "summary": "A configurable web UI for running local language models.",
+            "meta": "webui | configurable",
+        },
+    ]
+    snapshots = {
+        ("ollama", "ollama"): {
+            "repo": "ollama/ollama",
+            "description": "Run local language models quickly on laptops.",
+            "stars": "10k",
+            "language": "Go",
+        },
+        ("ggml-org", "llama.cpp"): {
+            "repo": "ggml-org/llama.cpp",
+            "description": "Low-level C/C++ inference runtime optimized for CPU and portable weak-hardware setups.",
+            "stars": "77k",
+            "language": "C++",
+            "topics": "cpu, inference, portable",
+        },
+        ("oobabooga", "text-generation-webui"): {
+            "repo": "oobabooga/text-generation-webui",
+            "description": "Web UI for local model experimentation.",
+            "stars": "40k",
+            "language": "Python",
+        },
+    }
+
+    monkeypatch.setattr("memory_system.natural_terminal._fetch_github_search_cards", lambda query, limit=5: cards[:limit])
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._fetch_github_repo_snapshot",
+        lambda owner, repo: snapshots.get((owner, repo), {}),
+    )
+
+    result = run_terminal_scout("find the top 3 github repos for local llms and tell me which best fits weak hardware")
+
+    assert result.ok is True
+    assert result.query == "local llms"
+    assert result.best_match["title"] == "ggml-org/llama.cpp"
+    assert len(result.top_results) == 3
+    assert any(step.transmutation == "browser_read_page" for step in result.steps)
+    assert result.browser_state["research_subject_title"] == "ggml-org/llama.cpp"
+    assert "Top results:" in render_terminal_scout_text(result)
+
+
+def test_terminal_scout_reuses_current_github_results_when_query_is_missing(monkeypatch):
+    browser_state = BrowserSessionState(
+        current_url="https://github.com/search?q=local+llm&type=repositories",
+        page_kind="search_results",
+        search_engine="github",
+        search_query="local llm",
+        result_urls=[
+            "https://github.com/ollama/ollama",
+            "https://github.com/ggml-org/llama.cpp",
+        ],
+        result_cards=[
+            {
+                "index": 1,
+                "title": "ollama/ollama",
+                "url": "https://github.com/ollama/ollama",
+                "summary": "Run local models with a simple CLI.",
+                "meta": "beginner | local",
+            },
+            {
+                "index": 2,
+                "title": "ggml-org/llama.cpp",
+                "url": "https://github.com/ggml-org/llama.cpp",
+                "summary": "Portable CPU inference runtime for local LLMs.",
+                "meta": "c++ | cpu | portable",
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._fetch_github_repo_snapshot",
+        lambda owner, repo: {
+            "repo": f"{owner}/{repo}",
+            "description": "Portable CPU inference runtime for local LLMs." if repo == "llama.cpp" else "Run local models with a simple CLI.",
+            "language": "C++" if repo == "llama.cpp" else "Go",
+        },
+    )
+
+    result = run_terminal_scout(
+        "show me the top 2 repos and bring back the best one for cpu inference",
+        browser_state=browser_state,
+    )
+
+    assert result.ok is True
+    assert result.query == "local llm"
+    assert result.steps[0].message.startswith("Reused 2 cached GitHub repo results")
+    assert result.best_match["title"] == "ggml-org/llama.cpp"
 
 
 def test_terminal_heuristic_plan_reads_current_page_for_tell_me_about_this():

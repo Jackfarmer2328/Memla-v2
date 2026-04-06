@@ -67,6 +67,9 @@ memla terminal benchmark-browser-v6 --model phi3
 memla terminal benchmark-browser-v7 --model phi3
 memla terminal benchmark-browser-v8 --model phi3
 memla terminal compare "open chrome and spotify"
+memla scout "find the top 10 github repos for local llms and tell me which best fits weak hardware"
+memla "find the top 10 github repos for local llms and tell me which best fits weak hardware"
+memla serve --host 0.0.0.0 --port 8080 --model phi3:mini
 memla terminal plan "open chrome and spotify" --heuristic-only
 memla terminal run "open chrome and spotify" --heuristic-only
 memla terminal run "open chrome" --without-memla --model phi3:mini
@@ -90,6 +93,21 @@ memla coding extract-c2a --report memla_reports/coding_c2a_9braw_vs_9bmemla/codi
 memla coding distill-c2a --trace-bank memla_reports/c2a_trace_bank_seed/c2a_trace_bank_summary.json --repo-root .
 memla coding benchmark-c2a --cases cases/coding_eval_cases.jsonl --repo-root . --raw-model qwen3.5:9b --memla-model qwen3.5:9b --raw-provider ollama --raw-base-url http://127.0.0.1:11435 --memla-provider ollama --memla-base-url http://127.0.0.1:11435
 memla math benchmark --cases cases/math_linear_c2a_v2_harder.jsonl --teacher-model qwen2.5:32b --student-models qwen3.5:4b qwen3.5:9b --executor-mode stepwise_rerank --teacher-trace-source hybrid
+```
+
+Thin-client HTTP bridge:
+- `GET /health`
+- `GET /state`
+- `POST /run`
+- `POST /scout`
+- `POST /followup`
+
+Example:
+
+```bash
+curl -X POST http://127.0.0.1:8080/scout ^
+  -H "Content-Type: application/json" ^
+  -d "{\"prompt\":\"find the top 10 github repos for local llms and tell me which best fits weak hardware\"}"
 ```
 
 Public provenance for the bundled finance demo pack lives in `cases/finance_pretrade_public_sources.md`.

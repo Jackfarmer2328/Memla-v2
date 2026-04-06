@@ -179,6 +179,9 @@ memla terminal benchmark-browser-v6 --model phi3
 memla terminal benchmark-browser-v7 --model phi3
 memla terminal benchmark-browser-v8 --model phi3
 memla terminal compare "open chrome and spotify"
+memla scout "find the top 10 github repos for local llms and tell me which best fits weak hardware"
+memla "find the top 10 github repos for local llms and tell me which best fits weak hardware"
+memla serve --host 0.0.0.0 --port 8080 --model phi3:mini
 memla terminal plan "open chrome and spotify" --heuristic-only
 memla terminal run "open chrome and spotify" --heuristic-only
 memla terminal run "open chrome" --without-memla --model phi3:mini
@@ -200,11 +203,44 @@ The terminal surface is intentionally bounded:
 - it launches known apps, opens URLs or folders, lists directories, and answers a few local status questions
 - it does not generate arbitrary shell or privileged commands
 - for common launch/open prompts, the built-in heuristic parser often avoids the model entirely
+- `memla scout ...` adds a bounded autonomy layer on top of the browser ontology, so Memla can search GitHub, rank repo candidates, inspect the best few, and bring back a report in one shot
+- `memla serve ...` exposes the same bounded runtime over HTTP for thin clients like a SwiftUI iPhone app or Shortcuts bridge
 - the locked browser surface for benchmark/backtest work is documented in `proof/browser_ontology_v1.md`
 - the ranking/comparison extension is documented in `proof/browser_ontology_v2.md`
 - the multi-step browser research handoff layer is documented in `proof/browser_ontology_v3.md`
 - the research-completion chain that opens the follow-on result is documented in `proof/browser_ontology_v4.md`
 - the bounded research-explanation layer that opens and reads the follow-on result is documented in `proof/browser_ontology_v5.md`
+
+The HTTP layer is intentionally thin so the product seam stays stable:
+
+```bash
+memla serve --host 0.0.0.0 --port 8080 --model phi3:mini
+```
+
+Available routes:
+- `GET /health`
+- `GET /state`
+- `POST /run`
+- `POST /scout`
+- `POST /followup`
+
+Example scout request:
+
+```bash
+curl -X POST http://127.0.0.1:8080/scout ^
+  -H "Content-Type: application/json" ^
+  -d "{\"prompt\":\"find the top 10 github repos for local llms and tell me which best fits weak hardware\"}"
+```
+
+Example follow-up request:
+
+```bash
+curl -X POST http://127.0.0.1:8080/followup ^
+  -H "Content-Type: application/json" ^
+  -d "{\"prompt\":\"find a youtube video about it then open the first one and summarize it\"}"
+```
+
+There is also a root `server.py`, so `uvicorn server:app --host 0.0.0.0 --port 8080` works if you want a plain FastAPI entrypoint for iPhone or Apple Shortcuts prototyping.
 
 Extract a normalized finance trace bank from one or more pre-trade benchmark reports:
 

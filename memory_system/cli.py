@@ -5,6 +5,7 @@ from dataclasses import asdict, is_dataclass
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 import time
@@ -73,6 +74,7 @@ from .browser_ontology_benchmark import (
     run_language_learning_benchmark,
     run_language_rule_benchmark,
 )
+from .server_api import serve_memla_api
 from .natural_terminal import (
     build_terminal_step_report,
     build_llm_client as build_terminal_llm_client,
@@ -84,12 +86,15 @@ from .natural_terminal import (
     render_terminal_benchmark_markdown,
     render_terminal_execution_text,
     render_terminal_plan_text,
+    render_terminal_scout_text,
     render_terminal_step_execution_text,
     render_terminal_step_report_text,
     run_terminal_benchmark,
+    run_terminal_scout,
     terminal_execution_to_dict,
     terminal_model_default,
     terminal_plan_to_dict,
+    terminal_scout_to_dict,
     terminal_step_execution_to_dict,
     terminal_step_report_to_dict,
 )
@@ -217,6 +222,18 @@ def _format_terminal_duration(seconds: float) -> str:
     return f"{max(float(seconds), 0.0):.3f}s"
 
 
+def _looks_like_terminal_scout_prompt(prompt: str) -> bool:
+    normalized = " ".join(str(prompt or "").strip().lower().split())
+    if not normalized:
+        return False
+    repo_hit = bool(re.search(r"\b(?:github|repo|repos|repository|repositories)\b", normalized))
+    scout_hit = any(
+        token in normalized
+        for token in {"top ", "best repo", "align", "match", "fit", "bring back", "show me", "list ", "scout"}
+    )
+    return repo_hit and scout_hit
+
+
 def _build_terminal_request_plan(args: argparse.Namespace, prompt: str, browser_state=None):
     if getattr(args, "without_memla", False):
         if getattr(args, "heuristic_only", False):
@@ -238,6 +255,25 @@ def _build_terminal_request_plan(args: argparse.Namespace, prompt: str, browser_
         temperature=args.temperature,
         browser_state=browser_state,
     )
+
+
+def _configure_terminal_scout_parser(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--prompt", "-p", default="", help="Bounded autonomous scouting request.")
+    parser.add_argument("prompt_text", nargs="*", help="Prompt words if you want to skip --prompt.")
+    parser.add_argument("--json", action="store_true", help="Emit structured JSON instead of readable text.")
+    parser.set_defaults(func=_handle_terminal_scout)
+
+
+def _configure_memla_serve_parser(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--host", default="127.0.0.1", help="Host interface for the local Memla API server.")
+    parser.add_argument("--port", type=int, default=8080, help="Port for the local Memla API server.")
+    parser.add_argument("--state-path", default="", help="Optional explicit terminal browser state path.")
+    parser.add_argument("--model", default=_terminal_model_default(), help="Default fallback local model for HTTP requests.")
+    parser.add_argument("--provider", default="ollama", help="Default provider for model fallback requests.")
+    parser.add_argument("--base-url", default="", help="Optional default base URL for model fallback requests.")
+    parser.add_argument("--temperature", type=float, default=0.1, help="Default fallback model temperature.")
+    parser.add_argument("--heuristic-only", action="store_true", help="Start the API in heuristic-only mode by default.")
+    parser.set_defaults(func=_handle_memla_serve)
 
 
 _PUBLIC_SITE_VERCEL_CONFIG = {
@@ -943,6 +979,26 @@ def _handle_terminal_run(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def _handle_terminal_scout(args: argparse.Namespace) -> int:
+    prompt = _resolve_terminal_prompt(args)
+    browser_state = load_browser_session_state()
+    started = time.perf_counter()
+    result = run_terminal_scout(
+        prompt,
+        browser_state=browser_state,
+        save_state=True,
+    )
+    total_seconds = round(time.perf_counter() - started, 4)
+    if args.json:
+        payload = terminal_scout_to_dict(result)
+        payload["total_duration_seconds"] = total_seconds
+        _print_json(payload)
+    else:
+        print(render_terminal_scout_text(result))
+        print(f"Total time: {_format_terminal_duration(total_seconds)}")
+    return 0 if result.ok else 1
+
+
 def _handle_terminal_step(args: argparse.Namespace) -> int:
     prompt = _resolve_terminal_prompt(args)
     browser_state = load_browser_session_state()
@@ -1025,6 +1081,28 @@ def _handle_terminal_workbench(args: argparse.Namespace) -> int:
         )
     except KeyboardInterrupt:
         print("Stopped Memla browser workbench.")
+    return 0
+
+
+def _handle_memla_serve(args: argparse.Namespace) -> int:
+    host = str(args.host or "127.0.0.1").strip() or "127.0.0.1"
+    port = int(args.port)
+    print(f"Serving Memla API at http://{host}:{port}")
+    print("Routes: GET /health, GET /state, POST /run, POST /scout, POST /followup")
+    print("Press Ctrl+C to stop the local API server.")
+    try:
+        serve_memla_api(
+            host=host,
+            port=port,
+            state_path=args.state_path or None,
+            default_model=args.model,
+            default_provider=args.provider,
+            default_base_url=args.base_url,
+            default_temperature=args.temperature,
+            default_heuristic_only=args.heuristic_only,
+        )
+    except KeyboardInterrupt:
+        print("Stopped Memla API server.")
     return 0
 
 
@@ -1603,6 +1681,12 @@ def _build_parser() -> argparse.ArgumentParser:
     policy_distill.add_argument("--json", action="store_true", help="Print the distillation summary as JSON.")
     policy_distill.set_defaults(func=_handle_distill_policy_authz)
 
+    serve_parser = subparsers.add_parser("serve", help="Serve Memla over HTTP for thin clients like iPhone or Shortcuts.")
+    _configure_memla_serve_parser(serve_parser)
+
+    scout_parser = subparsers.add_parser("scout", help="Run a bounded autonomous scout and bring a report back.")
+    _configure_terminal_scout_parser(scout_parser)
+
     terminal_parser = subparsers.add_parser("terminal", help="Run a bounded natural-language terminal assistant.")
     terminal_sub = terminal_parser.add_subparsers(dest="terminal_command")
     terminal_plan = terminal_sub.add_parser("plan", help="Build a safe action plan from a natural-language terminal request.")
@@ -1629,6 +1713,9 @@ def _build_parser() -> argparse.ArgumentParser:
     terminal_run.add_argument("--json", action="store_true", help="Emit structured JSON instead of readable text.")
     terminal_run.set_defaults(func=_handle_terminal_run)
 
+    terminal_scout = terminal_sub.add_parser("scout", help="Run a bounded autonomous GitHub scout and return a report.")
+    _configure_terminal_scout_parser(terminal_scout)
+
     terminal_step = terminal_sub.add_parser("step", help="Inspect candidate terminal/browser transmutations and optionally execute one.")
     terminal_step.add_argument("--prompt", "-p", default="", help="Natural-language terminal request.")
     terminal_step.add_argument("prompt_text", nargs="*", help="Prompt words if you want to skip --prompt.")
@@ -1652,6 +1739,9 @@ def _build_parser() -> argparse.ArgumentParser:
     terminal_workbench.add_argument("--heuristic-only", action="store_true", help="Start the workbench in heuristic-only mode by default.")
     terminal_workbench.add_argument("--trace-log", default="", help="Optional JSONL path for approved transmutation traces.")
     terminal_workbench.set_defaults(func=_handle_terminal_workbench)
+
+    terminal_serve = terminal_sub.add_parser("serve", help="Serve the Memla HTTP API for thin clients like iPhone or Shortcuts.")
+    _configure_memla_serve_parser(terminal_serve)
 
     terminal_compare = terminal_sub.add_parser("compare", help="Compare a raw small-model terminal plan against Memla on the same prompt.")
     terminal_compare.add_argument("--prompt", "-p", default="", help="Natural-language terminal request.")
@@ -1968,6 +2058,8 @@ def _rewrite_bare_terminal_argv(parser: argparse.ArgumentParser, argv: list[str]
     prompt = " ".join(prompt_parts).strip()
     if not prompt:
         return argv_list
+    if _looks_like_terminal_scout_prompt(prompt):
+        return ["terminal", "scout", "--prompt", prompt, *argv_list[option_start:]]
     return ["terminal", "run", "--prompt", prompt, *argv_list[option_start:]]
 
 

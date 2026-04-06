@@ -121,6 +121,33 @@ class TerminalExecutionResult:
 
 
 @dataclass(frozen=True)
+class TerminalScoutStep:
+    transmutation: str
+    status: str
+    message: str
+    details: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class TerminalScoutResult:
+    prompt: str
+    scout_kind: str
+    source: str
+    ok: bool
+    query: str = ""
+    goal: str = ""
+    requested_limit: int = 0
+    inspected_limit: int = 0
+    steps: list[TerminalScoutStep] = field(default_factory=list)
+    top_results: list[dict[str, Any]] = field(default_factory=list)
+    inspected_results: list[dict[str, Any]] = field(default_factory=list)
+    best_match: dict[str, Any] = field(default_factory=dict)
+    summary: str = ""
+    residual_constraints: list[str] = field(default_factory=list)
+    browser_state: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class TerminalBenchmarkCase:
     case_id: str
     prompt: str
@@ -3649,6 +3676,408 @@ def _browser_read_message(details: dict[str, Any], current_url: str) -> str:
     return f"Read current page: {summary}"
 
 
+_SCOUT_NUMBER_WORDS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+}
+
+
+def _looks_like_repo_scout_prompt(prompt: str, browser_state: BrowserSessionState | None = None) -> bool:
+    normalized = _intent_text(prompt)
+    if not normalized:
+        return False
+    if not re.search(r"\b(?:github|repo|repos|repository|repositories)\b", normalized):
+        return bool(
+            browser_state
+            and browser_state.page_kind == "search_results"
+            and browser_state.search_engine == "github"
+            and browser_state.result_cards
+            and any(token in normalized for token in {"top", "best", "align", "match", "fit", "bring back", "show me", "list"})
+        )
+    strong_signals = {
+        "top ",
+        "best repo",
+        "best repositories",
+        "aligns",
+        "matches",
+        "fits",
+        "bring back",
+        "show me",
+        "list the",
+        "list me",
+        "scout",
+        "what aligns",
+        "which aligns",
+    }
+    return any(signal in normalized for signal in strong_signals)
+
+
+def _scout_limit_from_prompt(prompt: str) -> int:
+    normalized = _normalize_goal_text(prompt)
+    for pattern in (r"\btop\s+(\d+)\b", r"\bfirst\s+(\d+)\b", r"\bshow\s+me\s+(\d+)\b", r"\blist\s+(\d+)\b"):
+        match = re.search(pattern, normalized)
+        if match:
+            try:
+                return max(1, min(int(match.group(1)), 20))
+            except ValueError:
+                continue
+    for word, value in _SCOUT_NUMBER_WORDS.items():
+        if re.search(rf"\btop\s+{word}\b", normalized):
+            return value
+        if re.search(rf"\bfirst\s+{word}\b", normalized):
+            return value
+    if any(token in normalized for token in {"top repo", "top repos", "top repository", "top repositories"}):
+        return 10
+    return 5
+
+
+def _strip_scout_tail(text: str) -> str:
+    clean = _normalize_goal_text(text)
+    for marker in (
+        " and tell me ",
+        " and bring ",
+        " and show me ",
+        " and explain ",
+        " and summarize ",
+        " and sum it up ",
+        " then ",
+        " after that ",
+        " afterwards ",
+        " next ",
+    ):
+        if marker in clean:
+            clean = clean.split(marker, 1)[0].strip()
+            break
+    return " ".join(clean.split())
+
+
+def _scout_query_from_prompt(prompt: str, browser_state: BrowserSessionState | None = None) -> str:
+    clause = _strip_scout_tail(prompt)
+    normalized = _intent_text(clause)
+    for pattern in (
+        r"\b(?:find|get|show|list|bring back|scout|see)\s+(?:me\s+)?(?:the\s+)?(?:top\s+\d+\s+)?(?:github\s+)?(?:repo|repos|repository|repositories)\s+(?:about|for|on)\s+(.+)$",
+        r"\b(?:find|get|show|tell me)\s+(?:me\s+)?(?:the\s+)?best\s+(?:github\s+)?(?:repo|repos|repository|repositories)\s+for\s+(.+)$",
+        r"\bwhat\s+is\s+the\s+best\s+(?:github\s+)?(?:repo|repos|repository|repositories)\s+for\s+(.+)$",
+        r"\b(?:top\s+\d+\s+)?(?:github\s+)?(?:repo|repos|repository|repositories)\s+(?:about|for|on)\s+(.+)$",
+        r"\b(?:find|get|show|list|bring back|scout)\s+(?:me\s+)?(?:a\s+|the\s+)?(?:cool|good|best\s+)?github\s+(?:repo|repos|repository|repositories)\s+(?:about|for|on)\s+(.+)$",
+        r"\bopen\s+github\b(?:.*?\b)?search\s+(.+)$",
+    ):
+        match = re.search(pattern, normalized)
+        if not match:
+            continue
+        query = _clean_inferred_query(str(match.group(1) or "").strip(), engine="github")
+        if query:
+            return query
+    if browser_state and browser_state.search_engine == "github" and browser_state.search_query:
+        return str(browser_state.search_query).strip()
+    return ""
+
+
+def _scout_goal_from_prompt(prompt: str, query: str) -> str:
+    normalized = _intent_text(prompt)
+    for pattern in (
+        r"\b(?:tell me|show me)\s+which\s+(?:repo|repository|one|result)\s+(?:best\s+)?(?:aligns|matches|fits)(?:\s+most)?\s+with\s+(.+)$",
+        r"\bwhich\s+(?:repo|repository|one|result)\s+(?:best\s+)?(?:aligns|matches|fits)(?:\s+most)?\s+with\s+(.+)$",
+        r"\b(?:tell me|show me)\s+the\s+best\s+(?:repo|repository|one|result)\s+for\s+(.+)$",
+        r"\b(?:best|winner)\s+(?:repo|repository|one|result)\s+for\s+(.+)$",
+        r"\b(?:best\s+)?fits\s+(.+)$",
+        r"\b(?:aligns|matches|fits)(?:\s+most)?\s+with\s+(.+)$",
+    ):
+        match = re.search(pattern, normalized)
+        if match:
+            goal = str(match.group(1) or "").strip()
+            if goal:
+                return goal
+    return query
+
+
+def _github_owner_repo_from_url(url: str) -> tuple[str, str]:
+    match = re.match(r"^https?://github\.com/([^/\s]+)/([^/\s?#]+)", str(url or "").strip(), flags=re.IGNORECASE)
+    if not match:
+        return "", ""
+    return match.group(1), match.group(2)
+
+
+def _enrich_github_repo_card(card: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(card or {})
+    owner, repo = _github_owner_repo_from_url(str(payload.get("url") or "").strip())
+    if not owner or not repo:
+        return payload
+    snapshot = _fetch_github_repo_snapshot(owner, repo)
+    if not snapshot:
+        return payload
+    description = str(snapshot.get("description") or payload.get("summary") or "").strip()
+    stars = str(snapshot.get("stars") or "").strip()
+    forks = str(snapshot.get("forks") or "").strip()
+    language = str(snapshot.get("language") or "").strip()
+    topics = str(snapshot.get("topics") or "").strip()
+    meta_parts: list[str] = []
+    if stars:
+        meta_parts.append(f"stars {stars}")
+    if forks:
+        meta_parts.append(f"forks {forks}")
+    if language:
+        meta_parts.append(language)
+    if topics:
+        meta_parts.append(topics)
+    payload.update(snapshot)
+    payload["title"] = str(snapshot.get("repo") or payload.get("title") or "").strip()
+    if description:
+        payload["summary"] = description
+    if meta_parts:
+        payload["meta"] = " | ".join(meta_parts)
+    return payload
+
+
+def _scout_result_payload(card: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(card or {})
+    return {
+        key: value
+        for key, value in {
+            "index": int(payload.get("index") or 0),
+            "title": str(payload.get("title") or "").strip(),
+            "url": str(payload.get("url") or "").strip(),
+            "summary": str(payload.get("summary") or "").strip(),
+            "meta": str(payload.get("meta") or "").strip(),
+            "score": float(payload.get("score") or 0.0),
+            "matching_terms": list(payload.get("matching_terms") or []),
+            "repo": str(payload.get("repo") or "").strip(),
+            "stars": str(payload.get("stars") or "").strip(),
+            "forks": str(payload.get("forks") or "").strip(),
+            "language": str(payload.get("language") or "").strip(),
+            "topics": str(payload.get("topics") or "").strip(),
+        }.items()
+        if value not in ("", None, [], 0) or key == "index"
+    }
+
+
+def _scout_summary_text(*, query: str, goal: str, total: int, best: dict[str, Any]) -> str:
+    title = str(best.get("title") or best.get("repo") or best.get("url") or "none").strip()
+    description = str(best.get("summary") or "").strip()
+    stars = str(best.get("stars") or "").strip()
+    language = str(best.get("language") or "").strip()
+    terms = list(best.get("matching_terms") or [])
+    reason_parts: list[str] = []
+    if terms:
+        reason_parts.append(f"matched {', '.join(str(term) for term in terms[:4])}")
+    if stars:
+        reason_parts.append(f"stars {stars}")
+    if language:
+        reason_parts.append(f"language {language}")
+    reason_text = f" ({'; '.join(reason_parts)})" if reason_parts else ""
+    if goal and goal != query:
+        lead = f"Scouted {total} GitHub repos for \"{query}\". Best match for \"{goal}\": {title}{reason_text}."
+    else:
+        lead = f"Scouted {total} GitHub repos for \"{query}\". Top pick: {title}{reason_text}."
+    if description:
+        return f"{lead} {description}".strip()
+    return lead
+
+
+def run_terminal_scout(
+    prompt: str,
+    *,
+    browser_state: BrowserSessionState | None = None,
+    state_path: str | Path | None = None,
+    save_state: bool = False,
+) -> TerminalScoutResult:
+    current_browser_state = browser_state or load_browser_session_state(state_path)
+    if not _looks_like_repo_scout_prompt(prompt, current_browser_state):
+        return TerminalScoutResult(
+            prompt=prompt,
+            scout_kind="github_repo_scout",
+            source="unsupported",
+            ok=False,
+            residual_constraints=["unsupported_scout_request"],
+            summary="Memla scout currently covers bounded GitHub repo scouting prompts.",
+            browser_state=asdict(current_browser_state),
+        )
+
+    requested_limit = _scout_limit_from_prompt(prompt)
+    query = _scout_query_from_prompt(prompt, current_browser_state)
+    goal = _scout_goal_from_prompt(prompt, query)
+    inspected_limit = min(max(requested_limit, 1), 3)
+    residuals: list[str] = []
+    steps: list[TerminalScoutStep] = []
+
+    if not query:
+        residuals.append("scout_query_missing")
+        return TerminalScoutResult(
+            prompt=prompt,
+            scout_kind="github_repo_scout",
+            source="heuristic",
+            ok=False,
+            goal=goal,
+            requested_limit=requested_limit,
+            inspected_limit=inspected_limit,
+            residual_constraints=residuals,
+            summary="Memla scout needs a GitHub repo query, or an active GitHub search-results page to reuse.",
+            browser_state=asdict(current_browser_state),
+        )
+
+    if (
+        current_browser_state.page_kind == "search_results"
+        and current_browser_state.search_engine == "github"
+        and current_browser_state.result_cards
+        and _normalize_goal_text(current_browser_state.search_query) == _normalize_goal_text(query)
+    ):
+        cards = [dict(card) for card in _cached_cards(current_browser_state)[:requested_limit]]
+        scout_state = _browser_state_for_url(
+            current_browser_state.current_url or _search_url("github", query),
+            browser_app=current_browser_state.browser_app,
+            search_engine="github",
+            search_query=query,
+            result_urls=[str(card.get("url") or "").strip() for card in cards if str(card.get("url") or "").strip()],
+            result_cards=cards,
+            evidence_items=[],
+        )
+        steps.append(
+            TerminalScoutStep(
+                transmutation="browser_extract_cards",
+                status="ok",
+                message=f"Reused {len(cards)} cached GitHub repo results for \"{query}\".",
+                details={"query": query, "result_count": len(cards)},
+            )
+        )
+    else:
+        cards = _fetch_github_search_cards(query, limit=requested_limit)
+        if not cards:
+            residuals.append("search_result_unavailable")
+            return TerminalScoutResult(
+                prompt=prompt,
+                scout_kind="github_repo_scout",
+                source="heuristic",
+                ok=False,
+                query=query,
+                goal=goal,
+                requested_limit=requested_limit,
+                inspected_limit=inspected_limit,
+                residual_constraints=residuals,
+                summary=f"Memla scout could not fetch GitHub repo results for \"{query}\".",
+                browser_state=asdict(current_browser_state),
+            )
+        scout_state = _browser_state_for_url(
+            _search_url("github", query),
+            browser_app=current_browser_state.browser_app,
+            search_engine="github",
+            search_query=query,
+            result_urls=[str(card.get("url") or "").strip() for card in cards if str(card.get("url") or "").strip()],
+            result_cards=cards,
+            evidence_items=[],
+        )
+        steps.append(
+            TerminalScoutStep(
+                transmutation="browser_extract_cards",
+                status="ok",
+                message=f"Fetched {len(cards)} GitHub repo results for \"{query}\".",
+                details={"query": query, "result_count": len(cards)},
+            )
+        )
+
+    ranked = _rank_cards_against_goal(cards, goal)
+    top_results = ranked[:requested_limit]
+    steps.append(
+        TerminalScoutStep(
+            transmutation="browser_rank_cards",
+            status="ok",
+            message=(
+                f"Ranked {len(top_results)} repo candidates against \"{goal}\"."
+                if goal
+                else f"Ranked {len(top_results)} repo candidates."
+            ),
+            details={
+                "goal": goal,
+                "top_titles": [str(item.get("title") or "").strip() for item in top_results[: min(5, len(top_results))]],
+            },
+        )
+    )
+
+    enriched_by_url: dict[str, dict[str, Any]] = {}
+    for candidate in top_results[:inspected_limit]:
+        enriched = _enrich_github_repo_card(candidate)
+        url = str(enriched.get("url") or "").strip()
+        if url:
+            enriched_by_url[url.lower()] = enriched
+        scout_state = _append_browser_evidence(
+            scout_state,
+            _evidence_item_from_subject(
+                {
+                    "title": str(enriched.get("title") or "").strip(),
+                    "url": url,
+                    "summary": str(enriched.get("summary") or "").strip(),
+                },
+                source_kind="repo_page",
+                meta="github repo",
+            ),
+        )
+        steps.append(
+            TerminalScoutStep(
+                transmutation="browser_read_page",
+                status="ok",
+                message=f"Inspected repo: {str(enriched.get('title') or url or 'unknown').strip()}",
+                details={"url": url, "stars": str(enriched.get("stars") or "").strip(), "language": str(enriched.get("language") or "").strip()},
+            )
+        )
+
+    reranked_candidates: list[dict[str, Any]] = []
+    for candidate in top_results:
+        url = str(candidate.get("url") or "").strip().lower()
+        reranked_candidates.append(dict(enriched_by_url.get(url) or candidate))
+    reranked = _rank_cards_against_goal(reranked_candidates, goal)
+    top_results = reranked[:requested_limit]
+    inspected_results = [
+        _scout_result_payload(enriched_by_url[url])
+        for url in list(enriched_by_url)
+    ]
+    best_match = dict(top_results[0]) if top_results else {}
+    if best_match:
+        scout_state = _browser_state_with_subject(scout_state, best_match)
+        scout_state = _browser_state_with_research_subject(scout_state, best_match)
+    scout_state = _browser_state_copy(
+        scout_state,
+        result_urls=[str(item.get("url") or "").strip() for item in top_results if str(item.get("url") or "").strip()],
+        result_cards=[dict(item) for item in top_results],
+    )
+    if inspected_results:
+        steps.append(
+            TerminalScoutStep(
+                transmutation="browser_rank_cards",
+                status="ok",
+                message=f"Reranked the top {len(top_results)} repos after inspecting {len(inspected_results)} candidates.",
+                details={"best_title": str(best_match.get("title") or "").strip(), "goal": goal},
+            )
+        )
+
+    summary = _scout_summary_text(query=query, goal=goal, total=len(top_results), best=best_match) if best_match else ""
+    if save_state:
+        save_browser_session_state(scout_state, path=state_path)
+    return TerminalScoutResult(
+        prompt=prompt,
+        scout_kind="github_repo_scout",
+        source="heuristic",
+        ok=bool(best_match),
+        query=query,
+        goal=goal,
+        requested_limit=requested_limit,
+        inspected_limit=inspected_limit,
+        steps=steps,
+        top_results=[_scout_result_payload(item) for item in top_results],
+        inspected_results=inspected_results,
+        best_match=_scout_result_payload(best_match),
+        summary=summary,
+        residual_constraints=residuals,
+        browser_state=asdict(scout_state),
+    )
+
+
 def _is_browser_app(app_key: str) -> bool:
     return _normalize_label(app_key) in {"brave", "chrome", "edge", "firefox"}
 
@@ -6195,6 +6624,43 @@ def render_terminal_execution_text(result: TerminalExecutionResult) -> str:
     return "\n".join(lines)
 
 
+def render_terminal_scout_text(result: TerminalScoutResult) -> str:
+    lines = [
+        f"Prompt: {result.prompt}",
+        f"Scout kind: {result.scout_kind}",
+        f"Scout source: {result.source}",
+        f"Execution: {'OK' if result.ok else 'FAILED'}",
+    ]
+    if result.query:
+        lines.append(f"Query: {result.query}")
+    if result.goal:
+        lines.append(f"Goal: {result.goal}")
+    if result.summary:
+        lines.append(f"Summary: {result.summary}")
+    if result.top_results:
+        lines.append("Top results:")
+        for item in result.top_results:
+            title = str(item.get("title") or item.get("repo") or item.get("url") or "unknown").strip()
+            summary = str(item.get("summary") or "").strip()
+            meta = str(item.get("meta") or "").strip()
+            score = item.get("score")
+            line = f"- {int(item.get('index') or 0)}. {title}"
+            if score not in (None, ""):
+                line += f" [score {score}]"
+            if meta:
+                line += f" ({meta})"
+            lines.append(line)
+            if summary:
+                lines.append(f"  {summary}")
+    if result.steps:
+        lines.append("Scout loop:")
+        for step in result.steps:
+            lines.append(f"- {step.transmutation}: {step.status.upper()} {step.message}")
+    if result.residual_constraints:
+        lines.append(f"Residual constraints: {', '.join(result.residual_constraints)}")
+    return "\n".join(lines)
+
+
 def render_terminal_step_execution_text(execution: TerminalStepExecution) -> str:
     lines = [
         render_terminal_step_report_text(execution.report),
@@ -6212,6 +6678,10 @@ def terminal_plan_to_dict(plan: TerminalPlan) -> dict[str, Any]:
 
 
 def terminal_execution_to_dict(result: TerminalExecutionResult) -> dict[str, Any]:
+    return asdict(result)
+
+
+def terminal_scout_to_dict(result: TerminalScoutResult) -> dict[str, Any]:
     return asdict(result)
 
 
@@ -6282,6 +6752,8 @@ __all__ = [
     "TerminalPlan",
     "TerminalExecutionRecord",
     "TerminalExecutionResult",
+    "TerminalScoutResult",
+    "TerminalScoutStep",
     "TerminalStepExecution",
     "TerminalStepReport",
     "TerminalTransmutationCandidate",
@@ -6296,14 +6768,17 @@ __all__ = [
     "render_terminal_benchmark_markdown",
     "render_terminal_execution_text",
     "render_terminal_plan_text",
+    "render_terminal_scout_text",
     "render_terminal_step_execution_text",
     "render_terminal_step_report_text",
     "run_terminal_benchmark",
+    "run_terminal_scout",
     "save_browser_session_state",
     "terminal_browser_state_path",
     "terminal_execution_to_dict",
     "terminal_model_default",
     "terminal_plan_to_dict",
+    "terminal_scout_to_dict",
     "terminal_step_execution_to_dict",
     "terminal_step_report_to_dict",
     "terminal_trace_log_path",

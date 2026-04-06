@@ -1,0 +1,172 @@
+from __future__ import annotations
+
+from dataclasses import asdict
+
+from fastapi.testclient import TestClient
+
+from memory_system.natural_terminal import (
+    BrowserSessionState,
+    TerminalAction,
+    TerminalExecutionRecord,
+    TerminalExecutionResult,
+    TerminalPlan,
+    TerminalScoutResult,
+    TerminalScoutStep,
+    save_browser_session_state,
+)
+from memory_system.server_api import create_memla_app
+
+
+def test_memla_api_health_exposes_runtime_defaults():
+    app = create_memla_app(default_model="phi3:mini", default_provider="ollama", default_heuristic_only=True)
+    client = TestClient(app)
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["runtime_defaults"]["model"] == "phi3:mini"
+    assert payload["runtime_defaults"]["heuristic_only"] is True
+
+
+def test_memla_api_state_reads_browser_state(tmp_path):
+    state_path = tmp_path / "terminal_browser_state.json"
+    save_browser_session_state(
+        BrowserSessionState(
+            current_url="https://github.com/ggml-org/llama.cpp",
+            page_kind="repo_page",
+            search_engine="github",
+            search_query="llama.cpp",
+            subject_title="ggml-org/llama.cpp",
+            subject_url="https://github.com/ggml-org/llama.cpp",
+        ),
+        path=state_path,
+    )
+    app = create_memla_app(state_path=state_path)
+    client = TestClient(app)
+
+    response = client.get("/state")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["state"]["page_kind"] == "repo_page"
+    assert payload["state"]["subject_title"] == "ggml-org/llama.cpp"
+
+
+def test_memla_api_scout_returns_structured_result(monkeypatch, tmp_path):
+    state_path = tmp_path / "terminal_browser_state.json"
+
+    def _fake_scout(prompt: str, **kwargs):
+        assert prompt == "find the top 10 github repos for local llms"
+        assert kwargs["save_state"] is True
+        return TerminalScoutResult(
+            prompt=prompt,
+            scout_kind="github_repo_scout",
+            source="heuristic",
+            ok=True,
+            query="local llms",
+            goal="",
+            requested_limit=10,
+            inspected_limit=3,
+            steps=[TerminalScoutStep(transmutation="browser_extract_cards", status="ok", message="Fetched cards.")],
+            top_results=[{"title": "mudler/LocalAI", "url": "https://github.com/mudler/LocalAI"}],
+            best_match={"title": "mudler/LocalAI", "url": "https://github.com/mudler/LocalAI"},
+            summary="Best match: mudler/LocalAI",
+            browser_state=asdict(BrowserSessionState(current_url="https://github.com/search?q=local+llms&type=repositories", page_kind="search_results")),
+        )
+
+    monkeypatch.setattr("memory_system.server_api.run_terminal_scout", _fake_scout)
+    app = create_memla_app(state_path=state_path)
+    client = TestClient(app)
+
+    response = client.post("/scout", json={"prompt": "find the top 10 github repos for local llms"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["mode"] == "scout"
+    assert payload["result"]["best_match"]["title"] == "mudler/LocalAI"
+
+
+def test_memla_api_run_returns_plan_and_execution(monkeypatch, tmp_path):
+    state_path = tmp_path / "terminal_browser_state.json"
+
+    def _fake_build_plan(**kwargs):
+        assert kwargs["prompt"] == "open github and search llama.cpp"
+        assert kwargs["heuristic_only"] is True
+        return TerminalPlan(
+            prompt=kwargs["prompt"],
+            source="heuristic",
+            actions=[
+                TerminalAction(
+                    kind="open_url",
+                    target="https://github.com/search?q=llama.cpp&type=repositories",
+                )
+            ],
+        )
+
+    def _fake_execute(plan: TerminalPlan, **kwargs):
+        assert plan.prompt == "open github and search llama.cpp"
+        return TerminalExecutionResult(
+            prompt=plan.prompt,
+            plan_source=plan.source,
+            ok=True,
+            records=[
+                TerminalExecutionRecord(
+                    kind="open_url",
+                    target="https://github.com/search?q=llama.cpp&type=repositories",
+                    status="ok",
+                    message="Opened GitHub search.",
+                )
+            ],
+            browser_state=asdict(
+                BrowserSessionState(
+                    current_url="https://github.com/search?q=llama.cpp&type=repositories",
+                    page_kind="search_results",
+                    search_engine="github",
+                    search_query="llama.cpp",
+                )
+            ),
+        )
+
+    monkeypatch.setattr("memory_system.server_api.build_terminal_plan", _fake_build_plan)
+    monkeypatch.setattr("memory_system.server_api.execute_terminal_plan", _fake_execute)
+    app = create_memla_app(state_path=state_path, default_model="phi3:mini", default_heuristic_only=True)
+    client = TestClient(app)
+
+    response = client.post("/run", json={"prompt": "open github and search llama.cpp"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["mode"] == "execution"
+    assert payload["plan"]["source"] == "heuristic"
+    assert payload["execution"]["records"][0]["status"] == "ok"
+    assert payload["runtime_defaults"]["model"] == "phi3:mini"
+
+
+def test_memla_api_followup_returns_plan_when_no_actions(monkeypatch, tmp_path):
+    state_path = tmp_path / "terminal_browser_state.json"
+
+    def _fake_build_plan(**kwargs):
+        return TerminalPlan(
+            prompt=kwargs["prompt"],
+            source="fallback",
+            clarification="Need a clearer follow-up.",
+            residual_constraints=["unsupported_or_ambiguous_request"],
+        )
+
+    monkeypatch.setattr("memory_system.server_api.build_terminal_plan", _fake_build_plan)
+    app = create_memla_app(state_path=state_path, default_heuristic_only=True)
+    client = TestClient(app)
+
+    response = client.post("/followup", json={"prompt": "do that thing again"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["mode"] == "plan"
+    assert payload["execution"] is None
+    assert payload["plan"]["clarification"] == "Need a clearer follow-up."
