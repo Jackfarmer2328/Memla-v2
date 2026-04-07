@@ -10,6 +10,17 @@ struct MemlaBrowserRoute: Identifiable {
     let option: ActionBridgeOption?
 }
 
+struct WebsiteC2ACandidate: Identifiable {
+    let id: String
+    let label: String
+    let url: String
+    let kind: String
+    let score: Double
+    let matchedTerms: [String]
+    let blocked: Bool
+    let reason: String
+}
+
 struct WebsiteC2AState {
     let pageKind: String
     let summary: String
@@ -17,6 +28,7 @@ struct WebsiteC2AState {
     let inputs: [String]
     let buttons: [String]
     let links: [String]
+    let candidates: [WebsiteC2ACandidate]
     let safeActions: [String]
     let residuals: [String]
     let textSnippet: String
@@ -185,11 +197,12 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         let inputs = stringArray(payload["inputs"])
         let buttons = stringArray(payload["buttons"])
         let links = stringArray(payload["links"])
+        let candidates = candidateArray(payload["candidates"], capsule: capsule)
         let combined = ([title, url, textSnippet] + headings + inputs + buttons + links).joined(separator: " ").lowercased()
         let pageKind = classifyPageKind(combined: combined, url: url, inputs: inputs)
-        let safeActions = candidateActions(pageKind: pageKind, inputs: inputs, buttons: buttons, links: links)
+        let safeActions = candidateActions(pageKind: pageKind, inputs: inputs, buttons: buttons, links: links, candidates: candidates)
         let residuals = residualsForPage(pageKind: pageKind, combined: combined, textSnippet: textSnippet, capsule: capsule)
-        let summary = "Compiled \(pageKind.replacingOccurrences(of: "_", with: " ")) with \(inputs.count) inputs, \(buttons.count) buttons, and \(links.count) links."
+        let summary = "Compiled \(pageKind.replacingOccurrences(of: "_", with: " ")) with \(inputs.count) inputs, \(buttons.count) buttons, \(links.count) links, and \(candidates.count) candidates."
         return WebsiteC2AState(
             pageKind: pageKind,
             summary: summary,
@@ -197,6 +210,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             inputs: inputs,
             buttons: buttons,
             links: links,
+            candidates: candidates,
             safeActions: safeActions,
             residuals: residuals,
             textSnippet: textSnippet
@@ -228,13 +242,16 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         return "web_page"
     }
 
-    private static func candidateActions(pageKind: String, inputs: [String], buttons: [String], links: [String]) -> [String] {
+    private static func candidateActions(pageKind: String, inputs: [String], buttons: [String], links: [String], candidates: [WebsiteC2ACandidate]) -> [String] {
         var actions: [String] = []
         if pageKind == "search_form" || inputs.contains(where: { $0.lowercased().contains("search") }) {
             actions.append("fill_search_query")
         }
         if pageKind == "search_results" && !links.isEmpty {
             actions.append("select_matching_candidate")
+        }
+        if candidates.contains(where: { !$0.blocked && !$0.url.isEmpty && $0.score > 0 }) {
+            actions.append("open_ranked_candidate")
         }
         if pageKind == "menu_or_item" {
             actions.append("review_item_and_modifiers")
@@ -299,6 +316,146 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
             return clean.isEmpty ? nil : clean
         }
+    }
+
+    private static func candidateArray(_ value: Any?, capsule: ActionCapsule?) -> [WebsiteC2ACandidate] {
+        guard let items = value as? [Any] else {
+            return []
+        }
+        let targets = candidateTargets(from: capsule)
+        let candidates = items.enumerated().compactMap { index, item -> WebsiteC2ACandidate? in
+            guard let raw = item as? [String: Any] else {
+                return nil
+            }
+            let label = stringValue(raw["label"])
+            let url = stringValue(raw["url"])
+            let kind = stringValue(raw["kind"])
+            let context = stringValue(raw["context"])
+            guard !label.isEmpty || !url.isEmpty else {
+                return nil
+            }
+            let candidateText = [label, url, context].joined(separator: " ")
+            let ranking = rankCandidate(candidateText, targets: targets)
+            let blocked = isIrreversibleCandidate(candidateText)
+            let reason: String
+            if blocked {
+                reason = "Final or irreversible action nearby"
+            } else if ranking.matchedTerms.isEmpty {
+                reason = "Visible candidate with no capsule slot match yet"
+            } else {
+                reason = "Matched \(ranking.matchedTerms.joined(separator: ", "))"
+            }
+            return WebsiteC2ACandidate(
+                id: "\(kind)-\(index)-\(url)-\(label)",
+                label: label.isEmpty ? url : label,
+                url: url,
+                kind: kind.isEmpty ? "candidate" : kind,
+                score: ranking.score,
+                matchedTerms: ranking.matchedTerms,
+                blocked: blocked,
+                reason: reason
+            )
+        }
+        return Array(candidates.sorted { left, right in
+            if left.blocked != right.blocked {
+                return !left.blocked
+            }
+            if left.score == right.score {
+                return left.label.localizedCaseInsensitiveCompare(right.label) == .orderedAscending
+            }
+            return left.score > right.score
+        }.prefix(12))
+    }
+
+    private static func candidateTargets(from capsule: ActionCapsule?) -> [(term: String, weight: Double)] {
+        guard let capsule = capsule else {
+            return []
+        }
+        var targets: [(term: String, weight: Double)] = []
+        for (key, value) in capsule.slots {
+            let cleanValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleanValue.isEmpty else {
+                continue
+            }
+            let weight: Double
+            switch key {
+            case "restaurant", "merchant", "destination":
+                weight = 8.0
+            case "item", "service_class":
+                weight = 2.0
+            case "modifiers":
+                weight = 1.5
+            case "service":
+                continue
+            default:
+                weight = 1.0
+            }
+            let parts: [String]
+            if key == "modifiers" {
+                parts = cleanValue
+                    .replacingOccurrences(of: " and ", with: ",")
+                    .components(separatedBy: CharacterSet(charactersIn: ",/+&"))
+            } else {
+                parts = [cleanValue]
+            }
+            for part in parts {
+                let normalized = normalizedText(part)
+                if normalized.count > 1 {
+                    targets.append((term: normalized, weight: weight))
+                }
+            }
+        }
+        return targets
+    }
+
+    private static func rankCandidate(_ candidateText: String, targets: [(term: String, weight: Double)]) -> (score: Double, matchedTerms: [String]) {
+        let text = normalizedText(candidateText)
+        var score = 0.0
+        var matches: [String] = []
+        for target in targets {
+            let term = target.term
+            guard !term.isEmpty else {
+                continue
+            }
+            if text.contains(term) {
+                score += target.weight
+                matches.append(term)
+                continue
+            }
+            let tokens = term.split(separator: " ").map(String.init).filter { $0.count > 2 }
+            if !tokens.isEmpty && tokens.allSatisfy({ text.contains($0) }) {
+                score += target.weight * 0.55
+                matches.append(term)
+            }
+        }
+        return (score: score, matchedTerms: Array(dictUnique(matches)))
+    }
+
+    private static func isIrreversibleCandidate(_ candidateText: String) -> Bool {
+        let text = normalizedText(candidateText)
+        let blockedTerms = [
+            "checkout",
+            "place order",
+            "submit order",
+            "complete order",
+            "purchase",
+            "payment",
+            "pay now",
+            "confirm order",
+            "book ride",
+            "reserve",
+            "send message",
+        ]
+        return blockedTerms.contains { text.contains($0) }
+    }
+
+    private static func normalizedText(_ value: String) -> String {
+        value
+            .lowercased()
+            .replacingOccurrences(of: "’", with: "'")
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 
     private static func dictUnique(_ values: [String]) -> [String] {
@@ -416,6 +573,28 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
       const inputs = collectText('input,textarea,select', 18, (el) => el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.name || el.id || el.type || el.tagName);
       const buttons = collectText('button,[role="button"],input[type="button"],input[type="submit"],a[role="button"]', 24, (el) => el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title'));
       const links = collectText('a[href]', 24, (el) => el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || el.href);
+      const candidates = Array.from(document.querySelectorAll('a[href],button,[role="button"],input[type="button"],input[type="submit"]'))
+        .filter(visible)
+        .map((el, index) => {
+          const rawHref = el.getAttribute('href') || '';
+          let href = '';
+          try {
+            href = rawHref ? new URL(rawHref, location.href).href : '';
+          } catch (_) {
+            href = rawHref;
+          }
+          const label = clean(el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || rawHref);
+          const context = clean(el.closest('article,li,section,div')?.innerText || '').slice(0, 280);
+          return {
+            id: String(index),
+            kind: el.matches('a[href]') ? 'link' : 'button',
+            label,
+            url: href,
+            context
+          };
+        })
+        .filter((candidate) => candidate.label || candidate.url)
+        .slice(0, 40);
       const text = clean(document.body ? document.body.innerText : '');
       return {
         title: document.title || '',
@@ -424,7 +603,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         headings,
         inputs,
         buttons,
-        links
+        links,
+        candidates
       };
     })();
     """
@@ -633,6 +813,7 @@ struct MemlaBrowserView: View {
                         }
                     }
                 }
+                candidateControls(for: state)
                 if !state.residuals.isEmpty {
                     Text("Residuals: \(state.residuals.map { readableRequirement($0) }.joined(separator: ", "))")
                         .font(.caption2)
@@ -652,6 +833,48 @@ struct MemlaBrowserView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .background(Color(.systemBackground))
+    }
+
+    @ViewBuilder
+    private func candidateControls(for state: WebsiteC2AState) -> some View {
+        if !state.candidates.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Ranked Candidates")
+                    .font(.caption.weight(.semibold))
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(alignment: .top, spacing: 8) {
+                        ForEach(Array(state.candidates.prefix(8))) { candidate in
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
+                                    Text(candidate.kind.capitalized)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                    Text(String(format: "%.1f", candidate.score))
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundStyle(candidate.score > 0 ? .green : .secondary)
+                                }
+                                Text(candidate.label)
+                                    .font(.caption.weight(.semibold))
+                                    .lineLimit(2)
+                                Text(candidate.reason)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                                Button(candidate.blocked ? "Blocked" : "Open") {
+                                    openCandidate(candidate)
+                                }
+                                .buttonStyle(.bordered)
+                                .disabled(candidate.blocked || candidate.url.isEmpty)
+                            }
+                            .frame(width: 190, alignment: .leading)
+                            .padding(8)
+                            .background(candidate.score > 0 ? Color.green.opacity(0.10) : Color(.tertiarySystemBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                    }
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -818,6 +1041,18 @@ struct MemlaBrowserView: View {
             add(optionID: "generic_web_search", reason: "Target terms are not visible on this page, so search the open web.")
         }
         return suggestions
+    }
+
+    private func openCandidate(_ candidate: WebsiteC2ACandidate) {
+        guard !candidate.blocked, let url = URL(string: candidate.url) else {
+            return
+        }
+        let scheme = url.scheme?.lowercased() ?? ""
+        if scheme == "http" || scheme == "https" {
+            browser.navigate(to: url)
+            return
+        }
+        UIApplication.shared.open(url)
     }
 
     private func openBridgeOption(_ option: ActionBridgeOption) {

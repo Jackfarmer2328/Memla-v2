@@ -13,6 +13,7 @@ V1 tracks:
 - read-only website C2A inspection
 - residual-driven bridge suggestions
 - conservative search fill / search submit primitives
+- ranked page candidates extracted from visible links and buttons
 
 V1 shows:
 
@@ -26,6 +27,7 @@ V1 shows:
 - page residuals such as login, checkout, bot-check, or target-not-visible
 - recovery suggestions such as trying the installed app or neutral web search after bad landing states
 - safe search controls when Website C2A sees a search-like input
+- ranked candidates scored against capsule slots such as restaurant, item, modifiers, or destination
 
 Commerce capsules can now route through service-specific app links, service web links, or a generic web-search bridge when a service URL drops part of the capsule intent.
 
@@ -36,5 +38,7 @@ V1 intentionally does not:
 - auto-click checkout
 - auto-submit purchases
 - bypass service login or payment confirmation
+
+Candidate opening is intentionally limited to non-final candidates with usable URLs. Button-only candidates are visible as evidence, but Memla does not synthesize arbitrary page button clicks in this version.
 
 The purpose is to create the controlled surface where verifier checks and safe fill/click primitives can attach after page-state extraction is visible and stable.
