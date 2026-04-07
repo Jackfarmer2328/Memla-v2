@@ -137,6 +137,11 @@ struct MemlaActionDraftEnvelope: Codable {
     let draft: ActionDraft
 }
 
+struct MemlaActionCapsuleEnvelope: Codable {
+    let ok: Bool
+    let capsule: ActionCapsule
+}
+
 struct ActionDraft: Codable, Identifiable {
     var id: String { "\(actionID)-\(draftText)" }
 
@@ -173,6 +178,54 @@ struct ActionDraft: Codable, Identifiable {
         case subject
         case body
         case draftText = "draft_text"
+        case residualConstraints = "residual_constraints"
+    }
+}
+
+struct ActionCapsule: Codable, Identifiable {
+    var id: String { capsuleID }
+
+    let prompt: String
+    let capsuleID: String
+    let actionID: String
+    let title: String
+    let domain: String
+    let riskLevel: String
+    let authorizationLevel: String
+    let confirmationRequired: Bool
+    let autoSubmitAllowed: Bool
+    let status: String
+    let summary: String
+    let slots: [String: String]
+    let draftText: String
+    let bridgeKind: String
+    let bridgeURL: String
+    let bridgeLabel: String
+    let bridgeInstructions: String
+    let verifierRequirements: [String]
+    let autoSubmitBlockers: [String]
+    let residualConstraints: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case prompt
+        case capsuleID = "capsule_id"
+        case actionID = "action_id"
+        case title
+        case domain
+        case riskLevel = "risk_level"
+        case authorizationLevel = "authorization_level"
+        case confirmationRequired = "confirmation_required"
+        case autoSubmitAllowed = "auto_submit_allowed"
+        case status
+        case summary
+        case slots
+        case draftText = "draft_text"
+        case bridgeKind = "bridge_kind"
+        case bridgeURL = "bridge_url"
+        case bridgeLabel = "bridge_label"
+        case bridgeInstructions = "bridge_instructions"
+        case verifierRequirements = "verifier_requirements"
+        case autoSubmitBlockers = "auto_submit_blockers"
         case residualConstraints = "residual_constraints"
     }
 }

@@ -354,11 +354,18 @@ struct ContentView: View {
                 TextField("Ask a contact or draft an email", text: $viewModel.actionPrompt, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(2...4)
-                Button(viewModel.isLoading ? "Drafting..." : "Draft Safely") {
-                    Task { await viewModel.draftAction() }
+                HStack {
+                    Button(viewModel.isLoading ? "Drafting..." : "Draft Safely") {
+                        Task { await viewModel.draftAction() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(viewModel.isLoading)
+                    Button(viewModel.isLoading ? "Building..." : "Build Capsule") {
+                        Task { await viewModel.buildActionCapsule() }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(viewModel.isLoading)
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(viewModel.isLoading)
                 if let draft = viewModel.actionDraft {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(draft.title)
@@ -394,6 +401,57 @@ struct ContentView: View {
                         if !draft.residualConstraints.isEmpty {
                             Text(draft.residualConstraints.joined(separator: ", "))
                                 .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                if let capsule = viewModel.actionCapsule {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Divider()
+                        Text("Action Capsule")
+                            .font(.caption.weight(.semibold))
+                        Text("\(capsule.status) - \(capsule.authorizationLevel)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Text(capsule.summary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if !capsule.slots.isEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                ForEach(capsule.slots.keys.sorted(), id: \.self) { key in
+                                    if let value = capsule.slots[key], !value.isEmpty {
+                                        LabeledContent(key.replacingOccurrences(of: "_", with: " ").capitalized, value: value)
+                                            .font(.caption)
+                                    }
+                                }
+                            }
+                        }
+                        if !capsule.draftText.isEmpty {
+                            Text(capsule.draftText)
+                                .font(.caption)
+                                .textSelection(.enabled)
+                                .padding(10)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color.secondary.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                        HStack {
+                            chip(text: capsule.autoSubmitAllowed ? "auto-submit eligible" : "manual confirm")
+                            chip(text: capsule.riskLevel)
+                        }
+                        if !capsule.bridgeURL.isEmpty {
+                            Button(capsule.bridgeLabel.isEmpty ? "Open Bridge" : capsule.bridgeLabel) {
+                                openURLString(capsule.bridgeURL)
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                        if !capsule.bridgeInstructions.isEmpty {
+                            Text(capsule.bridgeInstructions)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        if !capsule.autoSubmitBlockers.isEmpty {
+                            Text("Blocked from auto-submit: \(capsule.autoSubmitBlockers.joined(separator: ", "))")
+                                .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -577,6 +635,13 @@ struct ContentView: View {
         allowed.remove(charactersIn: "&+=?")
         let encodedBody = body.addingPercentEncoding(withAllowedCharacters: allowed) ?? body
         guard let url = URL(string: "sms:?&body=\(encodedBody)") else {
+            return
+        }
+        UIApplication.shared.open(url)
+    }
+
+    private func openURLString(_ value: String) {
+        guard let url = URL(string: value) else {
             return
         }
         UIApplication.shared.open(url)

@@ -41,6 +41,14 @@ actor MemlaClient {
         )
     }
 
+    func actionCapsule(prompt: String, baseURL: String) async throws -> MemlaActionCapsuleEnvelope {
+        try await post(
+            path: "/actions/capsule",
+            baseURL: baseURL,
+            payload: MemlaActionDraftRequest(prompt: prompt)
+        )
+    }
+
     func scout(prompt: String, baseURL: String) async throws -> MemlaScoutEnvelope {
         try await post(
             path: "/scout",

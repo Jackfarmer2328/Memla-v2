@@ -31,6 +31,7 @@ final class MemlaViewModel: ObservableObject {
     @Published var memorySummary: MemorySummary?
     @Published var actionSummary: ActionSummary?
     @Published var actionDraft: ActionDraft?
+    @Published var actionCapsule: ActionCapsule?
     @Published var scoutResult: ScoutResult?
     @Published var followupResult: MemlaRunEnvelope?
     @Published var chatItems: [MemlaChatMessage] = []
@@ -84,6 +85,17 @@ final class MemlaViewModel: ObservableObject {
             let detail = response.draft.draftText.isEmpty ? response.draft.residualConstraints.joined(separator: ", ") : response.draft.draftText
             self.appendChat(speaker: "Memla", title: response.draft.title, detail: detail, isUser: false)
             self.appendActivity(title: "Action Draft", detail: "\(response.draft.actionID) - \(response.draft.safeNextStep)")
+        }
+    }
+
+    func buildActionCapsule() async {
+        await runTask { [self] in
+            self.appendChat(speaker: "You", title: "Action Capsule", detail: self.actionPrompt, isUser: true)
+            let response = try await MemlaClient.shared.actionCapsule(prompt: self.actionPrompt, baseURL: self.baseURL)
+            self.actionCapsule = response.capsule
+            try await self.refreshRuntimeSnapshots()
+            self.appendChat(speaker: "Memla", title: response.capsule.title, detail: response.capsule.summary, isUser: false)
+            self.appendActivity(title: "Action Capsule", detail: "\(response.capsule.actionID) - \(response.capsule.authorizationLevel)")
         }
     }
 

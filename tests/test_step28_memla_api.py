@@ -130,6 +130,24 @@ def test_memla_api_action_draft_returns_safe_payload_and_records_memory(tmp_path
     assert summary["kind_counts"]["action_ask_contact"] == 1
 
 
+def test_memla_api_action_capsule_returns_authorization_ladder(tmp_path):
+    state_path = tmp_path / "terminal_browser_state.json"
+    app = create_memla_app(state_path=state_path, default_heuristic_only=True)
+    client = TestClient(app)
+
+    response = client.post("/actions/capsule", json={"prompt": "get pizza from Tony's with mushrooms and give the dasher a $6 tip on DoorDash"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["capsule"]["action_id"] == "food_order_quote"
+    assert payload["capsule"]["authorization_level"] == "open_confirmation_screen"
+    assert payload["capsule"]["auto_submit_allowed"] is False
+    assert "payment_requires_user_confirmation" in payload["capsule"]["auto_submit_blockers"]
+    summary = summarize_memory_ontology(tmp_path / "terminal_memory_ontology.json")
+    assert summary["kind_counts"]["action_capsule_food_order_quote"] == 1
+
+
 def test_memla_api_scout_returns_structured_result(monkeypatch, tmp_path):
     state_path = tmp_path / "terminal_browser_state.json"
 

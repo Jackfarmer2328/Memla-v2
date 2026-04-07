@@ -179,6 +179,8 @@ def _capability_score(capability: ActionCapability, prompt: str) -> float:
         score += 0.2
     if capability.action_id == "browser_scout" and {"github", "repo"} & prompt_tokens and {"best", "top", "find"} & prompt_tokens:
         score += 0.55
+    if capability.action_id == "food_order_quote" and {"pizza", "burger", "sushi", "taco", "tacos", "wings"} & prompt_tokens and {"get", "order", "want", "buy", "grab"} & prompt_tokens:
+        score += 0.45
     if capability.action_id == "track_reply" and {"say", "said", "reply", "response"} & prompt_tokens:
         score += 0.25
     return round(min(score, 1.0), 4)

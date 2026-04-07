@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel, Field
 import uvicorn
 
+from .action_capsules import action_capsule_to_dict, create_action_capsule
 from .action_ontology import action_draft_to_dict, action_match_to_dict, classify_action_prompt, create_action_draft, summarize_action_ontology
 from .memory.ontology import adjudicate_memory_trace, summarize_memory_ontology
 from .natural_terminal import (
@@ -54,6 +55,10 @@ class MemlaActionPlanRequest(BaseModel):
 
 
 class MemlaActionDraftRequest(BaseModel):
+    prompt: str = Field(..., min_length=1)
+
+
+class MemlaActionCapsuleRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
 
 
@@ -112,6 +117,40 @@ def _record_action_draft_memory(*, draft: dict[str, Any], state_path: str | Path
         path=_resolve_memory_ontology_path(state_path),
         memory_kind=f"action_{action_id}",
         canonical_clauses=[str(draft.get("draft_text") or "").strip()],
+    )
+
+
+def _record_action_capsule_memory(*, capsule: dict[str, Any], state_path: str | Path | None) -> None:
+    action_id = str(capsule.get("action_id") or "").strip()
+    status = str(capsule.get("status") or "").strip()
+    if not action_id or status in {"needs_slots"}:
+        return
+    action_signatures = [
+        f"action:{action_id}",
+        f"capsule_status:{status or 'unknown'}",
+        f"authorization:{str(capsule.get('authorization_level') or '').strip() or 'unknown'}",
+        "confirmation:required" if bool(capsule.get("confirmation_required")) else "confirmation:not_required",
+    ]
+    adjudicate_memory_trace(
+        prompt=str(capsule.get("prompt") or "").strip(),
+        normalized_prompt=str(capsule.get("prompt") or "").strip().lower(),
+        tokens=[token for token in str(capsule.get("prompt") or "").strip().lower().split() if token],
+        context_profile={
+            "page_kind": "",
+            "search_engine": "",
+            "has_search_results": False,
+            "has_subject": False,
+            "has_evidence": False,
+        },
+        action_signatures=action_signatures,
+        source="action_capsule",
+        success=True,
+        path=_resolve_memory_ontology_path(state_path),
+        memory_kind=f"action_capsule_{action_id}",
+        canonical_clauses=[
+            str(capsule.get("summary") or "").strip(),
+            str(capsule.get("draft_text") or "").strip(),
+        ],
     )
 
 
@@ -249,6 +288,18 @@ def create_memla_app(
             "draft": draft,
         }
 
+    @app.post("/actions/capsule")
+    def action_capsule(request: MemlaActionCapsuleRequest) -> dict[str, Any]:
+        capsule = action_capsule_to_dict(create_action_capsule(request.prompt))
+        try:
+            _record_action_capsule_memory(capsule=capsule, state_path=state_path)
+        except OSError:
+            capsule["residual_constraints"] = list(capsule.get("residual_constraints") or []) + ["action_capsule_memory_persist_failed"]
+        return {
+            "ok": True,
+            "capsule": capsule,
+        }
+
     @app.post("/scout")
     def scout(request: MemlaScoutRequest) -> dict[str, Any]:
         browser_state = load_browser_session_state(state_path)
@@ -314,6 +365,7 @@ def serve_memla_api(
 
 __all__ = [
     "MemlaActionDraftRequest",
+    "MemlaActionCapsuleRequest",
     "MemlaActionPlanRequest",
     "MemlaFollowupRequest",
     "MemlaRunRequest",

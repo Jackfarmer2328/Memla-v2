@@ -24,6 +24,7 @@ Routes:
 - `GET /actions`
 - `POST /actions/plan`
 - `POST /actions/draft`
+- `POST /actions/capsule`
 - `POST /run`
 - `POST /scout`
 - `POST /followup`

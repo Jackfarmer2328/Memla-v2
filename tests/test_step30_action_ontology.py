@@ -1,3 +1,4 @@
+from memory_system.action_capsules import create_action_capsule
 from memory_system.action_ontology import create_action_draft, classify_action_prompt, summarize_action_ontology
 
 
@@ -56,3 +57,29 @@ def test_action_ontology_v2_keeps_service_actions_bridge_gated():
     assert draft.action_id == "book_ride_quote"
     assert "service_bridge_required" in draft.residual_constraints
     assert draft.safe_next_step == "design_or_bridge_required"
+
+
+def test_action_capsule_v1_opens_message_confirmation_bridge_without_autosend():
+    capsule = create_action_capsule("ask my sister what she wants from DoorDash")
+
+    assert capsule.action_id == "ask_contact"
+    assert capsule.authorization_level == "open_confirmation_screen"
+    assert capsule.status == "bridge_ready"
+    assert capsule.auto_submit_allowed is False
+    assert capsule.bridge_kind == "ios_sms_compose_body_only"
+    assert capsule.bridge_url.startswith("sms:?&body=")
+    assert "ios_messages_requires_user_send" in capsule.auto_submit_blockers
+
+
+def test_action_capsule_v1_structures_food_orders_but_blocks_autosubmit():
+    capsule = create_action_capsule("get pizza from Tony's with pepperoni and give the dasher a $6 tip on DoorDash")
+
+    assert capsule.action_id == "food_order_quote"
+    assert capsule.authorization_level == "open_confirmation_screen"
+    assert capsule.status == "service_bridge_required"
+    assert capsule.auto_submit_allowed is False
+    assert capsule.slots["service"] == "DoorDash"
+    assert capsule.slots["item"] == "pizza"
+    assert capsule.slots["tip"] == "$6"
+    assert "payment_requires_user_confirmation" in capsule.auto_submit_blockers
+    assert "user_checkout_confirmation" in capsule.verifier_requirements
