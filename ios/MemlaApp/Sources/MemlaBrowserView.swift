@@ -34,6 +34,8 @@ struct WebsiteC2AState {
     let candidates: [WebsiteC2ACandidate]
     let safeActions: [String]
     let residuals: [String]
+    let authState: String
+    let authDomain: String
     let textSnippet: String
 }
 
@@ -117,6 +119,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
     func inspectPage(capsule: ActionCapsule?) {
         isInspecting = true
         inspectionStatus = "Inspecting page..."
+        syncState()
         webView.evaluateJavaScript(Self.pageInspectionScript) { [weak self] result, error in
             DispatchQueue.main.async {
                 guard let self = self else {
@@ -263,6 +266,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         let pageKind = classifyPageKind(combined: combined, url: url, inputs: inputs)
         let safeActions = candidateActions(pageKind: pageKind, inputs: inputs, buttons: buttons, links: links, candidates: candidates)
         let residuals = residualsForPage(pageKind: pageKind, combined: combined, textSnippet: textSnippet, capsule: capsule)
+        let authState = classifyAuthState(pageKind: pageKind, combined: combined)
+        let authDomain = domainFrom(url: url)
         let summary = "Compiled \(pageKind.replacingOccurrences(of: "_", with: " ")) with \(inputs.count) inputs, \(buttons.count) buttons, \(links.count) links, and \(candidates.count) candidates."
         return WebsiteC2AState(
             pageKind: pageKind,
@@ -274,6 +279,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             candidates: candidates,
             safeActions: safeActions,
             residuals: residuals,
+            authState: authState,
+            authDomain: authDomain,
             textSnippet: textSnippet
         )
     }
@@ -360,6 +367,34 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             }
         }
         return Array(dictUnique(residuals))
+    }
+
+    private static func classifyAuthState(pageKind: String, combined: String) -> String {
+        if pageKind == "login" {
+            return "login_required"
+        }
+        let signedInHints = [
+            "account",
+            "profile",
+            "sign out",
+            "log out",
+            "orders",
+            "your address",
+            "deliver to",
+            "cart",
+            "checkout",
+        ]
+        if signedInHints.contains(where: { combined.contains($0) }) {
+            return "likely_signed_in"
+        }
+        return "unknown"
+    }
+
+    private static func domainFrom(url: String) -> String {
+        guard let host = URL(string: url)?.host else {
+            return ""
+        }
+        return host.replacingOccurrences(of: "www.", with: "")
     }
 
     private static func stringValue(_ value: Any?) -> String {
@@ -830,6 +865,8 @@ struct MemlaBrowserView: View {
     @State private var verifiedItems: Set<String> = []
     @State private var isCapsuleExpanded = false
     @State private var isC2AConsoleExpanded = false
+    @State private var isC2AConsoleClosed = false
+    @State private var authNotes: [String: String] = [:]
 
     private let commerceChecklist = [
         "restaurant_match",
@@ -850,7 +887,7 @@ struct MemlaBrowserView: View {
                 ZStack(alignment: .bottom) {
                     MemlaBrowserWebView(browser: browser)
                         .ignoresSafeArea(edges: .bottom)
-                    if hasC2AConsole {
+                    if hasC2AConsole && !isC2AConsoleClosed {
                         websiteC2AConsole
                     }
                 }
@@ -955,6 +992,7 @@ struct MemlaBrowserView: View {
                 }
 
                 Button(browser.isInspecting ? "Inspecting..." : "Inspect") {
+                    isC2AConsoleClosed = false
                     browser.inspectPage(capsule: route.capsule)
                 }
                 .disabled(browser.isInspecting || browser.isLoading)
@@ -1007,6 +1045,15 @@ struct MemlaBrowserView: View {
                 }
                 .buttonStyle(.bordered)
                 .font(.caption2)
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        isC2AConsoleClosed = true
+                    }
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.bordered)
+                .font(.caption2)
             }
 
             if let state = browser.websiteState {
@@ -1038,6 +1085,7 @@ struct MemlaBrowserView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     capsuleChip(title: "Page", value: readableRequirement(state.pageKind))
+                    capsuleChip(title: "Auth", value: readableRequirement(state.authState))
                     capsuleChip(title: "Inputs", value: "\(state.inputs.count)")
                     capsuleChip(title: "Candidates", value: "\(state.candidates.count)")
                     if let best = state.candidates.first(where: { !$0.blocked && !$0.url.isEmpty && $0.score > 0 }) {
@@ -1058,6 +1106,7 @@ struct MemlaBrowserView: View {
                         capsuleChip(title: "Buttons", value: "\(state.buttons.count)")
                         capsuleChip(title: "Links", value: "\(state.links.count)")
                         capsuleChip(title: "Candidates", value: "\(state.candidates.count)")
+                        capsuleChip(title: "Auth", value: readableRequirement(state.authState))
                     }
                 }
                 Text(state.summary)
@@ -1078,6 +1127,7 @@ struct MemlaBrowserView: View {
                     }
                 }
                 guidedStepControls(for: state)
+                authBridgeControls(for: state)
                 candidateControls(for: state)
                 if !state.residuals.isEmpty {
                     Text("Residuals: \(state.residuals.map { readableRequirement($0) }.joined(separator: ", "))")
@@ -1115,6 +1165,49 @@ struct MemlaBrowserView: View {
         }
         .padding(8)
         .background(guidanceColor(step.tone).opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    @ViewBuilder
+    private func authBridgeControls(for state: WebsiteC2AState) -> some View {
+        if state.authState == "login_required" || state.authState == "likely_signed_in" {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Label("Auth Bridge", systemImage: "person.badge.key")
+                        .font(.caption.weight(.semibold))
+                    Spacer()
+                    Text(state.authDomain.isEmpty ? "current site" : state.authDomain)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Text(authGuidance(for: state))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+                HStack(spacing: 8) {
+                    Button("I Signed In, Inspect Again") {
+                        isC2AConsoleClosed = false
+                        browser.inspectPage(capsule: route.capsule)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(browser.isInspecting || browser.isLoading)
+
+                    Button("Mark Session Likely") {
+                        rememberSessionLikely(for: state)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(state.authDomain.isEmpty)
+                }
+                if let note = rememberedAuthNote(for: state), !note.isEmpty {
+                    Text(note)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+            .padding(8)
+            .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
     }
 
     @ViewBuilder
@@ -1303,6 +1396,39 @@ struct MemlaBrowserView: View {
         } else {
             verifiedItems.insert(item)
         }
+    }
+
+    private func authGuidance(for state: WebsiteC2AState) -> String {
+        if state.authState == "login_required" {
+            return "Sign in manually inside this browser if you trust the site, then tap inspect again. Memla does not store passwords or bypass 2FA/captcha."
+        }
+        if state.authState == "likely_signed_in" {
+            return "This page has account/cart/address hints, so the session may be active. Continue with capsule verification before final checkout."
+        }
+        return "Session status is unknown. Inspect after any manual sign-in to refresh Website C2A."
+    }
+
+    private func authMemoryKey(for state: WebsiteC2AState) -> String {
+        "memla.auth.\(state.authDomain)"
+    }
+
+    private func rememberSessionLikely(for state: WebsiteC2AState) {
+        guard !state.authDomain.isEmpty else {
+            return
+        }
+        let note = "Session marked likely for \(state.authDomain). Memla stores no credentials."
+        UserDefaults.standard.set(note, forKey: authMemoryKey(for: state))
+        authNotes[state.authDomain] = note
+    }
+
+    private func rememberedAuthNote(for state: WebsiteC2AState) -> String? {
+        guard !state.authDomain.isEmpty else {
+            return nil
+        }
+        if let note = authNotes[state.authDomain] {
+            return note
+        }
+        return UserDefaults.standard.string(forKey: authMemoryKey(for: state))
     }
 
     private func guidedStep(for state: WebsiteC2AState) -> WebsiteGuidedStep {

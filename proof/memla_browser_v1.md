@@ -18,6 +18,7 @@ V1 tracks:
 - auto-reinspection after opening an in-browser bridge or URL-backed candidate
 - compact bottom console layout that preserves webview space by default
 - policy-gated safe button candidate taps
+- manual auth bridge state for login-required and likely-signed-in pages
 
 V1 shows:
 
@@ -35,6 +36,8 @@ V1 shows:
 - guidance for the current safe next step, including hard stop guidance around checkout/payment states
 - a compact console with page kind, best candidate, and guidance, expandable into full candidates/search/residuals/checklist context
 - button candidates classified as safe, caution, or blocked
+- auth guidance that asks the user to sign in manually and inspect again, without storing credentials
+- a close control for hiding the console until the next inspection
 
 Commerce capsules can now route through service-specific app links, service web links, or a generic web-search bridge when a service URL drops part of the capsule intent.
 
@@ -45,6 +48,7 @@ V1 intentionally does not:
 - auto-click checkout
 - auto-submit purchases
 - bypass service login or payment confirmation
+- store passwords or automatically perform login
 
 Candidate opening is intentionally limited to non-final candidates with usable URLs. Button-only candidates can be tapped only when their label is classified as a safe non-final control such as search, filter, view, menu, close, or load more. Caution and blocked buttons remain disabled.
 
