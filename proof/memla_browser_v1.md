@@ -35,7 +35,7 @@ V1 shows:
 - ranked candidates scored against capsule slots such as restaurant, item, modifiers, or destination
 - guidance for the current safe next step, including hard stop guidance around checkout/payment states
 - a compact console with page kind, best candidate, and guidance, expandable into full candidates/search/residuals/checklist context
-- button candidates classified as safe, caution, or blocked
+- button candidates classified as safe, review-required, or blocked
 - auth guidance that asks the user to sign in manually and inspect again, without storing credentials
 - a close control for hiding the console until the next inspection
 
@@ -50,6 +50,6 @@ V1 intentionally does not:
 - bypass service login or payment confirmation
 - store passwords or automatically perform login
 
-Candidate opening is intentionally limited to non-final candidates with usable URLs. Button-only candidates can be tapped only when their label is classified as a safe non-final control such as search, filter, view, menu, close, or load more. Caution and blocked buttons remain disabled.
+Candidate opening is intentionally limited to non-final candidates with usable URLs. Button-only candidates can be tapped directly when their label is classified as a safe non-final control such as search, filter, view, menu, close, or load more. Review-required button candidates can be tapped only through `Tap Reviewed`, and the in-page script re-blocks sensitive/final labels such as checkout, payment, place order, send, book, reserve, or delete. Blocked buttons remain disabled.
 
 The purpose is to create the controlled surface where verifier checks and safe fill/click primitives can attach after page-state extraction is visible and stable.

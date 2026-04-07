@@ -174,14 +174,15 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         }
     }
 
-    func tapButtonCandidate(_ candidate: WebsiteC2ACandidate, capsule: ActionCapsule?) {
-        guard candidate.tapSafety == "safe", candidate.kind == "button", candidate.url.isEmpty else {
+    func tapButtonCandidate(_ candidate: WebsiteC2ACandidate, allowCaution: Bool = false, capsule: ActionCapsule?) {
+        let canTap = candidate.tapSafety == "safe" || (allowCaution && candidate.tapSafety == "caution")
+        guard canTap, candidate.kind == "button", candidate.url.isEmpty else {
             buttonActionStatus = "Button tap blocked by policy: \(candidate.tapReason)"
             return
         }
         isRunningButtonAction = true
-        buttonActionStatus = "Tapping safe button..."
-        webView.evaluateJavaScript(Self.buttonTapScript(domIndex: candidate.domIndex)) { [weak self] result, error in
+        buttonActionStatus = candidate.tapSafety == "caution" ? "Tapping reviewed button..." : "Tapping safe button..."
+        webView.evaluateJavaScript(Self.buttonTapScript(domIndex: candidate.domIndex, allowCaution: allowCaution)) { [weak self] result, error in
             DispatchQueue.main.async {
                 guard let self = self else {
                     return
@@ -323,6 +324,9 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         }
         if candidates.contains(where: { $0.kind == "button" && $0.url.isEmpty && $0.tapSafety == "safe" }) {
             actions.append("tap_safe_button_candidate")
+        }
+        if candidates.contains(where: { $0.kind == "button" && $0.url.isEmpty && $0.tapSafety == "caution" }) {
+            actions.append("review_then_tap_candidate")
         }
         if pageKind == "menu_or_item" {
             actions.append("review_item_and_modifiers")
@@ -543,6 +547,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             "submit order",
             "complete order",
             "purchase",
+            "buy now",
             "payment",
             "pay now",
             "confirm order",
@@ -567,6 +572,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             "submit order",
             "complete order",
             "purchase",
+            "buy now",
             "payment",
             "pay now",
             "confirm order",
@@ -720,10 +726,12 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         """
     }
 
-    private static func buttonTapScript(domIndex: Int) -> String {
+    private static func buttonTapScript(domIndex: Int, allowCaution: Bool) -> String {
+        let allowCautionLiteral = allowCaution ? "true" : "false"
         """
         (() => {
           const targetIndex = \(domIndex);
+          const allowCaution = \(allowCautionLiteral);
           const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
           const normalized = (value) => clean(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ');
           const visible = (el) => {
@@ -751,6 +759,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             'submit order',
             'complete order',
             'purchase',
+            'buy now',
             'payment',
             'pay now',
             'confirm order',
@@ -780,7 +789,12 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             'dismiss'
           ];
           if (!safeTerms.some((term) => text.includes(term))) {
-            return { ok: false, reason: 'button_not_policy_safe', label };
+            if (!allowCaution) {
+              return { ok: false, reason: 'button_not_policy_safe', label };
+            }
+            target.scrollIntoView({ block: 'center', inline: 'center' });
+            target.click();
+            return { ok: true, reason: 'tapped_reviewed_button', label };
           }
           target.scrollIntoView({ block: 'center', inline: 'center' });
           target.click();
@@ -1279,10 +1293,12 @@ struct MemlaBrowserView: View {
             .buttonStyle(.borderedProminent)
             .disabled(browser.isRunningButtonAction)
         } else if candidate.kind == "button" && candidate.tapSafety == "caution" {
-            Button("Review") {
+            Button(browser.isRunningButtonAction ? "Tapping..." : "Tap Reviewed") {
+                tapCandidate(candidate, allowCaution: true)
             }
             .buttonStyle(.bordered)
-            .disabled(true)
+            .tint(.orange)
+            .disabled(browser.isRunningButtonAction)
         } else {
             Button("No Action") {
             }
@@ -1480,6 +1496,14 @@ struct MemlaBrowserView: View {
                 tone: "safe"
             )
         }
+        if let button = state.candidates.first(where: { $0.kind == "button" && $0.url.isEmpty && $0.tapSafety == "caution" }) {
+            return WebsiteGuidedStep(
+                title: "Review candidate tap",
+                detail: "\(button.label) needs human review first. If this is the intended item/control, use Tap Reviewed.",
+                icon: "hand.tap",
+                tone: "warning"
+            )
+        }
         if state.pageKind == "cart" {
             return WebsiteGuidedStep(
                 title: "Verify cart",
@@ -1604,8 +1628,8 @@ struct MemlaBrowserView: View {
         UIApplication.shared.open(url)
     }
 
-    private func tapCandidate(_ candidate: WebsiteC2ACandidate) {
-        browser.tapButtonCandidate(candidate, capsule: route.capsule)
+    private func tapCandidate(_ candidate: WebsiteC2ACandidate, allowCaution: Bool = false) {
+        browser.tapButtonCandidate(candidate, allowCaution: allowCaution, capsule: route.capsule)
     }
 
     private func openBridgeOption(_ option: ActionBridgeOption) {
