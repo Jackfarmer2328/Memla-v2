@@ -10,6 +10,7 @@ V1 tracks:
 - current URL
 - loading state
 - back / forward / reload controls
+- read-only website C2A inspection
 
 V1 shows:
 
@@ -17,13 +18,19 @@ V1 shows:
 - structured slots such as restaurant, item, modifiers, and tip
 - verifier checklist items
 - auto-submit blockers
+- canonical page kind
+- visible input / button / link counts
+- safe next-action candidates
+- page residuals such as login, checkout, bot-check, or target-not-visible
 
 Commerce capsules can now route through service-specific app links, service web links, or a generic web-search bridge when a service URL drops part of the capsule intent.
 
 V1 intentionally does not:
 
+- auto-fill forms
+- auto-click page controls
 - auto-click checkout
 - auto-submit purchases
 - bypass service login or payment confirmation
 
-The purpose is to create the controlled surface where future page-state extraction, verifier checks, and safe fill/click primitives can attach.
+The purpose is to create the controlled surface where verifier checks and safe fill/click primitives can attach after page-state extraction is visible and stable.

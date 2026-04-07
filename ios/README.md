@@ -41,7 +41,7 @@ The workflow now does two things:
 
 ## Memla Browser
 
-Commerce/action capsules can open web bridge options in Memla Browser, a first-party `WKWebView` surface that keeps the capsule, slots, verifier checklist, URL, and page title visible while the user navigates. It is intentionally guided-only in V1: Memla does not auto-click checkout or submit purchases.
+Commerce/action capsules can open web bridge options in Memla Browser, a first-party `WKWebView` surface that keeps the capsule, slots, verifier checklist, URL, and page title visible while the user navigates. It also has a read-only `Inspect` pass that compiles the page into a rough page kind, element counts, safe next actions, and residuals. It is intentionally guided-only in V1: Memla does not auto-click checkout or submit purchases.
 
 ## AltStore testing flow
 
