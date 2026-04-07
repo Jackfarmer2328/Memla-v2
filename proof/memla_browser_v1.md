@@ -11,6 +11,8 @@ V1 tracks:
 - loading state
 - back / forward / reload controls
 - read-only website C2A inspection
+- residual-driven bridge suggestions
+- conservative search fill / search submit primitives
 
 V1 shows:
 
@@ -22,13 +24,15 @@ V1 shows:
 - visible input / button / link counts
 - safe next-action candidates
 - page residuals such as login, checkout, bot-check, or target-not-visible
+- recovery suggestions such as trying the installed app or neutral web search after bad landing states
+- safe search controls when Website C2A sees a search-like input
 
 Commerce capsules can now route through service-specific app links, service web links, or a generic web-search bridge when a service URL drops part of the capsule intent.
 
 V1 intentionally does not:
 
-- auto-fill forms
-- auto-click page controls
+- auto-fill non-search forms
+- auto-click non-search page controls
 - auto-click checkout
 - auto-submit purchases
 - bypass service login or payment confirmation

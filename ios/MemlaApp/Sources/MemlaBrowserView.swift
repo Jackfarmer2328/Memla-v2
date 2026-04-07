@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UIKit
 import WebKit
 
 struct MemlaBrowserRoute: Identifiable {
@@ -21,6 +22,12 @@ struct WebsiteC2AState {
     let textSnippet: String
 }
 
+struct WebsiteBridgeSuggestion: Identifiable {
+    let id: String
+    let option: ActionBridgeOption
+    let reason: String
+}
+
 final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate {
     let webView: WKWebView
 
@@ -32,6 +39,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
     @Published var websiteState: WebsiteC2AState?
     @Published var inspectionStatus: String = ""
     @Published var isInspecting: Bool = false
+    @Published var searchActionStatus: String = ""
+    @Published var isRunningSearchAction: Bool = false
 
     override init() {
         let configuration = WKWebViewConfiguration()
@@ -45,6 +54,14 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         if webView.url == nil {
             webView.load(URLRequest(url: url))
         }
+        syncState()
+    }
+
+    func navigate(to url: URL) {
+        websiteState = nil
+        inspectionStatus = ""
+        searchActionStatus = ""
+        webView.load(URLRequest(url: url))
         syncState()
     }
 
@@ -90,7 +107,44 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         }
     }
 
+    func fillSearchQuery(_ query: String, submit: Bool, capsule: ActionCapsule?) {
+        let cleanQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanQuery.isEmpty else {
+            searchActionStatus = "No capsule search query is available."
+            return
+        }
+        isRunningSearchAction = true
+        searchActionStatus = submit ? "Filling and submitting search..." : "Filling search..."
+        webView.evaluateJavaScript(Self.searchFillScript(query: cleanQuery, submit: submit)) { [weak self] result, error in
+            DispatchQueue.main.async {
+                guard let self = self else {
+                    return
+                }
+                self.isRunningSearchAction = false
+                if let error = error {
+                    self.searchActionStatus = error.localizedDescription
+                    return
+                }
+                guard let payload = result as? [String: Any] else {
+                    self.searchActionStatus = "Search action returned no page result."
+                    return
+                }
+                let reason = Self.stringValue(payload["reason"]).replacingOccurrences(of: "_", with: " ")
+                let ok = payload["ok"] as? Bool ?? false
+                self.searchActionStatus = ok ? reason.capitalized : "Search action blocked: \(reason)"
+                if submit {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        self.inspectPage(capsule: capsule)
+                    }
+                }
+            }
+        }
+    }
+
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        websiteState = nil
+        inspectionStatus = ""
+        searchActionStatus = ""
         syncState()
     }
 
@@ -256,6 +310,90 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             seen.insert(value)
             return true
         }
+    }
+
+    private static func javascriptStringLiteral(_ value: String) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: [value], options: []),
+              let encodedArray = String(data: data, encoding: .utf8),
+              encodedArray.hasPrefix("["),
+              encodedArray.hasSuffix("]") else {
+            return "\"\""
+        }
+        return String(encodedArray.dropFirst().dropLast())
+    }
+
+    private static func searchFillScript(query: String, submit: Bool) -> String {
+        let queryLiteral = javascriptStringLiteral(query)
+        let submitLiteral = submit ? "true" : "false"
+        return """
+        (() => {
+          const query = \(queryLiteral);
+          const shouldSubmit = \(submitLiteral);
+          const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+          const visible = (el) => {
+            if (!el) return false;
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden') return false;
+            const rect = el.getBoundingClientRect();
+            return rect.width > 1 && rect.height > 1;
+          };
+          const labelFor = (el) => clean([
+            el.getAttribute('aria-label'),
+            el.getAttribute('placeholder'),
+            el.getAttribute('name'),
+            el.getAttribute('id'),
+            el.getAttribute('type'),
+            el.getAttribute('title')
+          ].join(' ')).toLowerCase();
+          const fields = Array.from(document.querySelectorAll('input,textarea'))
+            .filter(visible)
+            .filter((el) => {
+              const type = (el.getAttribute('type') || '').toLowerCase();
+              return !['hidden', 'password', 'checkbox', 'radio', 'file'].includes(type);
+            });
+          const target = fields.find((el) => {
+            const type = (el.getAttribute('type') || '').toLowerCase();
+            const label = labelFor(el);
+            return type === 'search' || label.includes('search') || label.includes('restaurant') || label.includes('store') || label.includes('food');
+          }) || fields[0];
+          if (!target) {
+            return { ok: false, reason: 'search_input_not_found' };
+          }
+          target.focus();
+          const valueSetter = Object.getOwnPropertyDescriptor(
+            target.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype,
+            'value'
+          )?.set;
+          if (valueSetter) {
+            valueSetter.call(target, query);
+          } else {
+            target.value = query;
+          }
+          try {
+            target.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: query }));
+          } catch (_) {
+            target.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+          target.dispatchEvent(new Event('change', { bubbles: true }));
+          if (!shouldSubmit) {
+            return { ok: true, reason: 'filled_search_query', query };
+          }
+          const buttons = Array.from(document.querySelectorAll('button,input[type="submit"],[role="button"]'))
+            .filter(visible);
+          const searchButton = buttons.find((el) => /search|find|go|submit/i.test(clean([el.innerText, el.value, el.getAttribute('aria-label'), el.getAttribute('title')].join(' '))));
+          if (searchButton && typeof searchButton.click === 'function') {
+            searchButton.click();
+            return { ok: true, reason: 'filled_and_clicked_search', query };
+          }
+          target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+          target.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+          if (target.form && typeof target.form.requestSubmit === 'function') {
+            target.form.requestSubmit();
+            return { ok: true, reason: 'filled_and_submitted_search', query };
+          }
+          return { ok: true, reason: 'filled_search_query_enter_sent', query };
+        })();
+        """
     }
 
     private static let pageInspectionScript = """
@@ -501,6 +639,8 @@ struct MemlaBrowserView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
+                searchActionControls(for: state)
+                bridgeSuggestionControls(for: state)
                 if !state.headings.isEmpty {
                     Text("Headings: \(state.headings.prefix(3).joined(separator: " / "))")
                         .font(.caption2)
@@ -512,6 +652,63 @@ struct MemlaBrowserView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .background(Color(.systemBackground))
+    }
+
+    @ViewBuilder
+    private func searchActionControls(for state: WebsiteC2AState) -> some View {
+        if let query = searchQueryIfAvailable(for: state) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Safe Search Primitive")
+                    .font(.caption.weight(.semibold))
+                HStack(spacing: 8) {
+                    Button("Fill Search") {
+                        browser.fillSearchQuery(query, submit: false, capsule: route.capsule)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(browser.isRunningSearchAction)
+
+                    Button("Fill + Submit") {
+                        browser.fillSearchQuery(query, submit: true, capsule: route.capsule)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(browser.isRunningSearchAction)
+                }
+                Text("Query: \(query)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                if !browser.searchActionStatus.isEmpty {
+                    Text(browser.searchActionStatus)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func bridgeSuggestionControls(for state: WebsiteC2AState) -> some View {
+        if !bridgeSuggestions(for: state).isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Bridge Suggestions")
+                    .font(.caption.weight(.semibold))
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(bridgeSuggestions(for: state)) { suggestion in
+                            Button(suggestion.option.label) {
+                                openBridgeOption(suggestion.option)
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
+                }
+                Text(bridgeSuggestions(for: state).map { $0.reason }.joined(separator: " "))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+        }
     }
 
     @ViewBuilder
@@ -562,6 +759,76 @@ struct MemlaBrowserView: View {
         } else {
             verifiedItems.insert(item)
         }
+    }
+
+    private func searchQueryIfAvailable(for state: WebsiteC2AState) -> String? {
+        let query = commerceSearchQuery(from: route.capsule)
+        guard !query.isEmpty else {
+            return nil
+        }
+        let exposesSearch = state.safeActions.contains("fill_search_query")
+            || state.pageKind == "search_form"
+            || state.inputs.contains { $0.lowercased().contains("search") }
+        return exposesSearch ? query : nil
+    }
+
+    private func commerceSearchQuery(from capsule: ActionCapsule?) -> String {
+        guard let capsule = capsule else {
+            return ""
+        }
+        let restaurant = capsule.slots["restaurant"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let item = capsule.slots["item"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if restaurant.isEmpty {
+            return item
+        }
+        if item.isEmpty {
+            return restaurant
+        }
+        if restaurant.lowercased().contains(item.lowercased()) {
+            return restaurant
+        }
+        return "\(restaurant) \(item)"
+    }
+
+    private func bridgeSuggestions(for state: WebsiteC2AState) -> [WebsiteBridgeSuggestion] {
+        guard let capsule = route.capsule else {
+            return []
+        }
+        var suggestions: [WebsiteBridgeSuggestion] = []
+        var seen = Set<String>()
+
+        func add(optionID: String, reason: String) {
+            guard let option = capsule.bridgeOptions.first(where: { $0.optionID == optionID }),
+                  !seen.contains(option.optionID) else {
+                return
+            }
+            seen.insert(option.optionID)
+            suggestions.append(WebsiteBridgeSuggestion(id: option.optionID, option: option, reason: reason))
+        }
+
+        if state.pageKind == "login" || state.residuals.contains("login_required") {
+            add(optionID: "service_app", reason: "Login state detected, so the installed app may have the best session.")
+            add(optionID: "generic_web_search", reason: "Neutral web search can recover when the service URL lands in login/footer state.")
+        }
+        if state.pageKind == "blocked_or_bot_check" || state.residuals.contains("bot_check_or_captcha") {
+            add(optionID: "generic_web_search", reason: "Bot-check state detected, so try a neutral web search instead.")
+            add(optionID: "service_app", reason: "The app bridge may avoid this web blocker.")
+        }
+        if state.residuals.contains("target_restaurant_not_visible") || state.residuals.contains("target_item_not_visible") {
+            add(optionID: "generic_web_search", reason: "Target terms are not visible on this page, so search the open web.")
+        }
+        return suggestions
+    }
+
+    private func openBridgeOption(_ option: ActionBridgeOption) {
+        guard let url = URL(string: option.url) else {
+            return
+        }
+        if option.kind == "in_app_web" {
+            browser.navigate(to: url)
+            return
+        }
+        UIApplication.shared.open(url)
     }
 
     private func readableRequirement(_ value: String) -> String {
