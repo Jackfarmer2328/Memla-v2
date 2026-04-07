@@ -1,9 +1,11 @@
 import Foundation
+import SafariServices
 import SwiftUI
 import UIKit
 
 struct ContentView: View {
     @EnvironmentObject private var viewModel: MemlaViewModel
+    @State private var safariRoute: SafariRoute?
     private let scoutPresets = [
         "find the top 10 github repos for local llms and tell me which best fits weak hardware",
         "find the top 10 github repos for browser agents and tell me which looks strongest",
@@ -37,6 +39,9 @@ struct ContentView: View {
                 await viewModel.refreshState()
                 await viewModel.refreshMemory()
                 await viewModel.refreshActions()
+            }
+            .sheet(item: $safariRoute) { route in
+                SafariView(url: route.url)
             }
         }
     }
@@ -438,7 +443,16 @@ struct ContentView: View {
                             chip(text: capsule.autoSubmitAllowed ? "auto-submit eligible" : "manual confirm")
                             chip(text: capsule.riskLevel)
                         }
-                        if !capsule.bridgeURL.isEmpty {
+                        if !capsule.bridgeOptions.isEmpty {
+                            HStack {
+                                ForEach(capsule.bridgeOptions) { option in
+                                    Button(option.label) {
+                                        openBridgeOption(option)
+                                    }
+                                    .buttonStyle(.bordered)
+                                }
+                            }
+                        } else if !capsule.bridgeURL.isEmpty {
                             Button(capsule.bridgeLabel.isEmpty ? "Open Bridge" : capsule.bridgeLabel) {
                                 openURLString(capsule.bridgeURL)
                             }
@@ -645,6 +659,33 @@ struct ContentView: View {
             return
         }
         UIApplication.shared.open(url)
+    }
+
+    private func openBridgeOption(_ option: ActionBridgeOption) {
+        guard let url = URL(string: option.url) else {
+            return
+        }
+        if option.kind == "in_app_web" {
+            safariRoute = SafariRoute(url: url)
+            return
+        }
+        UIApplication.shared.open(url)
+    }
+}
+
+struct SafariRoute: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
+struct SafariView: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> SFSafariViewController {
+        SFSafariViewController(url: url)
+    }
+
+    func updateUIViewController(_ uiViewController: SFSafariViewController, context: Context) {
     }
 }
 

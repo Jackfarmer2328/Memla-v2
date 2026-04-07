@@ -201,6 +201,7 @@ struct ActionCapsule: Codable, Identifiable {
     let bridgeKind: String
     let bridgeURL: String
     let bridgeLabel: String
+    let bridgeOptions: [ActionBridgeOption]
     let bridgeInstructions: String
     let verifierRequirements: [String]
     let autoSubmitBlockers: [String]
@@ -223,10 +224,29 @@ struct ActionCapsule: Codable, Identifiable {
         case bridgeKind = "bridge_kind"
         case bridgeURL = "bridge_url"
         case bridgeLabel = "bridge_label"
+        case bridgeOptions = "bridge_options"
         case bridgeInstructions = "bridge_instructions"
         case verifierRequirements = "verifier_requirements"
         case autoSubmitBlockers = "auto_submit_blockers"
         case residualConstraints = "residual_constraints"
+    }
+}
+
+struct ActionBridgeOption: Codable, Identifiable {
+    var id: String { optionID }
+
+    let optionID: String
+    let label: String
+    let kind: String
+    let url: String
+    let instructions: String
+
+    enum CodingKeys: String, CodingKey {
+        case optionID = "option_id"
+        case label
+        case kind
+        case url
+        case instructions
     }
 }
 

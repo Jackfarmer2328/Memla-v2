@@ -10,6 +10,15 @@ from .action_ontology import ActionDraftPayload, classify_action_prompt, create_
 
 
 @dataclass(frozen=True)
+class ActionBridgeOption:
+    option_id: str
+    label: str
+    kind: str
+    url: str
+    instructions: str = ""
+
+
+@dataclass(frozen=True)
 class ActionCapsule:
     prompt: str
     capsule_id: str
@@ -27,6 +36,7 @@ class ActionCapsule:
     bridge_kind: str = ""
     bridge_url: str = ""
     bridge_label: str = ""
+    bridge_options: list[ActionBridgeOption] = field(default_factory=list)
     bridge_instructions: str = ""
     verifier_requirements: list[str] = field(default_factory=list)
     auto_submit_blockers: list[str] = field(default_factory=list)
@@ -150,9 +160,45 @@ def _service_search_url(service: str, query: str) -> str:
     clean_query = quote(_clean_text(query), safe="")
     if service.lower() == "doordash":
         return f"https://www.doordash.com/search/store/{clean_query}/" if clean_query else "https://www.doordash.com/"
+    if service.lower() == "uber eats":
+        return f"https://www.ubereats.com/search?q={clean_query}" if clean_query else "https://www.ubereats.com/"
     if service.lower() == "uber":
         return "https://m.uber.com/"
+    if clean_query:
+        return f"https://www.google.com/search?q={quote(service + ' ' + _clean_text(query), safe='')}"
     return ""
+
+
+def _service_bridge_options(service: str, query: str) -> list[ActionBridgeOption]:
+    url = _service_search_url(service, query)
+    if not url:
+        return []
+    if service in {"DoorDash", "Uber Eats"}:
+        return [
+            ActionBridgeOption(
+                option_id="service_app",
+                label=f"Open {service} App",
+                kind="universal_link",
+                url=url,
+                instructions="Let iOS route this through the installed service app if available.",
+            ),
+            ActionBridgeOption(
+                option_id="service_web",
+                label="Open Web Search",
+                kind="in_app_web",
+                url=url,
+                instructions="Open the same capsule bridge inside Memla's in-app Safari view to keep the web path visible.",
+            ),
+        ]
+    return [
+        ActionBridgeOption(
+            option_id="service_web",
+            label=f"Open {service}",
+            kind="in_app_web",
+            url=url,
+            instructions="Open the capsule bridge inside Memla's in-app Safari view.",
+        )
+    ]
 
 
 def _message_capsule(prompt: str, draft: ActionDraftPayload) -> ActionCapsule:
@@ -180,6 +226,15 @@ def _message_capsule(prompt: str, draft: ActionDraftPayload) -> ActionCapsule:
         bridge_kind="ios_sms_compose_body_only" if draft.ok else "",
         bridge_url=_sms_bridge_url(draft),
         bridge_label="Open Message Draft" if draft.ok else "",
+        bridge_options=[
+            ActionBridgeOption(
+                option_id="ios_messages_body",
+                label="Open Message Draft",
+                kind="ios_messages",
+                url=_sms_bridge_url(draft),
+                instructions="User chooses the recipient and presses Send. Memla does not auto-send.",
+            )
+        ] if draft.ok else [],
         bridge_instructions="User chooses the recipient and presses Send. Memla does not auto-send.",
         verifier_requirements=["user_selected_recipient", "user_pressed_send"],
         auto_submit_blockers=blockers,
@@ -193,6 +248,8 @@ def _food_capsule(prompt: str, draft: ActionDraftPayload) -> ActionCapsule:
     item = slots.get("item", "")
     restaurant = slots.get("restaurant", "")
     search_query = " ".join(part for part in [restaurant, item] if part).strip() or item or "food"
+    bridge_options = _service_bridge_options(service, search_query)
+    bridge_url = bridge_options[0].url if bridge_options else _service_search_url(service, search_query)
     blockers = [
         "consumer_ordering_bridge_not_implemented",
         "price_not_verified",
@@ -218,9 +275,10 @@ def _food_capsule(prompt: str, draft: ActionDraftPayload) -> ActionCapsule:
         summary="Food order capsule prepared. Memla can structure the cart intent, but checkout must stay user-confirmed until the service bridge and price verifiers exist.",
         slots=slots,
         draft_text=_food_draft_text(slots),
-        bridge_kind="web_search_bridge",
-        bridge_url=_service_search_url(service, search_query),
+        bridge_kind="commerce_bridge_options",
+        bridge_url=bridge_url,
         bridge_label=f"Open {service}",
+        bridge_options=bridge_options,
         bridge_instructions="Use the structured capsule to search/build the cart. Stop at checkout for user review and purchase confirmation.",
         verifier_requirements=["restaurant_match", "item_match", "modifier_match", "tip_match", "total_price_limit", "delivery_address_match", "user_checkout_confirmation"],
         auto_submit_blockers=blockers,
@@ -231,6 +289,8 @@ def _food_capsule(prompt: str, draft: ActionDraftPayload) -> ActionCapsule:
 def _ride_capsule(prompt: str, draft: ActionDraftPayload) -> ActionCapsule:
     slots = _extract_ride_slots(prompt)
     service = slots.get("service", "ride share")
+    bridge_options = _service_bridge_options(service, "")
+    bridge_url = bridge_options[0].url if bridge_options else _service_search_url(service, "")
     blockers = [
         "ride_booking_bridge_not_implemented",
         "pickup_location_not_verified",
@@ -255,8 +315,9 @@ def _ride_capsule(prompt: str, draft: ActionDraftPayload) -> ActionCapsule:
         slots=slots,
         draft_text=_ride_draft_text(slots),
         bridge_kind="web_or_deeplink_bridge",
-        bridge_url=_service_search_url(service, ""),
+        bridge_url=bridge_url,
         bridge_label=f"Open {service}",
+        bridge_options=bridge_options,
         bridge_instructions="Use the structured capsule to request a quote. Stop before booking for user review and confirmation.",
         verifier_requirements=["pickup_location_match", "destination_match", "pickup_time_match", "price_limit", "eta_acceptance", "user_booking_confirmation"],
         auto_submit_blockers=blockers,
@@ -322,4 +383,3 @@ def create_action_capsule(prompt: str) -> ActionCapsule:
 
 def action_capsule_to_dict(capsule: ActionCapsule) -> dict[str, Any]:
     return asdict(capsule)
-
