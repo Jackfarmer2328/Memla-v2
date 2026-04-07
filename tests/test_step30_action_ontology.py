@@ -86,3 +86,14 @@ def test_action_capsule_v1_structures_food_orders_but_blocks_autosubmit():
     assert capsule.bridge_options[2].url.startswith("https://www.google.com/search")
     assert "payment_requires_user_confirmation" in capsule.auto_submit_blockers
     assert "user_checkout_confirmation" in capsule.verifier_requirements
+
+
+def test_action_capsule_v1_avoids_duplicate_item_when_restaurant_contains_item():
+    capsule = create_action_capsule("DoorDash pizza from Tony's pizza, make it cheese and tip the dasher $5")
+
+    assert capsule.action_id == "food_order_quote"
+    assert capsule.slots["restaurant"] == "Tony's pizza"
+    assert capsule.slots["item"] == "pizza"
+    assert capsule.slots["modifiers"] == "cheese"
+    assert "Tony%27s%20pizza%20pizza" not in capsule.bridge_options[0].url
+    assert "Tony%27s%20pizza" in capsule.bridge_options[0].url

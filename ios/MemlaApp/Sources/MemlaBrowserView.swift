@@ -102,6 +102,7 @@ struct MemlaBrowserView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var browser = MemlaBrowserModel()
     @State private var verifiedItems: Set<String> = []
+    @State private var isCapsuleExpanded = false
 
     private let commerceChecklist = [
         "restaurant_match",
@@ -151,13 +152,16 @@ struct MemlaBrowserView: View {
                 if browser.isLoading {
                     ProgressView()
                 }
+                if route.capsule != nil {
+                    Button(isCapsuleExpanded ? "Hide" : "Plan") {
+                        isCapsuleExpanded.toggle()
+                    }
+                    .buttonStyle(.bordered)
+                    .font(.caption)
+                }
             }
 
             if let capsule = route.capsule {
-                Text(capsule.summary)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(3)
                 if !capsule.slots.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
@@ -169,14 +173,25 @@ struct MemlaBrowserView: View {
                         }
                     }
                 }
-                verificationChecklist(for: capsule)
+                if isCapsuleExpanded {
+                    Text(capsule.summary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                    verificationChecklist(for: capsule)
+                } else {
+                    Text("Tap Plan for checklist and blockers. Stop before the final purchase/send action.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             } else {
                 Text("Memla is keeping this web path inside its own browser surface so future page-state checks can attach here.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
-        .padding(14)
+        .padding(10)
         .background(Color(.secondarySystemBackground))
     }
 

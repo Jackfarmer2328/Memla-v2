@@ -105,7 +105,7 @@ def _extract_food_slots(prompt: str) -> dict[str, str]:
     if item:
         slots["item"] = _title_text(item)
 
-    modifiers = _extract_between(raw, r"\b(?:with|make it have|have)\b", r"\b(?:and|give|tip)\b")
+    modifiers = _extract_between(raw, r"\b(?:with|make it(?: have)?|have)\b", r"\b(?:and|give|tip)\b")
     if modifiers:
         slots["modifiers"] = modifiers
 
@@ -154,6 +154,18 @@ def _ride_draft_text(slots: dict[str, str]) -> str:
 def _sms_bridge_url(draft: ActionDraftPayload) -> str:
     body = quote(draft.body or "", safe="")
     return f"sms:?&body={body}" if body else ""
+
+
+def _food_search_query(*, restaurant: str, item: str) -> str:
+    clean_restaurant = _clean_text(restaurant)
+    clean_item = _clean_text(item)
+    if clean_restaurant and clean_item:
+        restaurant_tokens = set(_normalize_text(clean_restaurant).split())
+        item_tokens = set(_normalize_text(clean_item).split())
+        if item_tokens and item_tokens <= restaurant_tokens:
+            return clean_restaurant
+        return f"{clean_restaurant} {clean_item}"
+    return clean_restaurant or clean_item or "food"
 
 
 def _service_search_url(service: str, query: str) -> str:
@@ -259,7 +271,7 @@ def _food_capsule(prompt: str, draft: ActionDraftPayload) -> ActionCapsule:
     service = slots.get("service", "food delivery")
     item = slots.get("item", "")
     restaurant = slots.get("restaurant", "")
-    search_query = " ".join(part for part in [restaurant, item] if part).strip() or item or "food"
+    search_query = _food_search_query(restaurant=restaurant, item=item)
     bridge_options = _service_bridge_options(service, search_query)
     bridge_url = bridge_options[0].url if bridge_options else _service_search_url(service, search_query)
     blockers = [
