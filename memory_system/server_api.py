@@ -9,8 +9,8 @@ from fastapi import FastAPI
 from pydantic import BaseModel, Field
 import uvicorn
 
-from .action_ontology import action_match_to_dict, classify_action_prompt, summarize_action_ontology
-from .memory.ontology import summarize_memory_ontology
+from .action_ontology import action_draft_to_dict, action_match_to_dict, classify_action_prompt, create_action_draft, summarize_action_ontology
+from .memory.ontology import adjudicate_memory_trace, summarize_memory_ontology
 from .natural_terminal import (
     BrowserSessionState,
     TERMINAL_MEMORY_ONTOLOGY_FILENAME,
@@ -53,6 +53,10 @@ class MemlaActionPlanRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
 
 
+class MemlaActionDraftRequest(BaseModel):
+    prompt: str = Field(..., min_length=1)
+
+
 def _resolve_terminal_defaults(
     *,
     model: str,
@@ -78,6 +82,37 @@ def _resolve_memory_ontology_path(state_path: str | Path | None) -> Path:
     if state_path is None:
         return terminal_memory_ontology_path()
     return (Path(state_path).expanduser().resolve().parent / TERMINAL_MEMORY_ONTOLOGY_FILENAME).resolve()
+
+
+def _record_action_draft_memory(*, draft: dict[str, Any], state_path: str | Path | None) -> None:
+    if not bool(draft.get("ok")):
+        return
+    action_id = str(draft.get("action_id") or "").strip()
+    if not action_id:
+        return
+    action_signatures = [
+        f"action:{action_id}",
+        f"channel:{str(draft.get('channel') or '').strip() or 'unknown'}",
+        "confirmation:required" if bool(draft.get("confirmation_required")) else "confirmation:not_required",
+    ]
+    adjudicate_memory_trace(
+        prompt=str(draft.get("prompt") or "").strip(),
+        normalized_prompt=str(draft.get("prompt") or "").strip().lower(),
+        tokens=[token for token in str(draft.get("prompt") or "").strip().lower().split() if token],
+        context_profile={
+            "page_kind": "",
+            "search_engine": "",
+            "has_search_results": False,
+            "has_subject": False,
+            "has_evidence": False,
+        },
+        action_signatures=action_signatures,
+        source="action_draft",
+        success=True,
+        path=_resolve_memory_ontology_path(state_path),
+        memory_kind=f"action_{action_id}",
+        canonical_clauses=[str(draft.get("draft_text") or "").strip()],
+    )
 
 
 def _build_run_payload(
@@ -202,6 +237,18 @@ def create_memla_app(
             "match": action_match_to_dict(classify_action_prompt(request.prompt)),
         }
 
+    @app.post("/actions/draft")
+    def action_draft(request: MemlaActionDraftRequest) -> dict[str, Any]:
+        draft = action_draft_to_dict(create_action_draft(request.prompt))
+        try:
+            _record_action_draft_memory(draft=draft, state_path=state_path)
+        except OSError:
+            draft["residual_constraints"] = list(draft.get("residual_constraints") or []) + ["action_memory_persist_failed"]
+        return {
+            "ok": True,
+            "draft": draft,
+        }
+
     @app.post("/scout")
     def scout(request: MemlaScoutRequest) -> dict[str, Any]:
         browser_state = load_browser_session_state(state_path)
@@ -266,6 +313,7 @@ def serve_memla_api(
 
 
 __all__ = [
+    "MemlaActionDraftRequest",
     "MemlaActionPlanRequest",
     "MemlaFollowupRequest",
     "MemlaRunRequest",

@@ -101,6 +101,7 @@ Thin-client HTTP bridge:
 - `GET /memory`
 - `GET /actions`
 - `POST /actions/plan`
+- `POST /actions/draft`
 - `POST /run`
 - `POST /scout`
 - `POST /followup`

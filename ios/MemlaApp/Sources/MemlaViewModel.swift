@@ -25,10 +25,12 @@ final class MemlaViewModel: ObservableObject {
     }
     @Published var scoutPrompt: String = "find the top 10 github repos for local llms and tell me which best fits weak hardware"
     @Published var followupPrompt: String = "find a youtube video about it then open the first one and summarize it"
+    @Published var actionPrompt: String = "ask my sister what she wants from DoorDash"
     @Published var healthStatus: String = "Unknown"
     @Published var currentState: BrowserState?
     @Published var memorySummary: MemorySummary?
     @Published var actionSummary: ActionSummary?
+    @Published var actionDraft: ActionDraft?
     @Published var scoutResult: ScoutResult?
     @Published var followupResult: MemlaRunEnvelope?
     @Published var chatItems: [MemlaChatMessage] = []
@@ -70,6 +72,18 @@ final class MemlaViewModel: ObservableObject {
             let response = try await MemlaClient.shared.actions(baseURL: self.baseURL)
             self.actionSummary = response.summary
             self.appendActivity(title: "Action Ontology", detail: "\(response.summary.actionCount) actions, \(response.summary.confirmationRequiredCount) confirmation-gated")
+        }
+    }
+
+    func draftAction() async {
+        await runTask { [self] in
+            self.appendChat(speaker: "You", title: "Action Draft", detail: self.actionPrompt, isUser: true)
+            let response = try await MemlaClient.shared.actionDraft(prompt: self.actionPrompt, baseURL: self.baseURL)
+            self.actionDraft = response.draft
+            try await self.refreshRuntimeSnapshots()
+            let detail = response.draft.draftText.isEmpty ? response.draft.residualConstraints.joined(separator: ", ") : response.draft.draftText
+            self.appendChat(speaker: "Memla", title: response.draft.title, detail: detail, isUser: false)
+            self.appendActivity(title: "Action Draft", detail: "\(response.draft.actionID) - \(response.draft.safeNextStep)")
         }
     }
 

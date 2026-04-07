@@ -4,6 +4,10 @@ struct MemlaScoutRequest: Codable {
     let prompt: String
 }
 
+struct MemlaActionDraftRequest: Codable {
+    let prompt: String
+}
+
 struct MemlaFollowupRequest: Codable {
     let prompt: String
     let model: String
@@ -125,6 +129,51 @@ struct ActionCapability: Codable, Identifiable {
         case riskLevel = "risk_level"
         case confirmationRequired = "confirmation_required"
         case status
+    }
+}
+
+struct MemlaActionDraftEnvelope: Codable {
+    let ok: Bool
+    let draft: ActionDraft
+}
+
+struct ActionDraft: Codable, Identifiable {
+    var id: String { "\(actionID)-\(draftText)" }
+
+    let prompt: String
+    let ok: Bool
+    let actionID: String
+    let title: String
+    let domain: String
+    let confidence: Double
+    let riskLevel: String
+    let confirmationRequired: Bool
+    let status: String
+    let safeNextStep: String
+    let recipients: [String]
+    let channel: String
+    let subject: String
+    let body: String
+    let draftText: String
+    let residualConstraints: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case prompt
+        case ok
+        case actionID = "action_id"
+        case title
+        case domain
+        case confidence
+        case riskLevel = "risk_level"
+        case confirmationRequired = "confirmation_required"
+        case status
+        case safeNextStep = "safe_next_step"
+        case recipients
+        case channel
+        case subject
+        case body
+        case draftText = "draft_text"
+        case residualConstraints = "residual_constraints"
     }
 }
 

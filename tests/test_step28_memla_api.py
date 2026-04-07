@@ -5,6 +5,7 @@ from dataclasses import asdict
 from fastapi.testclient import TestClient
 
 from memory_system.memory.ontology import record_memory_trace
+from memory_system.memory.ontology import summarize_memory_ontology
 from memory_system.natural_terminal import (
     BrowserSessionState,
     TerminalAction,
@@ -109,6 +110,24 @@ def test_memla_api_action_plan_classifies_risky_goal():
     assert payload["ok"] is True
     assert payload["match"]["action_id"] == "book_ride_quote"
     assert payload["match"]["confirmation_required"] is True
+
+
+def test_memla_api_action_draft_returns_safe_payload_and_records_memory(tmp_path):
+    state_path = tmp_path / "terminal_browser_state.json"
+    app = create_memla_app(state_path=state_path, default_heuristic_only=True)
+    client = TestClient(app)
+
+    response = client.post("/actions/draft", json={"prompt": "ask my sister what she wants from DoorDash"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["draft"]["ok"] is True
+    assert payload["draft"]["action_id"] == "ask_contact"
+    assert payload["draft"]["draft_text"] == "To Sister: What do you want from DoorDash?"
+    summary = summarize_memory_ontology(tmp_path / "terminal_memory_ontology.json")
+    assert summary["action_count"] == 1
+    assert summary["kind_counts"]["action_ask_contact"] == 1
 
 
 def test_memla_api_scout_returns_structured_result(monkeypatch, tmp_path):

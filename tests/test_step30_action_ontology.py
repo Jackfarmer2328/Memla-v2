@@ -1,4 +1,4 @@
-from memory_system.action_ontology import classify_action_prompt, summarize_action_ontology
+from memory_system.action_ontology import create_action_draft, classify_action_prompt, summarize_action_ontology
 
 
 def test_action_ontology_classifies_browser_scout_as_implemented():
@@ -35,3 +35,24 @@ def test_action_ontology_summary_exposes_safe_capabilities():
     assert "messaging" in summary["domains"]
     assert summary["confirmation_required_count"] >= 4
     assert any(item["action_id"] == "browser_scout" for item in summary["capabilities"])
+
+
+def test_action_ontology_v2_drafts_contact_message_without_sending():
+    draft = create_action_draft("ask my sister what she wants from DoorDash")
+
+    assert draft.ok is True
+    assert draft.action_id == "ask_contact"
+    assert draft.confirmation_required is True
+    assert draft.recipients == ["Sister"]
+    assert draft.body == "What do you want from DoorDash?"
+    assert draft.draft_text == "To Sister: What do you want from DoorDash?"
+    assert "confirmation_required" in draft.residual_constraints
+
+
+def test_action_ontology_v2_keeps_service_actions_bridge_gated():
+    draft = create_action_draft("get me an uber in 10 minutes to the airport")
+
+    assert draft.ok is False
+    assert draft.action_id == "book_ride_quote"
+    assert "service_bridge_required" in draft.residual_constraints
+    assert draft.safe_next_step == "design_or_bridge_required"

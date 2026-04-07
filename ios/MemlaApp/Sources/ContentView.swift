@@ -334,7 +334,7 @@ struct ContentView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(capability.title)
                                 .font(.caption.weight(.semibold))
-                            Text("\(capability.domain) · \(capability.status)")
+                            Text("\(capability.domain) - \(capability.status)")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
@@ -347,6 +347,47 @@ struct ContentView: View {
                 Text("Money, rides, and messages stay confirmation-gated while Memla learns the action shape.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Divider()
+                Text("Draft Action")
+                    .font(.caption.weight(.semibold))
+                TextField("Ask a contact or draft an email", text: $viewModel.actionPrompt, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(2...4)
+                Button(viewModel.isLoading ? "Drafting..." : "Draft Safely") {
+                    Task { await viewModel.draftAction() }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(viewModel.isLoading)
+                if let draft = viewModel.actionDraft {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(draft.title)
+                            .font(.caption.weight(.semibold))
+                        Text("\(draft.domain) - \(draft.status) - \(draft.safeNextStep)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        if !draft.recipients.isEmpty {
+                            Text("To: \(draft.recipients.joined(separator: \", \"))")
+                                .font(.caption)
+                        }
+                        if !draft.subject.isEmpty {
+                            Text("Subject: \(draft.subject)")
+                                .font(.caption)
+                        }
+                        if !draft.draftText.isEmpty {
+                            Text(draft.draftText)
+                                .font(.subheadline)
+                                .textSelection(.enabled)
+                                .padding(10)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                        if !draft.residualConstraints.isEmpty {
+                            Text(draft.residualConstraints.joined(separator: ", "))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
             } else {
                 Text("No action ontology summary loaded yet.")
                     .font(.subheadline)

@@ -34,6 +34,26 @@ class ActionOntologyMatch:
     residual_constraints: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class ActionDraftPayload:
+    prompt: str
+    ok: bool
+    action_id: str
+    title: str
+    domain: str
+    confidence: float
+    risk_level: str
+    confirmation_required: bool
+    status: str
+    safe_next_step: str
+    recipients: list[str] = field(default_factory=list)
+    channel: str = ""
+    subject: str = ""
+    body: str = ""
+    draft_text: str = ""
+    residual_constraints: list[str] = field(default_factory=list)
+
+
 ACTION_CAPABILITIES: tuple[ActionCapability, ...] = (
     ActionCapability(
         action_id="browser_scout",
@@ -128,6 +148,19 @@ def _normalize_action_text(value: str) -> str:
     return " ".join(text.split())
 
 
+def _display_text(value: str) -> str:
+    text = " ".join(str(value or "").strip().split())
+    replacements = {
+        "doordash": "DoorDash",
+        "uber": "Uber",
+        "lyft": "Lyft",
+        "imessage": "iMessage",
+    }
+    for raw, pretty in replacements.items():
+        text = re.sub(rf"\b{re.escape(raw)}\b", pretty, text, flags=re.IGNORECASE)
+    return text
+
+
 def _capability_score(capability: ActionCapability, prompt: str) -> float:
     normalized = _normalize_action_text(prompt)
     if not normalized:
@@ -172,6 +205,84 @@ def _missing_slots(capability: ActionCapability, prompt: str) -> list[str]:
     return missing
 
 
+def _extract_recipients(prompt: str) -> list[str]:
+    normalized = _normalize_action_text(prompt)
+    contacts = [
+        ("mom", "Mom"),
+        ("dad", "Dad"),
+        ("sister", "Sister"),
+        ("brother", "Brother"),
+        ("friend", "Friend"),
+        ("wife", "Wife"),
+        ("husband", "Husband"),
+    ]
+    recipients: list[str] = []
+    for token, label in contacts:
+        if re.search(rf"\b(?:my\s+)?{re.escape(token)}\b", normalized) and label not in recipients:
+            recipients.append(label)
+    return recipients
+
+
+def _strip_recipient_prefix(text: str, recipients: list[str]) -> str:
+    clean = str(text or "").strip()
+    if not clean:
+        return ""
+    for recipient in recipients:
+        label = recipient.lower()
+        clean = re.sub(rf"^(?:my\s+)?{re.escape(label)}\b\s*(?:and\s+)?", "", clean, flags=re.IGNORECASE).strip()
+    clean = re.sub(r"^(?:to|that|saying|asking)\s+", "", clean, flags=re.IGNORECASE).strip()
+    return clean
+
+
+def _extract_message_body(prompt: str, recipients: list[str]) -> str:
+    raw = str(prompt or "").strip()
+    if not raw:
+        return ""
+    patterns = (
+        r"\bask\b\s+(.+)$",
+        r"\btell\b\s+(.+)$",
+        r"\bemail\b\s+(.+)$",
+        r"\bmessage\b\s+(.+)$",
+        r"\bimessage\b\s+(.+)$",
+        r"\btext\b\s+(.+)$",
+    )
+    body = ""
+    for pattern in patterns:
+        match = re.search(pattern, raw, flags=re.IGNORECASE)
+        if match:
+            body = str(match.group(1) or "").strip()
+            break
+    if not body:
+        return ""
+    body = _strip_recipient_prefix(body, recipients)
+    body = re.sub(r"^and\s+ask\s+", "", body, flags=re.IGNORECASE).strip()
+    body = re.sub(r"^and\s+tell\s+", "", body, flags=re.IGNORECASE).strip()
+    body = re.sub(r"^ask\s+", "", body, flags=re.IGNORECASE).strip()
+    body = _strip_recipient_prefix(body, recipients)
+    body = re.sub(r"\bwhat\s+(?:she|he|they)\s+wants\b", "what do you want", body, flags=re.IGNORECASE)
+    body = re.sub(r"\bwhat\s+(?:she|he|they)\s+want\b", "what do you want", body, flags=re.IGNORECASE)
+    body = _display_text(body)
+    if not body:
+        return ""
+    if body.lower().startswith(("what ", "when ", "where ", "who ", "why ", "how ", "can ", "could ", "would ", "do ", "did ", "are ", "is ")):
+        body = body[0].upper() + body[1:]
+        if not body.endswith("?"):
+            body += "?"
+        return body
+    return body[0].upper() + body[1:]
+
+
+def _extract_email_subject(prompt: str, body: str) -> str:
+    raw = str(prompt or "")
+    match = re.search(r"\bsubject\s+(?:is\s+)?(.+?)(?:\s+body\s+|\s+saying\s+|$)", raw, flags=re.IGNORECASE)
+    if match:
+        return _display_text(str(match.group(1) or "").strip())
+    if body:
+        words = body.rstrip(".?").split()
+        return " ".join(words[:6]) if words else "Memla follow-up"
+    return "Memla follow-up"
+
+
 def classify_action_prompt(prompt: str) -> ActionOntologyMatch:
     scored = sorted(
         ((capability, _capability_score(capability, prompt)) for capability in ACTION_CAPABILITIES),
@@ -205,6 +316,73 @@ def classify_action_prompt(prompt: str) -> ActionOntologyMatch:
     )
 
 
+def create_action_draft(prompt: str) -> ActionDraftPayload:
+    match = classify_action_prompt(prompt)
+    residuals = list(match.residual_constraints)
+    recipients = _extract_recipients(prompt)
+    channel = ""
+    subject = ""
+    body = ""
+    draft_text = ""
+    ok = False
+
+    if match.action_id in {"ask_contact", "draft_message"}:
+        channel = "iMessage" if "imessage" in _normalize_action_text(prompt) else "message"
+        body = _extract_message_body(prompt, recipients)
+        if not recipients and "missing_slots:recipient" not in residuals:
+            residuals.append("missing_slots:recipient")
+        if not body and not any(item.startswith("missing_slots:") and "message" in item for item in residuals):
+            residuals.append("missing_slots:message")
+        ok = bool(recipients and body)
+        recipient_text = ", ".join(recipients) if recipients else "recipient"
+        draft_text = f"To {recipient_text}: {body}" if body else ""
+    elif match.action_id == "send_email":
+        channel = "email"
+        recipients = recipients or []
+        body = _extract_message_body(prompt, recipients)
+        subject = _extract_email_subject(prompt, body)
+        if not recipients and "missing_slots:recipient" not in residuals:
+            residuals.append("missing_slots:recipient")
+        if not body and not any(item.startswith("missing_slots:") and "body" in item for item in residuals):
+            residuals.append("missing_slots:body")
+        ok = bool(recipients and body)
+        recipient_text = ", ".join(recipients) if recipients else "recipient"
+        draft_text = f"Email to {recipient_text}\nSubject: {subject}\n\n{body}".strip() if body else ""
+    elif match.action_id in {"book_ride_quote", "food_order_quote"}:
+        channel = "service_bridge"
+        draft_text = "Memla recognizes this request, but this action still needs a service bridge before it can prepare a real quote."
+        residuals = list(dict.fromkeys(residuals + ["service_bridge_required", "confirmation_required"]))
+    elif match.action_id == "track_reply":
+        channel = "reply_bridge"
+        draft_text = "Memla recognizes reply tracking, but iMessage replies need a supported bridge or workaround before Memla can read them."
+        residuals = list(dict.fromkeys(residuals + ["reply_bridge_required", "confirmation_required"]))
+    else:
+        draft_text = "This action is already implemented as an executable Memla path."
+        ok = match.status == "implemented"
+
+    if match.confirmation_required and "confirmation_required" not in residuals:
+        residuals.append("confirmation_required")
+
+    return ActionDraftPayload(
+        prompt=prompt,
+        ok=ok,
+        action_id=match.action_id,
+        title=match.title,
+        domain=match.domain,
+        confidence=match.confidence,
+        risk_level=match.risk_level,
+        confirmation_required=match.confirmation_required,
+        status=match.status,
+        safe_next_step=match.safe_next_step,
+        recipients=recipients,
+        channel=channel,
+        subject=subject,
+        body=body,
+        draft_text=draft_text,
+        residual_constraints=list(dict.fromkeys(residuals)),
+    )
+
+
 def summarize_action_ontology() -> dict[str, Any]:
     domains = sorted({capability.domain for capability in ACTION_CAPABILITIES})
     statuses: dict[str, int] = {}
@@ -225,3 +403,7 @@ def summarize_action_ontology() -> dict[str, Any]:
 
 def action_match_to_dict(match: ActionOntologyMatch) -> dict[str, Any]:
     return asdict(match)
+
+
+def action_draft_to_dict(draft: ActionDraftPayload) -> dict[str, Any]:
+    return asdict(draft)
