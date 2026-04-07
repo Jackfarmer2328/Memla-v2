@@ -14,6 +14,8 @@ V1 tracks:
 - residual-driven bridge suggestions
 - conservative search fill / search submit primitives
 - ranked page candidates extracted from visible links and buttons
+- guided next-step planning after inspection
+- auto-reinspection after opening an in-browser bridge or URL-backed candidate
 
 V1 shows:
 
@@ -28,6 +30,7 @@ V1 shows:
 - recovery suggestions such as trying the installed app or neutral web search after bad landing states
 - safe search controls when Website C2A sees a search-like input
 - ranked candidates scored against capsule slots such as restaurant, item, modifiers, or destination
+- guidance for the current safe next step, including hard stop guidance around checkout/payment states
 
 Commerce capsules can now route through service-specific app links, service web links, or a generic web-search bridge when a service URL drops part of the capsule intent.
 

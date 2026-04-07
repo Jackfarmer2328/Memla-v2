@@ -40,6 +40,13 @@ struct WebsiteBridgeSuggestion: Identifiable {
     let reason: String
 }
 
+struct WebsiteGuidedStep {
+    let title: String
+    let detail: String
+    let icon: String
+    let tone: String
+}
+
 final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate {
     let webView: WKWebView
 
@@ -53,6 +60,9 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
     @Published var isInspecting: Bool = false
     @Published var searchActionStatus: String = ""
     @Published var isRunningSearchAction: Bool = false
+
+    private var shouldAutoInspectAfterNavigation = false
+    private var autoInspectCapsule: ActionCapsule?
 
     override init() {
         let configuration = WKWebViewConfiguration()
@@ -69,10 +79,12 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         syncState()
     }
 
-    func navigate(to url: URL) {
+    func navigate(to url: URL, autoInspect: Bool = false, capsule: ActionCapsule? = nil) {
         websiteState = nil
         inspectionStatus = ""
         searchActionStatus = ""
+        shouldAutoInspectAfterNavigation = autoInspect
+        autoInspectCapsule = capsule
         webView.load(URLRequest(url: url))
         syncState()
     }
@@ -166,6 +178,15 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         syncState()
+        if shouldAutoInspectAfterNavigation {
+            shouldAutoInspectAfterNavigation = false
+            let capsule = autoInspectCapsule
+            autoInspectCapsule = nil
+            inspectionStatus = "Auto-inspecting next page..."
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                self?.inspectPage(capsule: capsule)
+            }
+        }
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -452,7 +473,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
     private static func normalizedText(_ value: String) -> String {
         value
             .lowercased()
-            .replacingOccurrences(of: "’", with: "'")
+            .replacingOccurrences(of: "\u{2019}", with: "'")
             .components(separatedBy: CharacterSet.alphanumerics.inverted)
             .filter { !$0.isEmpty }
             .joined(separator: " ")
@@ -813,6 +834,7 @@ struct MemlaBrowserView: View {
                         }
                     }
                 }
+                guidedStepControls(for: state)
                 candidateControls(for: state)
                 if !state.residuals.isEmpty {
                     Text("Residuals: \(state.residuals.map { readableRequirement($0) }.joined(separator: ", "))")
@@ -833,6 +855,27 @@ struct MemlaBrowserView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .background(Color(.systemBackground))
+    }
+
+    private func guidedStepControls(for state: WebsiteC2AState) -> some View {
+        let step = guidedStep(for: state)
+        return HStack(alignment: .top, spacing: 8) {
+            Image(systemName: step.icon)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(guidanceColor(step.tone))
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(step.title)
+                    .font(.caption.weight(.semibold))
+                Text(step.detail)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(8)
+        .background(guidanceColor(step.tone).opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     @ViewBuilder
@@ -984,6 +1027,100 @@ struct MemlaBrowserView: View {
         }
     }
 
+    private func guidedStep(for state: WebsiteC2AState) -> WebsiteGuidedStep {
+        if state.pageKind == "checkout" || state.residuals.contains("irreversible_action_nearby") {
+            return WebsiteGuidedStep(
+                title: "Stop before final action",
+                detail: "Checkout or payment language is visible. Verify the capsule checklist and let the user make the final purchase decision.",
+                icon: "hand.raised.fill",
+                tone: "danger"
+            )
+        }
+        if state.pageKind == "login" || state.residuals.contains("login_required") {
+            return WebsiteGuidedStep(
+                title: "Recover session",
+                detail: "This page looks like a login or footer state. Try the app bridge if you are logged in there, or use neutral web search to find a better landing page.",
+                icon: "person.crop.circle.badge.exclamationmark",
+                tone: "warning"
+            )
+        }
+        if state.pageKind == "blocked_or_bot_check" || state.residuals.contains("bot_check_or_captcha") {
+            return WebsiteGuidedStep(
+                title: "Use another bridge",
+                detail: "This looks like a blocker or bot-check. Memla should not bypass it; try app bridge or neutral web search.",
+                icon: "exclamationmark.triangle.fill",
+                tone: "warning"
+            )
+        }
+        if state.safeActions.contains("fill_search_query") {
+            return WebsiteGuidedStep(
+                title: "Fill the search box",
+                detail: "A search-like input is visible. Use the safe search primitive to fill the capsule query before selecting a result.",
+                icon: "magnifyingglass",
+                tone: "safe"
+            )
+        }
+        if let best = state.candidates.first(where: { !$0.blocked && !$0.url.isEmpty && $0.score > 0 }) {
+            return WebsiteGuidedStep(
+                title: "Open ranked candidate",
+                detail: "\(best.label) matches the capsule best right now. Open it, then Memla will inspect the next page.",
+                icon: "link",
+                tone: "safe"
+            )
+        }
+        if state.pageKind == "cart" {
+            return WebsiteGuidedStep(
+                title: "Verify cart",
+                detail: "Cart state is visible. Compare item, modifiers, tip, address, and total against the capsule before final checkout.",
+                icon: "cart.badge.questionmark",
+                tone: "warning"
+            )
+        }
+        if state.pageKind == "menu_or_item" {
+            return WebsiteGuidedStep(
+                title: "Review item page",
+                detail: "Menu or item controls are visible. Match the item and modifiers before adding anything to cart.",
+                icon: "list.bullet.rectangle",
+                tone: "safe"
+            )
+        }
+        if state.residuals.contains("target_restaurant_not_visible") || state.residuals.contains("target_item_not_visible") {
+            return WebsiteGuidedStep(
+                title: "Find a better page",
+                detail: "The capsule target is not visible here. Use the bridge suggestions or search again before opening candidates.",
+                icon: "arrow.triangle.branch",
+                tone: "warning"
+            )
+        }
+        if !state.candidates.isEmpty {
+            return WebsiteGuidedStep(
+                title: "Review visible candidates",
+                detail: "Memla found page candidates but none strongly match the capsule yet. Prefer search or user review before opening.",
+                icon: "rectangle.stack.badge.person.crop",
+                tone: "neutral"
+            )
+        }
+        return WebsiteGuidedStep(
+            title: "Continue inspection",
+            detail: "This page does not expose a clear next action yet. Navigate or search, then inspect again.",
+            icon: "scope",
+            tone: "neutral"
+        )
+    }
+
+    private func guidanceColor(_ tone: String) -> Color {
+        switch tone {
+        case "safe":
+            return .green
+        case "warning":
+            return .orange
+        case "danger":
+            return .red
+        default:
+            return .blue
+        }
+    }
+
     private func searchQueryIfAvailable(for state: WebsiteC2AState) -> String? {
         let query = commerceSearchQuery(from: route.capsule)
         guard !query.isEmpty else {
@@ -1049,7 +1186,7 @@ struct MemlaBrowserView: View {
         }
         let scheme = url.scheme?.lowercased() ?? ""
         if scheme == "http" || scheme == "https" {
-            browser.navigate(to: url)
+            browser.navigate(to: url, autoInspect: true, capsule: route.capsule)
             return
         }
         UIApplication.shared.open(url)
@@ -1060,7 +1197,7 @@ struct MemlaBrowserView: View {
             return
         }
         if option.kind == "in_app_web" {
-            browser.navigate(to: url)
+            browser.navigate(to: url, autoInspect: true, capsule: route.capsule)
             return
         }
         UIApplication.shared.open(url)
