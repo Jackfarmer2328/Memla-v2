@@ -169,6 +169,11 @@ def _service_search_url(service: str, query: str) -> str:
     return ""
 
 
+def _generic_web_search_url(service: str, query: str) -> str:
+    search = _clean_text(" ".join(part for part in [service, query] if part))
+    return f"https://www.google.com/search?q={quote(search, safe='')}" if search else "https://www.google.com/"
+
+
 def _service_bridge_options(service: str, query: str) -> list[ActionBridgeOption]:
     url = _service_search_url(service, query)
     if not url:
@@ -184,10 +189,17 @@ def _service_bridge_options(service: str, query: str) -> list[ActionBridgeOption
             ),
             ActionBridgeOption(
                 option_id="service_web",
-                label="Open Web Search",
+                label=f"Open {service} Web",
                 kind="in_app_web",
                 url=url,
-                instructions="Open the same capsule bridge inside Memla's in-app Safari view to keep the web path visible.",
+                instructions="Open the same capsule bridge inside Memla Browser to keep the web path visible.",
+            ),
+            ActionBridgeOption(
+                option_id="generic_web_search",
+                label="Search Web",
+                kind="in_app_web",
+                url=_generic_web_search_url(service, query),
+                instructions="Start from a general web search when the service URL drops part of the capsule intent.",
             ),
         ]
     return [
@@ -196,7 +208,7 @@ def _service_bridge_options(service: str, query: str) -> list[ActionBridgeOption
             label=f"Open {service}",
             kind="in_app_web",
             url=url,
-            instructions="Open the capsule bridge inside Memla's in-app Safari view.",
+            instructions="Open the capsule bridge inside Memla Browser.",
         )
     ]
 

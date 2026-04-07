@@ -1,11 +1,10 @@
 import Foundation
-import SafariServices
 import SwiftUI
 import UIKit
 
 struct ContentView: View {
     @EnvironmentObject private var viewModel: MemlaViewModel
-    @State private var safariRoute: SafariRoute?
+    @State private var browserRoute: MemlaBrowserRoute?
     private let scoutPresets = [
         "find the top 10 github repos for local llms and tell me which best fits weak hardware",
         "find the top 10 github repos for browser agents and tell me which looks strongest",
@@ -40,8 +39,8 @@ struct ContentView: View {
                 await viewModel.refreshMemory()
                 await viewModel.refreshActions()
             }
-            .sheet(item: $safariRoute) { route in
-                SafariView(url: route.url)
+            .sheet(item: $browserRoute) { route in
+                MemlaBrowserView(route: route)
             }
         }
     }
@@ -444,12 +443,14 @@ struct ContentView: View {
                             chip(text: capsule.riskLevel)
                         }
                         if !capsule.bridgeOptions.isEmpty {
-                            HStack {
-                                ForEach(capsule.bridgeOptions) { option in
-                                    Button(option.label) {
-                                        openBridgeOption(option)
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack {
+                                    ForEach(capsule.bridgeOptions) { option in
+                                        Button(option.label) {
+                                            openBridgeOption(option)
+                                        }
+                                        .buttonStyle(.bordered)
                                     }
-                                    .buttonStyle(.bordered)
                                 }
                             }
                         } else if !capsule.bridgeURL.isEmpty {
@@ -666,26 +667,10 @@ struct ContentView: View {
             return
         }
         if option.kind == "in_app_web" {
-            safariRoute = SafariRoute(url: url)
+            browserRoute = MemlaBrowserRoute(url: url, capsule: viewModel.actionCapsule, option: option)
             return
         }
         UIApplication.shared.open(url)
-    }
-}
-
-struct SafariRoute: Identifiable {
-    let id = UUID()
-    let url: URL
-}
-
-struct SafariView: UIViewControllerRepresentable {
-    let url: URL
-
-    func makeUIViewController(context: Context) -> SFSafariViewController {
-        SFSafariViewController(url: url)
-    }
-
-    func updateUIViewController(_ uiViewController: SFSafariViewController, context: Context) {
     }
 }
 

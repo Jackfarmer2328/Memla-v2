@@ -39,6 +39,10 @@ The workflow now does two things:
 - validates the app with an `iphonesimulator` build
 - produces a device-targeted `Memla-AltStore.ipa` artifact for Windows + AltStore testing
 
+## Memla Browser
+
+Commerce/action capsules can open web bridge options in Memla Browser, a first-party `WKWebView` surface that keeps the capsule, slots, verifier checklist, URL, and page title visible while the user navigates. It is intentionally guided-only in V1: Memla does not auto-click checkout or submit purchases.
+
 ## AltStore testing flow
 
 1. Run the `Build iOS App` workflow on GitHub.

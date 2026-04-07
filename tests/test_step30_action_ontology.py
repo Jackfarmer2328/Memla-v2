@@ -81,7 +81,8 @@ def test_action_capsule_v1_structures_food_orders_but_blocks_autosubmit():
     assert capsule.slots["service"] == "DoorDash"
     assert capsule.slots["item"] == "pizza"
     assert capsule.slots["tip"] == "$6"
-    assert [option.label for option in capsule.bridge_options] == ["Open DoorDash App", "Open Web Search"]
+    assert [option.label for option in capsule.bridge_options] == ["Open DoorDash App", "Open DoorDash Web", "Search Web"]
     assert capsule.bridge_options[1].kind == "in_app_web"
+    assert capsule.bridge_options[2].url.startswith("https://www.google.com/search")
     assert "payment_requires_user_confirmation" in capsule.auto_submit_blockers
     assert "user_checkout_confirmation" in capsule.verifier_requirements
