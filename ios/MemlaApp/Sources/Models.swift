@@ -64,6 +64,10 @@ struct MemorySummary: Codable {
     let semanticCount: Int
     let ruleCount: Int
     let avgTrust: Double
+    let autonomyCount: Int?
+    let actionCount: Int?
+    let languageCount: Int?
+    let kindCounts: [String: Int]?
 
     enum CodingKeys: String, CodingKey {
         case memoryCount = "memory_count"
@@ -74,6 +78,53 @@ struct MemorySummary: Codable {
         case semanticCount = "semantic_count"
         case ruleCount = "rule_count"
         case avgTrust = "avg_trust"
+        case autonomyCount = "autonomy_count"
+        case actionCount = "action_count"
+        case languageCount = "language_count"
+        case kindCounts = "kind_counts"
+    }
+}
+
+struct MemlaActionEnvelope: Codable {
+    let ok: Bool
+    let summary: ActionSummary
+}
+
+struct ActionSummary: Codable {
+    let actionCount: Int
+    let domains: [String]
+    let confirmationRequiredCount: Int
+    let implementedCount: Int
+    let capabilities: [ActionCapability]
+
+    enum CodingKeys: String, CodingKey {
+        case actionCount = "action_count"
+        case domains
+        case confirmationRequiredCount = "confirmation_required_count"
+        case implementedCount = "implemented_count"
+        case capabilities
+    }
+}
+
+struct ActionCapability: Codable, Identifiable {
+    var id: String { actionID }
+
+    let actionID: String
+    let title: String
+    let domain: String
+    let description: String
+    let riskLevel: String
+    let confirmationRequired: Bool
+    let status: String
+
+    enum CodingKeys: String, CodingKey {
+        case actionID = "action_id"
+        case title
+        case domain
+        case description
+        case riskLevel = "risk_level"
+        case confirmationRequired = "confirmation_required"
+        case status
     }
 }
 

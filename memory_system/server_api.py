@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel, Field
 import uvicorn
 
+from .action_ontology import action_match_to_dict, classify_action_prompt, summarize_action_ontology
 from .memory.ontology import summarize_memory_ontology
 from .natural_terminal import (
     BrowserSessionState,
@@ -46,6 +47,10 @@ class MemlaScoutRequest(BaseModel):
 
 class MemlaFollowupRequest(MemlaRunRequest):
     pass
+
+
+class MemlaActionPlanRequest(BaseModel):
+    prompt: str = Field(..., min_length=1)
 
 
 def _resolve_terminal_defaults(
@@ -183,6 +188,20 @@ def create_memla_app(
             "summary": summarize_memory_ontology(ontology_path),
         }
 
+    @app.get("/actions")
+    def actions() -> dict[str, Any]:
+        return {
+            "ok": True,
+            "summary": summarize_action_ontology(),
+        }
+
+    @app.post("/actions/plan")
+    def action_plan(request: MemlaActionPlanRequest) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "match": action_match_to_dict(classify_action_prompt(request.prompt)),
+        }
+
     @app.post("/scout")
     def scout(request: MemlaScoutRequest) -> dict[str, Any]:
         browser_state = load_browser_session_state(state_path)
@@ -247,6 +266,7 @@ def serve_memla_api(
 
 
 __all__ = [
+    "MemlaActionPlanRequest",
     "MemlaFollowupRequest",
     "MemlaRunRequest",
     "MemlaScoutRequest",

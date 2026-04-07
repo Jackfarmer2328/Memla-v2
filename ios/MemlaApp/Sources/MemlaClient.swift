@@ -29,6 +29,10 @@ actor MemlaClient {
         try await get(path: "/memory", baseURL: baseURL)
     }
 
+    func actions(baseURL: String) async throws -> MemlaActionEnvelope {
+        try await get(path: "/actions", baseURL: baseURL)
+    }
+
     func scout(prompt: String, baseURL: String) async throws -> MemlaScoutEnvelope {
         try await post(
             path: "/scout",

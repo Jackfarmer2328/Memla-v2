@@ -15,6 +15,10 @@ MEMORY_STATUS_ACTIVE = "active"
 MEMORY_STATUS_STALE = "stale"
 MEMORY_STATUS_INVALID = "invalid"
 
+MEMORY_KIND_LANGUAGE_COMPILATION = "language_compilation"
+MEMORY_KIND_AUTONOMY_PREFIX = "autonomy_"
+MEMORY_KIND_ACTION_PREFIX = "action_"
+
 
 def load_memory_ontology(path: str | Path | None = None) -> list[dict[str, Any]]:
     if path is None:
@@ -111,7 +115,20 @@ def _initial_trust(source: str) -> float:
         return 0.92
     if normalized == "language_memory":
         return 0.72
+    if normalized.startswith("autonomy_"):
+        return 0.74
+    if normalized.startswith("action_"):
+        return 0.68
     return 0.58
+
+
+def _source_counts_as_reuse(source: str) -> bool:
+    normalized = str(source or "").strip()
+    return (
+        normalized in {"language_memory", "language_rule"}
+        or normalized.startswith("autonomy_")
+        or normalized.startswith("action_")
+    )
 
 
 def _promote_to_semantic(entry: dict[str, Any], *, now_ts: int) -> None:
@@ -148,7 +165,7 @@ def record_memory_trace(
     action_signatures: list[str] | None,
     source: str,
     path: str | Path | None,
-    memory_kind: str = "language_compilation",
+    memory_kind: str = MEMORY_KIND_LANGUAGE_COMPILATION,
     canonical_clauses: list[str] | None = None,
     now_ts: int | None = None,
 ) -> Path | None:
@@ -243,7 +260,7 @@ def adjudicate_memory_trace(
     source: str,
     success: bool,
     path: str | Path | None,
-    memory_kind: str = "language_compilation",
+    memory_kind: str = MEMORY_KIND_LANGUAGE_COMPILATION,
     canonical_clauses: list[str] | None = None,
     now_ts: int | None = None,
     semantic_threshold: int = 2,
@@ -309,9 +326,10 @@ def adjudicate_memory_trace(
         entry["verifier_outcome"] = "validated_success"
         entry["freshness_ts"] = timestamp
         entry["last_used_ts"] = timestamp
-        entry["last_adjudication"] = "reuse_success" if source in {"language_memory", "language_rule"} else "validated_success"
-        entry["trust"] = round(min(1.0, float(entry.get("trust") or 0.0) + (0.1 if source in {"language_memory", "language_rule"} else 0.05)), 4)
-        if source in {"language_memory", "language_rule"}:
+        counts_as_reuse = _source_counts_as_reuse(source)
+        entry["last_adjudication"] = "reuse_success" if counts_as_reuse else "validated_success"
+        entry["trust"] = round(min(1.0, float(entry.get("trust") or 0.0) + (0.1 if counts_as_reuse else 0.05)), 4)
+        if counts_as_reuse:
             entry["reuse_count"] = int(entry.get("reuse_count") or 0) + 1
             entry["successful_reuse_count"] = int(entry.get("successful_reuse_count") or 0) + 1
         if int(entry.get("successful_reuse_count") or 0) >= max(int(semantic_threshold), 1):
@@ -340,7 +358,7 @@ def promote_memory_rule(
     action_signatures: list[str] | None,
     source: str,
     path: str | Path | None,
-    memory_kind: str = "language_compilation",
+    memory_kind: str = MEMORY_KIND_LANGUAGE_COMPILATION,
     canonical_clauses: list[str] | None = None,
     now_ts: int | None = None,
 ) -> Path | None:
@@ -420,7 +438,31 @@ def summarize_memory_ontology(path: str | Path | None = None) -> dict[str, Any]:
             "semantic_count": 0,
             "rule_count": 0,
             "avg_trust": 0.0,
+            "kind_counts": {},
+            "stage_counts_by_kind": {},
+            "status_counts_by_kind": {},
+            "source_counts": {},
+            "autonomy_count": 0,
+            "action_count": 0,
+            "language_count": 0,
         }
+    kind_counts: dict[str, int] = {}
+    stage_counts_by_kind: dict[str, dict[str, int]] = {}
+    status_counts_by_kind: dict[str, dict[str, int]] = {}
+    source_counts: dict[str, int] = {}
+    for entry in entries:
+        kind = str(entry.get("memory_kind") or "").strip() or "unknown"
+        stage = str(entry.get("promotion_stage") or "").strip() or "unknown"
+        status = str(entry.get("status") or "").strip() or "unknown"
+        kind_counts[kind] = kind_counts.get(kind, 0) + 1
+        stage_bucket = stage_counts_by_kind.setdefault(kind, {})
+        stage_bucket[stage] = stage_bucket.get(stage, 0) + 1
+        status_bucket = status_counts_by_kind.setdefault(kind, {})
+        status_bucket[status] = status_bucket.get(status, 0) + 1
+        for source in list(entry.get("origin_sources") or []):
+            clean_source = str(source or "").strip()
+            if clean_source:
+                source_counts[clean_source] = source_counts.get(clean_source, 0) + 1
     return {
         "memory_count": count,
         "active_count": sum(1 for entry in entries if str(entry.get("status") or "") == MEMORY_STATUS_ACTIVE),
@@ -430,4 +472,11 @@ def summarize_memory_ontology(path: str | Path | None = None) -> dict[str, Any]:
         "semantic_count": sum(1 for entry in entries if str(entry.get("promotion_stage") or "") == MEMORY_STAGE_SEMANTIC),
         "rule_count": sum(1 for entry in entries if str(entry.get("promotion_stage") or "") == MEMORY_STAGE_RULE),
         "avg_trust": round(sum(float(entry.get("trust") or 0.0) for entry in entries) / count, 4),
+        "kind_counts": kind_counts,
+        "stage_counts_by_kind": stage_counts_by_kind,
+        "status_counts_by_kind": status_counts_by_kind,
+        "source_counts": source_counts,
+        "autonomy_count": sum(1 for entry in entries if str(entry.get("memory_kind") or "").startswith(MEMORY_KIND_AUTONOMY_PREFIX)),
+        "action_count": sum(1 for entry in entries if str(entry.get("memory_kind") or "").startswith(MEMORY_KIND_ACTION_PREFIX)),
+        "language_count": sum(1 for entry in entries if str(entry.get("memory_kind") or "") == MEMORY_KIND_LANGUAGE_COMPILATION),
     }

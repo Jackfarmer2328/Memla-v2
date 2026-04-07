@@ -148,3 +148,52 @@ def test_memory_ontology_promotes_to_rule_and_can_invalidate_or_decay(tmp_path):
     assert summary["stale_count"] == 1
     assert summary["memory_count"] == 1
 
+
+def test_memory_ontology_v2_tracks_autonomy_trace_kinds(tmp_path):
+    ontology_path = tmp_path / "terminal_memory_ontology.json"
+    profile = {
+        "page_kind": "search_results",
+        "search_engine": "github",
+        "has_search_results": True,
+        "has_subject": True,
+        "has_evidence": True,
+    }
+    action_signatures = [
+        "scout_kind:github_repo_scout",
+        "browser_extract_cards:github",
+        "browser_rank_cards:initial",
+        "browser_read_page:top_candidate",
+        "browser_rank_cards:rerank",
+    ]
+
+    for prompt in (
+        "find the top 10 github repos for local llms and tell me which best fits weak hardware",
+        "scout the top github repos for local llms and bring back the best weak laptop option",
+    ):
+        adjudicate_memory_trace(
+            prompt=prompt,
+            normalized_prompt=prompt,
+            tokens=["github", "repos", "local", "llms", "weak", "hardware"],
+            context_profile=profile,
+            action_signatures=action_signatures,
+            source="autonomy_scout",
+            success=True,
+            path=ontology_path,
+            memory_kind="autonomy_github_repo_scout",
+            canonical_clauses=[
+                "scout github repositories",
+                "rank candidates against the goal",
+                "inspect top candidates",
+                "rerank and return a report",
+            ],
+        )
+
+    entries = load_memory_ontology(ontology_path)
+    summary = summarize_memory_ontology(ontology_path)
+
+    assert len(entries) == 1
+    assert entries[0]["memory_kind"] == "autonomy_github_repo_scout"
+    assert entries[0]["promotion_stage"] == MEMORY_STAGE_SEMANTIC
+    assert entries[0]["successful_reuse_count"] == 2
+    assert summary["autonomy_count"] == 1
+    assert summary["kind_counts"]["autonomy_github_repo_scout"] == 1

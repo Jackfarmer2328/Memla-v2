@@ -28,6 +28,7 @@ final class MemlaViewModel: ObservableObject {
     @Published var healthStatus: String = "Unknown"
     @Published var currentState: BrowserState?
     @Published var memorySummary: MemorySummary?
+    @Published var actionSummary: ActionSummary?
     @Published var scoutResult: ScoutResult?
     @Published var followupResult: MemlaRunEnvelope?
     @Published var chatItems: [MemlaChatMessage] = []
@@ -59,7 +60,16 @@ final class MemlaViewModel: ObservableObject {
         await runTask { [self] in
             let response = try await MemlaClient.shared.memory(baseURL: self.baseURL)
             self.memorySummary = response.summary
-            self.appendActivity(title: "Memory Refresh", detail: "rule \(response.summary.ruleCount), semantic \(response.summary.semanticCount), episodic \(response.summary.episodicCount)")
+            let autonomy = response.summary.autonomyCount ?? 0
+            self.appendActivity(title: "Memory Refresh", detail: "rule \(response.summary.ruleCount), semantic \(response.summary.semanticCount), episodic \(response.summary.episodicCount), autonomy \(autonomy)")
+        }
+    }
+
+    func refreshActions() async {
+        await runTask { [self] in
+            let response = try await MemlaClient.shared.actions(baseURL: self.baseURL)
+            self.actionSummary = response.summary
+            self.appendActivity(title: "Action Ontology", detail: "\(response.summary.actionCount) actions, \(response.summary.confirmationRequiredCount) confirmation-gated")
         }
     }
 
@@ -185,6 +195,7 @@ final class MemlaViewModel: ObservableObject {
     private func refreshRuntimeSnapshots() async throws {
         currentState = try await MemlaClient.shared.state(baseURL: baseURL).state
         memorySummary = try await MemlaClient.shared.memory(baseURL: baseURL).summary
+        actionSummary = try await MemlaClient.shared.actions(baseURL: baseURL).summary
     }
 
     private func scoutTitle(for result: ScoutResult) -> String {

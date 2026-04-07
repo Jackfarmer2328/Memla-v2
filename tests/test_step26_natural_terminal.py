@@ -235,6 +235,10 @@ def test_terminal_scout_fetches_and_ranks_repo_results(monkeypatch, tmp_path):
     assert any(step.transmutation == "browser_read_page" for step in result.steps)
     assert result.browser_state["research_subject_title"] == "ggml-org/llama.cpp"
     assert "Top results:" in render_terminal_scout_text(result)
+    autonomy_entries = load_memory_ontology(tmp_path / "terminal_memory_ontology.json")
+    assert len(autonomy_entries) == 1
+    assert autonomy_entries[0]["memory_kind"] == "autonomy_github_repo_scout"
+    assert autonomy_entries[0]["origin_sources"] == ["autonomy_scout"]
 
 
 def test_terminal_scout_reuses_current_github_results_when_query_is_missing(monkeypatch):

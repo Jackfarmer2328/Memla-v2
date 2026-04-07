@@ -85,6 +85,32 @@ def test_memla_api_memory_exposes_ontology_summary(tmp_path):
     assert payload["summary"]["episodic_count"] == 1
 
 
+def test_memla_api_actions_exposes_action_ontology():
+    app = create_memla_app(default_heuristic_only=True)
+    client = TestClient(app)
+
+    response = client.get("/actions")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["summary"]["action_count"] >= 6
+    assert any(item["action_id"] == "book_ride_quote" for item in payload["summary"]["capabilities"])
+
+
+def test_memla_api_action_plan_classifies_risky_goal():
+    app = create_memla_app(default_heuristic_only=True)
+    client = TestClient(app)
+
+    response = client.post("/actions/plan", json={"prompt": "get me an uber in 10 minutes to the airport"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["match"]["action_id"] == "book_ride_quote"
+    assert payload["match"]["confirmation_required"] is True
+
+
 def test_memla_api_scout_returns_structured_result(monkeypatch, tmp_path):
     state_path = tmp_path / "terminal_browser_state.json"
 

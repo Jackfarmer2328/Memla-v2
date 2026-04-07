@@ -24,6 +24,7 @@ struct ContentView: View {
                     scoutCard
                     stateCard
                     memoryCard
+                    actionOntologyCard
                     followupCard
                     activityCard
                 }
@@ -34,6 +35,7 @@ struct ContentView: View {
                 await viewModel.refreshHealth()
                 await viewModel.refreshState()
                 await viewModel.refreshMemory()
+                await viewModel.refreshActions()
             }
         }
     }
@@ -58,6 +60,7 @@ struct ContentView: View {
                         await viewModel.refreshHealth()
                         await viewModel.refreshState()
                         await viewModel.refreshMemory()
+                        await viewModel.refreshActions()
                     }
                 }
             }
@@ -267,6 +270,11 @@ struct ContentView: View {
                     memoryMetric(title: "Rule", value: "\(memory.ruleCount)")
                 }
                 HStack(spacing: 10) {
+                    memoryMetric(title: "Autonomy", value: "\(memory.autonomyCount ?? 0)")
+                    memoryMetric(title: "Actions", value: "\(memory.actionCount ?? 0)")
+                    memoryMetric(title: "Language", value: "\(memory.languageCount ?? 0)")
+                }
+                HStack(spacing: 10) {
                     memoryMetric(title: "Active", value: "\(memory.activeCount)")
                     memoryMetric(title: "Stale", value: "\(memory.staleCount)")
                     memoryMetric(title: "Invalid", value: "\(memory.invalidCount)")
@@ -287,6 +295,60 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             } else {
                 Text("No memory summary loaded yet. Refresh after a scout or follow-up to see the lifecycle state.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding()
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var actionOntologyCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Action Ontology")
+                        .font(.headline)
+                    Text("Safe app-action layer")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Refresh") {
+                    Task { await viewModel.refreshActions() }
+                }
+                .font(.caption)
+            }
+
+            if let actions = viewModel.actionSummary {
+                HStack(spacing: 10) {
+                    memoryMetric(title: "Actions", value: "\(actions.actionCount)")
+                    memoryMetric(title: "Ready", value: "\(actions.implementedCount)")
+                    memoryMetric(title: "Confirm", value: "\(actions.confirmationRequiredCount)")
+                }
+                Text(actions.domains.joined(separator: "  "))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                ForEach(actions.capabilities.prefix(4)) { capability in
+                    HStack(alignment: .top) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(capability.title)
+                                .font(.caption.weight(.semibold))
+                            Text("\(capability.domain) · \(capability.status)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Text(capability.confirmationRequired ? "confirm" : "auto")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(capability.confirmationRequired ? .orange : .green)
+                    }
+                }
+                Text("Money, rides, and messages stay confirmation-gated while Memla learns the action shape.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("No action ontology summary loaded yet.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }

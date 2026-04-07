@@ -591,6 +591,12 @@ def terminal_memory_ontology_path() -> Path:
     return (terminal_browser_state_path().parent / TERMINAL_MEMORY_ONTOLOGY_FILENAME).resolve()
 
 
+def _terminal_memory_ontology_path_for_state(state_path: str | Path | None = None) -> Path:
+    if state_path:
+        return (Path(state_path).expanduser().resolve().parent / TERMINAL_MEMORY_ONTOLOGY_FILENAME).resolve()
+    return terminal_memory_ontology_path()
+
+
 def load_browser_session_state(path: str | Path | None = None) -> BrowserSessionState:
     state_path = Path(path).expanduser().resolve() if path else terminal_browser_state_path()
     if not state_path.exists():
@@ -2568,6 +2574,82 @@ def _language_context_profile(browser_state: BrowserSessionState | None) -> dict
     }
 
 
+def _browser_state_from_mapping(payload: dict[str, Any] | None) -> BrowserSessionState:
+    item = dict(payload or {})
+    return BrowserSessionState(
+        current_url=str(item.get("current_url") or "").strip(),
+        page_kind=str(item.get("page_kind") or "").strip(),
+        browser_app=str(item.get("browser_app") or "").strip(),
+        search_engine=str(item.get("search_engine") or "").strip(),
+        search_query=str(item.get("search_query") or "").strip(),
+        result_urls=[str(value).strip() for value in list(item.get("result_urls") or []) if str(value).strip()],
+        result_cards=[dict(value) for value in list(item.get("result_cards") or []) if isinstance(value, dict)],
+        subject_title=str(item.get("subject_title") or "").strip(),
+        subject_url=str(item.get("subject_url") or "").strip(),
+        subject_summary=str(item.get("subject_summary") or "").strip(),
+        research_subject_title=str(item.get("research_subject_title") or "").strip(),
+        research_subject_url=str(item.get("research_subject_url") or "").strip(),
+        research_subject_summary=str(item.get("research_subject_summary") or "").strip(),
+        evidence_items=[dict(value) for value in list(item.get("evidence_items") or []) if isinstance(value, dict)],
+    )
+
+
+def _scout_memory_signatures(result: TerminalScoutResult) -> list[str]:
+    signatures: list[str] = [f"scout_kind:{_normalize_label(result.scout_kind)}"]
+    read_count = 0
+    rank_count = 0
+    for step in result.steps:
+        transmutation = _normalize_label(step.transmutation).replace(" ", "_")
+        if not transmutation:
+            continue
+        if transmutation == "browser_extract_cards":
+            signatures.append("browser_extract_cards:github")
+            continue
+        if transmutation == "browser_rank_cards":
+            rank_count += 1
+            signatures.append(f"browser_rank_cards:{'rerank' if rank_count > 1 else 'initial'}")
+            continue
+        if transmutation == "browser_read_page":
+            read_count += 1
+            signatures.append("browser_read_page:top_candidate")
+            continue
+        signatures.append(f"{transmutation}:scout")
+    return signatures
+
+
+def _record_scout_autonomy_memory(
+    result: TerminalScoutResult,
+    *,
+    state_path: str | Path | None = None,
+) -> None:
+    if not result.ok:
+        return
+    signatures = _scout_memory_signatures(result)
+    if not signatures:
+        return
+    state = _browser_state_from_mapping(result.browser_state)
+    canonical_clauses = [
+        "scout github repositories",
+        "rank candidates against the goal",
+        "inspect top candidates",
+        "rerank and return a report",
+    ]
+    if result.goal:
+        canonical_clauses.append(f"best match for {result.goal}")
+    adjudicate_memory_trace(
+        prompt=result.prompt,
+        normalized_prompt=_intent_text(" ".join(part for part in [result.prompt, result.query, result.goal] if part)),
+        tokens=_language_prompt_tokens(" ".join(part for part in [result.prompt, result.query, result.goal] if part)),
+        context_profile=_language_context_profile(state),
+        action_signatures=signatures,
+        source="autonomy_scout",
+        success=True,
+        path=_terminal_memory_ontology_path_for_state(state_path),
+        memory_kind=f"autonomy_{result.scout_kind}",
+        canonical_clauses=canonical_clauses,
+    )
+
+
 def _restore_terminal_actions(items: list[dict[str, Any]] | None) -> list[TerminalAction]:
     actions: list[TerminalAction] = []
     for item in list(items or []):
@@ -3160,6 +3242,74 @@ def _action_signature(action: TerminalAction) -> str:
     if kind == "system_info":
         return f"{kind}:{_normalize_label(action.resolved_target or action.target)}"
     return f"{kind}:{_normalize_label(action.resolved_target or action.target)}"
+
+
+def _autonomy_memory_kind_from_actions(actions: list[TerminalAction]) -> str:
+    kinds = [str(action.kind or "").strip() for action in actions]
+    if not kinds:
+        return ""
+    if "browser_synthesize_evidence" in kinds:
+        return "autonomy_evidence_synthesis"
+    if "browser_search_subject" in kinds:
+        engines = [
+            _normalize_label(action.resolved_target or action.target or _decode_action_note(action.note).get("engine", ""))
+            for action in actions
+            if action.kind == "browser_search_subject"
+        ]
+        engines = [engine for engine in engines if engine]
+        if len(set(engines)) > 1:
+            return "autonomy_multi_source_followup"
+        if engines:
+            return f"autonomy_subject_followup_{engines[0]}"
+        return "autonomy_subject_followup"
+    if "browser_rank_cards" in kinds or "browser_compare_cards" in kinds:
+        return "autonomy_result_selection"
+    return ""
+
+
+def _autonomy_canonical_clauses(actions: list[TerminalAction]) -> list[str]:
+    clauses = _canonical_clauses_from_actions(actions)
+    if clauses:
+        return clauses
+    labels: list[str] = []
+    for action in actions:
+        if action.kind == "browser_synthesize_evidence":
+            labels.append("synthesize evidence and return the best source")
+        elif action.kind == "browser_search_subject":
+            labels.append(f"search {action.resolved_target or action.target} for the current subject")
+        elif action.kind == "open_search_result":
+            labels.append("open the selected search result")
+        elif action.kind == "browser_read_page":
+            labels.append("read the current page")
+        elif action.kind == "browser_rank_cards":
+            labels.append("rank current result cards")
+    return labels
+
+
+def _record_autonomy_plan_memory(
+    *,
+    plan: TerminalPlan,
+    browser_state: BrowserSessionState,
+    ok: bool,
+    state_path: str | Path | None,
+) -> None:
+    if plan.source in {"language_model", "language_memory", "language_rule"}:
+        return
+    memory_kind = _autonomy_memory_kind_from_actions(plan.actions)
+    if not memory_kind:
+        return
+    adjudicate_memory_trace(
+        prompt=plan.prompt,
+        normalized_prompt=_intent_text(plan.prompt),
+        tokens=_language_prompt_tokens(plan.prompt),
+        context_profile=_language_context_profile(browser_state),
+        action_signatures=[_action_signature(action) for action in plan.actions],
+        source="autonomy_trace",
+        success=ok,
+        path=_terminal_memory_ontology_path_for_state(state_path),
+        memory_kind=memory_kind,
+        canonical_clauses=_autonomy_canonical_clauses(plan.actions),
+    )
 
 
 def _action_recall(plan: TerminalPlan, expected_actions: list[str]) -> float:
@@ -4093,7 +4243,7 @@ def run_terminal_scout(
     summary = _scout_summary_text(query=query, goal=goal, total=len(top_results), best=best_match) if best_match else ""
     if save_state:
         save_browser_session_state(scout_state, path=state_path)
-    return TerminalScoutResult(
+    result = TerminalScoutResult(
         prompt=prompt,
         scout_kind="github_repo_scout",
         source="heuristic",
@@ -4110,6 +4260,11 @@ def run_terminal_scout(
         residual_constraints=residuals,
         browser_state=asdict(scout_state),
     )
+    try:
+        _record_scout_autonomy_memory(result, state_path=state_path)
+    except OSError:
+        pass
+    return result
 
 
 def _is_browser_app(app_key: str) -> bool:
@@ -5598,11 +5753,21 @@ def execute_terminal_plan(
                 action_signatures=[_action_signature(action) for action in plan.actions],
                 source=plan.source,
                 success=ok,
-                path=terminal_memory_ontology_path(),
+                path=_terminal_memory_ontology_path_for_state(state_path),
                 canonical_clauses=_canonical_clauses_from_actions(plan.actions),
             )
         except OSError:
             residuals.append("memory_ontology_persist_failed")
+    if plan.actions:
+        try:
+            _record_autonomy_plan_memory(
+                plan=plan,
+                browser_state=initial_browser_state,
+                ok=ok,
+                state_path=state_path,
+            )
+        except OSError:
+            residuals.append("autonomy_memory_ontology_persist_failed")
     return TerminalExecutionResult(
         prompt=plan.prompt,
         plan_source=plan.source,

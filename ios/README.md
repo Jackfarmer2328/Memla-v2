@@ -21,6 +21,8 @@ Routes:
 - `GET /health`
 - `GET /state`
 - `GET /memory`
+- `GET /actions`
+- `POST /actions/plan`
 - `POST /run`
 - `POST /scout`
 - `POST /followup`
