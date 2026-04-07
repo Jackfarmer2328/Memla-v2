@@ -26,10 +26,14 @@ final class MemlaViewModel: ObservableObject {
     @Published var scoutPrompt: String = "find the top 10 github repos for local llms and tell me which best fits weak hardware"
     @Published var followupPrompt: String = "find a youtube video about it then open the first one and summarize it"
     @Published var actionPrompt: String = "ask my sister what she wants from DoorDash"
+    @Published var missionPrompt: String = "get pizza from Tony's with pepperoni and give the dasher a $6 tip on DoorDash"
     @Published var healthStatus: String = "Unknown"
     @Published var currentState: BrowserState?
     @Published var memorySummary: MemorySummary?
     @Published var actionSummary: ActionSummary?
+    @Published var missionSummary: MissionSummary?
+    @Published var missions: [MemlaMission] = []
+    @Published var activeMission: MemlaMission?
     @Published var actionDraft: ActionDraft?
     @Published var actionCapsule: ActionCapsule?
     @Published var scoutResult: ScoutResult?
@@ -73,6 +77,52 @@ final class MemlaViewModel: ObservableObject {
             let response = try await MemlaClient.shared.actions(baseURL: self.baseURL)
             self.actionSummary = response.summary
             self.appendActivity(title: "Action Ontology", detail: "\(response.summary.actionCount) actions, \(response.summary.confirmationRequiredCount) confirmation-gated")
+        }
+    }
+
+    func refreshMissions() async {
+        await runTask { [self] in
+            let response = try await MemlaClient.shared.missions(baseURL: self.baseURL)
+            self.missionSummary = response.summary
+            self.missions = response.missions
+            if self.activeMission == nil {
+                self.activeMission = response.missions.first
+            }
+            self.appendActivity(title: "Mission Queue", detail: "\(response.summary.missionCount) missions")
+        }
+    }
+
+    func startMission() async {
+        await runTask { [self] in
+            self.appendChat(speaker: "You", title: "Mission", detail: self.missionPrompt, isUser: true)
+            let response = try await MemlaClient.shared.createMission(prompt: self.missionPrompt, baseURL: self.baseURL)
+            self.activeMission = response.mission
+            let missionsEnvelope = try await MemlaClient.shared.missions(baseURL: self.baseURL)
+            self.missionSummary = missionsEnvelope.summary
+            self.missions = missionsEnvelope.missions
+            self.appendChat(speaker: "Memla", title: response.mission.checkpoint.title, detail: response.mission.checkpoint.detail, isUser: false)
+            self.appendActivity(title: "Mission Started", detail: "\(response.mission.actionID) - \(response.mission.status)")
+        }
+    }
+
+    func decideMission(_ decision: String, note: String = "") async {
+        guard let mission = activeMission else {
+            return
+        }
+        await runTask { [self] in
+            let response = try await MemlaClient.shared.decideMission(
+                missionID: mission.missionID,
+                decision: decision,
+                note: note,
+                baseURL: self.baseURL
+            )
+            self.activeMission = response.mission
+            let missionsEnvelope = try await MemlaClient.shared.missions(baseURL: self.baseURL)
+            self.missionSummary = missionsEnvelope.summary
+            self.missions = missionsEnvelope.missions
+            self.appendChat(speaker: "You", title: "Mission Decision", detail: decision, isUser: true)
+            self.appendChat(speaker: "Memla", title: response.mission.checkpoint.title, detail: response.mission.checkpoint.detail, isUser: false)
+            self.appendActivity(title: "Mission Decision", detail: "\(decision) -> \(response.mission.status)")
         }
     }
 
@@ -222,6 +272,9 @@ final class MemlaViewModel: ObservableObject {
         currentState = try await MemlaClient.shared.state(baseURL: baseURL).state
         memorySummary = try await MemlaClient.shared.memory(baseURL: baseURL).summary
         actionSummary = try await MemlaClient.shared.actions(baseURL: baseURL).summary
+        let missionEnvelope = try await MemlaClient.shared.missions(baseURL: baseURL)
+        missionSummary = missionEnvelope.summary
+        missions = missionEnvelope.missions
     }
 
     private func scoutTitle(for result: ScoutResult) -> String {

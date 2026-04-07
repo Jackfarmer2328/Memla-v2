@@ -12,6 +12,7 @@ import uvicorn
 from .action_capsules import action_capsule_to_dict, create_action_capsule
 from .action_ontology import action_draft_to_dict, action_match_to_dict, classify_action_prompt, create_action_draft, summarize_action_ontology
 from .memory.ontology import adjudicate_memory_trace, summarize_memory_ontology
+from .missions import MissionQueue, mission_to_dict, summarize_mission_queue
 from .natural_terminal import (
     BrowserSessionState,
     TERMINAL_MEMORY_ONTOLOGY_FILENAME,
@@ -60,6 +61,15 @@ class MemlaActionDraftRequest(BaseModel):
 
 class MemlaActionCapsuleRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
+
+
+class MemlaMissionRequest(BaseModel):
+    prompt: str = Field(..., min_length=1)
+
+
+class MemlaMissionDecisionRequest(BaseModel):
+    decision: str = Field(..., min_length=1)
+    note: str = ""
 
 
 def _resolve_terminal_defaults(
@@ -232,6 +242,7 @@ def create_memla_app(
         version="0.1.1",
         description="Thin HTTP wrapper around Memla's bounded terminal/browser runtime.",
     )
+    mission_queue = MissionQueue()
 
     @app.get("/health")
     def health() -> dict[str, Any]:
@@ -298,6 +309,48 @@ def create_memla_app(
         return {
             "ok": True,
             "capsule": capsule,
+        }
+
+    @app.get("/missions")
+    def missions() -> dict[str, Any]:
+        return {
+            "ok": True,
+            "summary": summarize_mission_queue(mission_queue),
+            "missions": [mission_to_dict(mission) for mission in mission_queue.list()],
+        }
+
+    @app.post("/missions")
+    def create_mission(request: MemlaMissionRequest) -> dict[str, Any]:
+        mission = mission_queue.create(request.prompt)
+        return {
+            "ok": True,
+            "mission": mission_to_dict(mission),
+        }
+
+    @app.get("/missions/{mission_id:path}")
+    def mission(mission_id: str) -> dict[str, Any]:
+        found = mission_queue.get(mission_id)
+        if found is None:
+            return {
+                "ok": False,
+                "error": "mission_not_found",
+            }
+        return {
+            "ok": True,
+            "mission": mission_to_dict(found),
+        }
+
+    @app.post("/missions/{mission_id:path}/decision")
+    def mission_decision(mission_id: str, request: MemlaMissionDecisionRequest) -> dict[str, Any]:
+        found = mission_queue.decide(mission_id, decision=request.decision, note=request.note)
+        if found is None:
+            return {
+                "ok": False,
+                "error": "mission_not_found",
+            }
+        return {
+            "ok": True,
+            "mission": mission_to_dict(found),
         }
 
     @app.post("/scout")
@@ -368,6 +421,8 @@ __all__ = [
     "MemlaActionCapsuleRequest",
     "MemlaActionPlanRequest",
     "MemlaFollowupRequest",
+    "MemlaMissionDecisionRequest",
+    "MemlaMissionRequest",
     "MemlaRunRequest",
     "MemlaScoutRequest",
     "create_memla_app",

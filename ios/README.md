@@ -22,6 +22,10 @@ Routes:
 - `GET /state`
 - `GET /memory`
 - `GET /actions`
+- `GET /missions`
+- `POST /missions`
+- `GET /missions/{mission_id}`
+- `POST /missions/{mission_id}/decision`
 - `POST /actions/plan`
 - `POST /actions/draft`
 - `POST /actions/capsule`

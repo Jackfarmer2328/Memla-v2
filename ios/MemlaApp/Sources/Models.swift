@@ -142,6 +142,96 @@ struct MemlaActionCapsuleEnvelope: Codable {
     let capsule: ActionCapsule
 }
 
+struct MemlaMissionRequest: Codable {
+    let prompt: String
+}
+
+struct MemlaMissionDecisionRequest: Codable {
+    let decision: String
+    let note: String
+}
+
+struct MemlaMissionEnvelope: Codable {
+    let ok: Bool
+    let mission: MemlaMission
+}
+
+struct MemlaMissionsEnvelope: Codable {
+    let ok: Bool
+    let summary: MissionSummary
+    let missions: [MemlaMission]
+}
+
+struct MissionSummary: Codable {
+    let missionCount: Int
+    let statusCounts: [String: Int]
+    let latestMissionID: String
+
+    enum CodingKeys: String, CodingKey {
+        case missionCount = "mission_count"
+        case statusCounts = "status_counts"
+        case latestMissionID = "latest_mission_id"
+    }
+}
+
+struct MemlaMission: Codable, Identifiable {
+    var id: String { missionID }
+
+    let missionID: String
+    let prompt: String
+    let title: String
+    let actionID: String
+    let status: String
+    let createdAt: String
+    let updatedAt: String
+    let capsule: ActionCapsule
+    let checkpoint: MissionCheckpoint
+    let history: [MissionEvent]
+
+    enum CodingKeys: String, CodingKey {
+        case missionID = "mission_id"
+        case prompt
+        case title
+        case actionID = "action_id"
+        case status
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case capsule
+        case checkpoint
+        case history
+    }
+}
+
+struct MissionCheckpoint: Codable {
+    let checkpointID: String
+    let kind: String
+    let title: String
+    let detail: String
+    let status: String
+    let decisions: [String]
+    let safetyLevel: String
+    let bridgeOption: ActionBridgeOption?
+
+    enum CodingKeys: String, CodingKey {
+        case checkpointID = "checkpoint_id"
+        case kind
+        case title
+        case detail
+        case status
+        case decisions
+        case safetyLevel = "safety_level"
+        case bridgeOption = "bridge_option"
+    }
+}
+
+struct MissionEvent: Codable, Identifiable {
+    var id: String { "\(timestamp)-\(kind)-\(detail)" }
+
+    let timestamp: String
+    let kind: String
+    let detail: String
+}
+
 struct ActionDraft: Codable, Identifiable {
     var id: String { "\(actionID)-\(draftText)" }
 

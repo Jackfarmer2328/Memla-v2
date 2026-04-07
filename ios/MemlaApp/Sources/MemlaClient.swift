@@ -33,6 +33,27 @@ actor MemlaClient {
         try await get(path: "/actions", baseURL: baseURL)
     }
 
+    func missions(baseURL: String) async throws -> MemlaMissionsEnvelope {
+        try await get(path: "/missions", baseURL: baseURL)
+    }
+
+    func createMission(prompt: String, baseURL: String) async throws -> MemlaMissionEnvelope {
+        try await post(
+            path: "/missions",
+            baseURL: baseURL,
+            payload: MemlaMissionRequest(prompt: prompt)
+        )
+    }
+
+    func decideMission(missionID: String, decision: String, note: String, baseURL: String) async throws -> MemlaMissionEnvelope {
+        let encodedMissionID = missionID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? missionID
+        return try await post(
+            path: "/missions/\(encodedMissionID)/decision",
+            baseURL: baseURL,
+            payload: MemlaMissionDecisionRequest(decision: decision, note: note)
+        )
+    }
+
     func actionDraft(prompt: String, baseURL: String) async throws -> MemlaActionDraftEnvelope {
         try await post(
             path: "/actions/draft",

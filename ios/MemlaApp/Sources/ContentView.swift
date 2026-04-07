@@ -22,6 +22,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 20) {
                     connectionCard
                     missionControlCard
+                    missionQueueCard
                     chatCard
                     scoutCard
                     stateCard
@@ -38,6 +39,7 @@ struct ContentView: View {
                 await viewModel.refreshState()
                 await viewModel.refreshMemory()
                 await viewModel.refreshActions()
+                await viewModel.refreshMissions()
             }
             .sheet(item: $browserRoute) { route in
                 MemlaBrowserView(route: route)
@@ -66,6 +68,7 @@ struct ContentView: View {
                         await viewModel.refreshState()
                         await viewModel.refreshMemory()
                         await viewModel.refreshActions()
+                        await viewModel.refreshMissions()
                     }
                 }
             }
@@ -108,6 +111,113 @@ struct ContentView: View {
             ),
             in: RoundedRectangle(cornerRadius: 20, style: .continuous)
         )
+    }
+
+    private var missionQueueCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Mission Queue")
+                        .font(.headline)
+                    Text("Start a local mission, then approve/open/cancel checkpoints.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Refresh") {
+                    Task { await viewModel.refreshMissions() }
+                }
+                .font(.caption)
+            }
+
+            TextField("What should Memla do?", text: $viewModel.missionPrompt, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(2...4)
+
+            Button(viewModel.isLoading ? "Starting..." : "Start Mission") {
+                Task { await viewModel.startMission() }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(viewModel.isLoading)
+
+            if let mission = viewModel.activeMission {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text(mission.title)
+                            .font(.caption.weight(.semibold))
+                        Spacer()
+                        Text(readableRequirement(mission.status))
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(mission.status == "cancelled" ? .red : .orange)
+                    }
+                    Text(mission.prompt)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(mission.checkpoint.title)
+                            .font(.subheadline.weight(.semibold))
+                        Text(mission.checkpoint.detail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(4)
+                        HStack(spacing: 8) {
+                            chip(text: readableRequirement(mission.checkpoint.kind))
+                            chip(text: readableRequirement(mission.checkpoint.safetyLevel))
+                        }
+                    }
+                    .padding(10)
+                    .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                    HStack {
+                        if mission.checkpoint.decisions.contains("approve") {
+                            Button("Approve") {
+                                Task { await viewModel.decideMission("approve") }
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(viewModel.isLoading)
+                        }
+                        if mission.checkpoint.decisions.contains("open"), mission.checkpoint.bridgeOption != nil {
+                            Button("Open") {
+                                openMissionBridge(mission)
+                                Task { await viewModel.decideMission("open") }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(viewModel.isLoading)
+                        }
+                        if mission.checkpoint.decisions.contains("cancel") {
+                            Button("Cancel") {
+                                Task { await viewModel.decideMission("cancel") }
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(.red)
+                            .disabled(viewModel.isLoading)
+                        }
+                    }
+
+                    if mission.checkpoint.decisions.contains("modify") {
+                        Button("Mark Needs Changes") {
+                            Task { await viewModel.decideMission("modify", note: "User asked to modify this mission before continuing.") }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(viewModel.isLoading)
+                    }
+                }
+                .padding(10)
+                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            } else if let summary = viewModel.missionSummary {
+                Text("\(summary.missionCount) missions queued.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("No mission loaded yet.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding()
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
     private var chatCard: some View {
@@ -645,6 +755,10 @@ struct ContentView: View {
         }
     }
 
+    private func readableRequirement(_ value: String) -> String {
+        value.replacingOccurrences(of: "_", with: " ").capitalized
+    }
+
     private func openMessageDraft(body: String) {
         var allowed = CharacterSet.urlQueryAllowed
         allowed.remove(charactersIn: "&+=?")
@@ -668,6 +782,18 @@ struct ContentView: View {
         }
         if option.kind == "in_app_web" {
             browserRoute = MemlaBrowserRoute(url: url, capsule: viewModel.actionCapsule, option: option)
+            return
+        }
+        UIApplication.shared.open(url)
+    }
+
+    private func openMissionBridge(_ mission: MemlaMission) {
+        guard let option = mission.checkpoint.bridgeOption,
+              let url = URL(string: option.url) else {
+            return
+        }
+        if option.kind == "in_app_web" {
+            browserRoute = MemlaBrowserRoute(url: url, capsule: mission.capsule, option: option)
             return
         }
         UIApplication.shared.open(url)
