@@ -827,7 +827,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
 
     private static func buttonTapScript(domIndex: Int, allowCaution: Bool) -> String {
         let allowCautionLiteral = allowCaution ? "true" : "false"
-        """
+        return """
         (() => {
           const targetIndex = \(domIndex);
           const allowCaution = \(allowCautionLiteral);
