@@ -366,7 +366,7 @@ struct ContentView: View {
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                         if !draft.recipients.isEmpty {
-                            Text("To: \(draft.recipients.joined(separator: \", \"))")
+                            Text("To: \(draft.recipients.joined(separator: ", "))")
                                 .font(.caption)
                         }
                         if !draft.subject.isEmpty {
