@@ -649,6 +649,7 @@ struct MemlaBrowserView: View {
     @StateObject private var browser = MemlaBrowserModel()
     @State private var verifiedItems: Set<String> = []
     @State private var isCapsuleExpanded = false
+    @State private var isC2AConsoleExpanded = false
 
     private let commerceChecklist = [
         "restaurant_match",
@@ -665,12 +666,14 @@ struct MemlaBrowserView: View {
             VStack(spacing: 0) {
                 capsulePanel
                 browserToolbar
-                if browser.websiteState != nil || !browser.inspectionStatus.isEmpty {
-                    websiteC2APanel
-                }
                 Divider()
-                MemlaBrowserWebView(browser: browser)
-                    .ignoresSafeArea(edges: .bottom)
+                ZStack(alignment: .bottom) {
+                    MemlaBrowserWebView(browser: browser)
+                        .ignoresSafeArea(edges: .bottom)
+                    if hasC2AConsole {
+                        websiteC2AConsole
+                    }
+                }
             }
             .navigationTitle("Memla Browser")
             .navigationBarTitleDisplayMode(.inline)
@@ -685,6 +688,10 @@ struct MemlaBrowserView: View {
                 browser.load(route.url)
             }
         }
+    }
+
+    private var hasC2AConsole: Bool {
+        browser.websiteState != nil || !browser.inspectionStatus.isEmpty
     }
 
     private var capsulePanel: some View {
@@ -795,9 +802,15 @@ struct MemlaBrowserView: View {
         .background(Color(.systemBackground))
     }
 
-    private var websiteC2APanel: some View {
+    private var websiteC2AConsole: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
+            Capsule()
+                .fill(Color.secondary.opacity(0.35))
+                .frame(width: 36, height: 4)
+                .frame(maxWidth: .infinity)
+                .padding(.top, 2)
+
+            HStack(spacing: 8) {
                 Text("Website C2A")
                     .font(.caption.weight(.semibold))
                 Spacer()
@@ -805,16 +818,66 @@ struct MemlaBrowserView: View {
                     Text(browser.inspectionStatus)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
+                Button(isC2AConsoleExpanded ? "Hide" : "Open") {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        isC2AConsoleExpanded.toggle()
+                    }
+                }
+                .buttonStyle(.bordered)
+                .font(.caption2)
             }
 
             if let state = browser.websiteState {
+                if isC2AConsoleExpanded {
+                    ScrollView {
+                        expandedWebsiteC2AContent(for: state)
+                    }
+                    .frame(maxHeight: 360)
+                } else {
+                    compactWebsiteC2AContent(for: state)
+                }
+            } else if !browser.inspectionStatus.isEmpty {
+                Text(browser.inspectionStatus)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color(.systemBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .shadow(color: Color.black.opacity(0.16), radius: 18, x: 0, y: -6)
+        .padding(.horizontal, 10)
+        .padding(.bottom, 10)
+    }
+
+    private func compactWebsiteC2AContent(for state: WebsiteC2AState) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    capsuleChip(title: "Page", value: readableRequirement(state.pageKind))
+                    capsuleChip(title: "Inputs", value: "\(state.inputs.count)")
+                    capsuleChip(title: "Candidates", value: "\(state.candidates.count)")
+                    if let best = state.candidates.first(where: { !$0.blocked && !$0.url.isEmpty && $0.score > 0 }) {
+                        capsuleChip(title: "Best", value: best.label)
+                    }
+                }
+            }
+            guidedStepControls(for: state)
+        }
+    }
+
+    private func expandedWebsiteC2AContent(for state: WebsiteC2AState) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         capsuleChip(title: "Page", value: readableRequirement(state.pageKind))
                         capsuleChip(title: "Inputs", value: "\(state.inputs.count)")
                         capsuleChip(title: "Buttons", value: "\(state.buttons.count)")
                         capsuleChip(title: "Links", value: "\(state.links.count)")
+                        capsuleChip(title: "Candidates", value: "\(state.candidates.count)")
                     }
                 }
                 Text(state.summary)
@@ -850,11 +913,7 @@ struct MemlaBrowserView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
-            }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(Color(.systemBackground))
     }
 
     private func guidedStepControls(for state: WebsiteC2AState) -> some View {

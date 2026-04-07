@@ -16,6 +16,7 @@ V1 tracks:
 - ranked page candidates extracted from visible links and buttons
 - guided next-step planning after inspection
 - auto-reinspection after opening an in-browser bridge or URL-backed candidate
+- compact bottom console layout that preserves webview space by default
 
 V1 shows:
 
@@ -31,6 +32,7 @@ V1 shows:
 - safe search controls when Website C2A sees a search-like input
 - ranked candidates scored against capsule slots such as restaurant, item, modifiers, or destination
 - guidance for the current safe next step, including hard stop guidance around checkout/payment states
+- a compact console with page kind, best candidate, and guidance, expandable into full candidates/search/residuals/checklist context
 
 Commerce capsules can now route through service-specific app links, service web links, or a generic web-search bridge when a service URL drops part of the capsule intent.
 
