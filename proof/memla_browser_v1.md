@@ -18,6 +18,7 @@ V1 tracks:
 - auto-reinspection after opening an in-browser bridge or URL-backed candidate
 - compact bottom console layout that preserves webview space by default
 - policy-gated safe button candidate taps
+- capsule match evidence for item, cart, and checkout pages
 - manual auth bridge state for login-required and likely-signed-in pages
 
 V1 shows:
@@ -36,6 +37,7 @@ V1 shows:
 - guidance for the current safe next step, including hard stop guidance around checkout/payment states
 - a compact console with page kind, best candidate, and guidance, expandable into full candidates/search/residuals/checklist context
 - button candidates classified as safe, review-required, or blocked
+- item/cart/checkout capsule match evidence for visible restaurant, item, modifier, and tip terms
 - auth guidance that asks the user to sign in manually and inspect again, without storing credentials
 - a close control for hiding the console until the next inspection
 
@@ -45,11 +47,11 @@ V1 intentionally does not:
 
 - auto-fill non-search forms
 - auto-click caution, unknown, or sensitive page controls
-- auto-click checkout
 - auto-submit purchases
+- auto-click final payment or place-order actions
 - bypass service login or payment confirmation
 - store passwords or automatically perform login
 
-Candidate opening is intentionally limited to non-final candidates with usable URLs. Button-only candidates can be tapped directly when their label is classified as a safe non-final control such as search, filter, view, menu, close, or load more. Review-required button candidates can be tapped only through `Tap Reviewed`, and the in-page script re-blocks sensitive/final labels such as checkout, payment, place order, send, book, reserve, or delete. Blocked buttons remain disabled.
+Candidate opening is intentionally limited to non-final candidates with usable URLs. Button-only candidates can be tapped directly when their label is classified as a safe non-final control such as search, filter, view, menu, close, or load more. Review-required button candidates can be tapped only through `Tap Reviewed`; checkout navigation is review-required so Memla can reach the final review surface, while the in-page script re-blocks sensitive/final labels such as payment, place order, pay now, confirm order, send, book, reserve, or delete. Blocked buttons remain disabled.
 
 The purpose is to create the controlled surface where verifier checks and safe fill/click primitives can attach after page-state extraction is visible and stable.

@@ -37,6 +37,14 @@ struct WebsiteC2AState {
     let authState: String
     let authDomain: String
     let textSnippet: String
+    let capsuleVerification: WebsiteCapsuleVerification?
+}
+
+struct WebsiteCapsuleVerification {
+    let matched: [String]
+    let missing: [String]
+    let warnings: [String]
+    let summary: String
 }
 
 struct WebsiteBridgeSuggestion: Identifiable {
@@ -264,11 +272,13 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         let links = stringArray(payload["links"])
         let candidates = candidateArray(payload["candidates"], capsule: capsule)
         let combined = ([title, url, textSnippet] + headings + inputs + buttons + links).joined(separator: " ").lowercased()
+        let normalizedCombined = normalizedText(combined)
         let pageKind = classifyPageKind(combined: combined, url: url, inputs: inputs)
         let safeActions = candidateActions(pageKind: pageKind, inputs: inputs, buttons: buttons, links: links, candidates: candidates)
-        let residuals = residualsForPage(pageKind: pageKind, combined: combined, textSnippet: textSnippet, capsule: capsule)
+        let residuals = residualsForPage(pageKind: pageKind, combined: normalizedCombined, textSnippet: textSnippet, capsule: capsule)
         let authState = classifyAuthState(pageKind: pageKind, combined: combined)
         let authDomain = domainFrom(url: url)
+        let capsuleVerification = capsuleVerificationForPage(pageKind: pageKind, combined: normalizedCombined, capsule: capsule)
         let summary = "Compiled \(pageKind.replacingOccurrences(of: "_", with: " ")) with \(inputs.count) inputs, \(buttons.count) buttons, \(links.count) links, and \(candidates.count) candidates."
         return WebsiteC2AState(
             pageKind: pageKind,
@@ -282,7 +292,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             residuals: residuals,
             authState: authState,
             authDomain: authDomain,
-            textSnippet: textSnippet
+            textSnippet: textSnippet,
+            capsuleVerification: capsuleVerification
         )
     }
 
@@ -293,14 +304,22 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         if combined.contains("sign in") || combined.contains("log in") || combined.contains("login") {
             return "login"
         }
-        if combined.contains("checkout") || combined.contains("place order") || combined.contains("payment") {
+        if combined.contains("place order")
+            || combined.contains("submit order")
+            || combined.contains("complete order")
+            || combined.contains("confirm order")
+            || combined.contains("pay now")
+            || combined.contains("card number")
+            || combined.contains("cvv")
+            || combined.contains("payment method")
+            || combined.contains("payment information") {
             return "checkout"
-        }
-        if combined.contains("cart") || combined.contains("subtotal") || combined.contains("tip") {
-            return "cart"
         }
         if combined.contains("add to cart") || combined.contains("customize") || combined.contains("toppings") || combined.contains("menu") {
             return "menu_or_item"
+        }
+        if combined.contains("cart") || combined.contains("subtotal") || combined.contains("tip") || combined.contains("checkout") {
+            return "cart"
         }
         if combined.contains("results for") || combined.contains("search results") || url.contains("/search") {
             return "search_results"
@@ -333,6 +352,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         }
         if pageKind == "cart" {
             actions.append("verify_cart_against_capsule")
+            actions.append("review_then_enter_checkout")
         }
         if pageKind == "checkout" {
             actions.append("stop_before_purchase")
@@ -356,21 +376,98 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         }
         if pageKind == "checkout" {
             residuals.append("irreversible_action_nearby")
+            residuals.append("final_confirmation_required")
+        }
+        if pageKind == "cart" {
+            residuals.append("cart_verification_required")
         }
         if textSnippet.isEmpty {
             residuals.append("visible_text_empty")
         }
         if let capsule = capsule {
-            let restaurant = capsule.slots["restaurant"]?.lowercased() ?? ""
+            let restaurant = normalizedText(capsule.slots["restaurant"] ?? "")
             if !restaurant.isEmpty && !combined.contains(restaurant) {
                 residuals.append("target_restaurant_not_visible")
             }
-            let item = capsule.slots["item"]?.lowercased() ?? ""
+            let item = normalizedText(capsule.slots["item"] ?? "")
             if !item.isEmpty && !combined.contains(item) {
                 residuals.append("target_item_not_visible")
             }
         }
         return Array(dictUnique(residuals))
+    }
+
+    private static func capsuleVerificationForPage(pageKind: String, combined: String, capsule: ActionCapsule?) -> WebsiteCapsuleVerification? {
+        guard let capsule = capsule else {
+            return nil
+        }
+        let relevantPages = ["menu_or_item", "cart", "checkout"]
+        guard relevantPages.contains(pageKind) else {
+            return nil
+        }
+        var matched: [String] = []
+        var missing: [String] = []
+        var warnings: [String] = []
+
+        func verifySlot(_ key: String, label: String? = nil) {
+            let raw = capsule.slots[key]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !raw.isEmpty else {
+                return
+            }
+            let readable = label ?? key.replacingOccurrences(of: "_", with: " ")
+            let parts: [String]
+            if key == "modifiers" {
+                parts = raw
+                    .replacingOccurrences(of: " and ", with: ",")
+                    .components(separatedBy: CharacterSet(charactersIn: ",/+&"))
+            } else {
+                parts = [raw]
+            }
+            let normalizedParts = parts
+                .map { normalizedText($0) }
+                .filter { !$0.isEmpty }
+            guard !normalizedParts.isEmpty else {
+                return
+            }
+            let foundParts = normalizedParts.filter { combined.contains($0) }
+            if foundParts.isEmpty {
+                missing.append(readable)
+            } else if foundParts.count == normalizedParts.count {
+                matched.append(readable)
+            } else {
+                matched.append(readable)
+                missing.append("\(readable) partial")
+            }
+        }
+
+        verifySlot("restaurant")
+        verifySlot("item")
+        verifySlot("modifiers")
+        verifySlot("tip")
+
+        if pageKind == "menu_or_item" {
+            warnings.append("review_item_options_before_cart")
+        }
+        if pageKind == "cart" {
+            warnings.append("verify_cart_before_checkout")
+            warnings.append("checkout_is_reviewed_navigation_only")
+        }
+        if pageKind == "checkout" {
+            warnings.append("human_must_complete_final_payment_or_place_order")
+        }
+
+        let summary: String
+        if missing.isEmpty {
+            summary = "Capsule terms are visible. Continue only after reviewing item, modifiers, tip, address, and total."
+        } else {
+            summary = "Missing visible evidence for \(missing.joined(separator: ", ")). Review before continuing."
+        }
+        return WebsiteCapsuleVerification(
+            matched: Array(dictUnique(matched)),
+            missing: Array(dictUnique(missing)),
+            warnings: Array(dictUnique(warnings)),
+            summary: summary
+        )
     }
 
     private static func classifyAuthState(pageKind: String, combined: String) -> String {
@@ -440,8 +537,9 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             }
             let candidateText = [label, url, context].joined(separator: " ")
             let ranking = rankCandidate(candidateText, targets: targets)
-            let blocked = isIrreversibleCandidate(candidateText)
-            let tapPolicy = buttonTapPolicy(kind: kind, url: url, candidateText: candidateText, blocked: blocked)
+            let blockedText = kind == "button" ? label : candidateText
+            let blocked = isIrreversibleCandidate(blockedText)
+            let tapPolicy = buttonTapPolicy(kind: kind, url: url, label: label, context: context, blocked: blocked)
             let reason: String
             if blocked {
                 reason = "Final or irreversible action nearby"
@@ -542,7 +640,6 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
     private static func isIrreversibleCandidate(_ candidateText: String) -> Bool {
         let text = normalizedText(candidateText)
         let blockedTerms = [
-            "checkout",
             "place order",
             "submit order",
             "complete order",
@@ -558,16 +655,17 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         return blockedTerms.contains { text.contains($0) }
     }
 
-    private static func buttonTapPolicy(kind: String, url: String, candidateText: String, blocked: Bool) -> (safety: String, reason: String) {
+    private static func buttonTapPolicy(kind: String, url: String, label: String, context: String, blocked: Bool) -> (safety: String, reason: String) {
         guard kind == "button", url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return ("not_applicable", "Link-backed candidates open by URL, not button tap")
         }
         if blocked {
             return ("blocked", "Final or irreversible action language")
         }
-        let text = normalizedText(candidateText)
+        let labelText = normalizedText(label)
+        let fullText = normalizedText([label, context].joined(separator: " "))
+        let text = labelText.isEmpty ? fullText : labelText
         let blockedTerms = [
-            "checkout",
             "place order",
             "submit order",
             "complete order",
@@ -610,6 +708,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             "select",
             "customize",
             "choose",
+            "checkout",
             "continue",
             "next",
             "sign in",
@@ -752,9 +851,10 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           }
           const label = clean(target.innerText || target.value || target.getAttribute('aria-label') || target.getAttribute('title'));
           const context = clean(target.closest('article,li,section,div')?.innerText || '');
+          const labelText = normalized(label);
           const text = normalized([label, context].join(' '));
+          const sensitiveText = labelText || text;
           const blockedTerms = [
-            'checkout',
             'place order',
             'submit order',
             'complete order',
@@ -768,7 +868,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             'send',
             'delete'
           ];
-          if (blockedTerms.some((term) => text.includes(term))) {
+          if (blockedTerms.some((term) => sensitiveText.includes(term))) {
             return { ok: false, reason: 'sensitive_button_blocked', label };
           }
           const safeTerms = [
@@ -1102,6 +1202,10 @@ struct MemlaBrowserView: View {
                     capsuleChip(title: "Auth", value: readableRequirement(state.authState))
                     capsuleChip(title: "Inputs", value: "\(state.inputs.count)")
                     capsuleChip(title: "Candidates", value: "\(state.candidates.count)")
+                    if let verification = state.capsuleVerification {
+                        capsuleChip(title: "Matched", value: "\(verification.matched.count)")
+                        capsuleChip(title: "Missing", value: "\(verification.missing.count)")
+                    }
                     if let best = state.candidates.first(where: { !$0.blocked && !$0.url.isEmpty && $0.score > 0 }) {
                         capsuleChip(title: "Best", value: best.label)
                     }
@@ -1142,6 +1246,7 @@ struct MemlaBrowserView: View {
                 }
                 guidedStepControls(for: state)
                 authBridgeControls(for: state)
+                capsuleVerificationControls(for: state)
                 candidateControls(for: state)
                 if !state.residuals.isEmpty {
                     Text("Residuals: \(state.residuals.map { readableRequirement($0) }.joined(separator: ", "))")
@@ -1225,6 +1330,54 @@ struct MemlaBrowserView: View {
     }
 
     @ViewBuilder
+    private func capsuleVerificationControls(for state: WebsiteC2AState) -> some View {
+        if let verification = state.capsuleVerification {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Label("Capsule Match", systemImage: state.pageKind == "checkout" ? "hand.raised.fill" : "checklist")
+                        .font(.caption.weight(.semibold))
+                    Spacer()
+                    Text(readableRequirement(state.pageKind))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Text(verification.summary)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+                if !verification.matched.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(verification.matched, id: \.self) { item in
+                                Label(readableRequirement(item), systemImage: "checkmark.circle.fill")
+                                    .font(.caption2)
+                                    .foregroundStyle(.green)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 5)
+                                    .background(Color.green.opacity(0.12), in: Capsule())
+                            }
+                        }
+                    }
+                }
+                if !verification.missing.isEmpty {
+                    Text("Missing: \(verification.missing.map { readableRequirement($0) }.joined(separator: ", "))")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .lineLimit(2)
+                }
+                if !verification.warnings.isEmpty {
+                    Text("Policy: \(verification.warnings.map { readableRequirement($0) }.joined(separator: ", "))")
+                        .font(.caption2)
+                        .foregroundStyle(state.pageKind == "checkout" ? .red : .secondary)
+                        .lineLimit(2)
+                }
+            }
+            .padding(8)
+            .background((state.pageKind == "checkout" ? Color.red : Color.blue).opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+    }
+
+    @ViewBuilder
     private func candidateControls(for state: WebsiteC2AState) -> some View {
         if !state.candidates.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
@@ -1293,7 +1446,8 @@ struct MemlaBrowserView: View {
             .buttonStyle(.borderedProminent)
             .disabled(browser.isRunningButtonAction)
         } else if candidate.kind == "button" && candidate.tapSafety == "caution" {
-            Button(browser.isRunningButtonAction ? "Tapping..." : "Tap Reviewed") {
+            let reviewedTitle = candidate.label.localizedCaseInsensitiveContains("checkout") ? "Enter Checkout" : "Tap Reviewed"
+            Button(browser.isRunningButtonAction ? "Tapping..." : reviewedTitle) {
                 tapCandidate(candidate, allowCaution: true)
             }
             .buttonStyle(.bordered)
@@ -1480,6 +1634,22 @@ struct MemlaBrowserView: View {
                 tone: "safe"
             )
         }
+        if state.pageKind == "cart" {
+            return WebsiteGuidedStep(
+                title: "Verify cart, then enter checkout",
+                detail: "Cart state is visible. Verify item, modifiers, tip, address, and total. If it matches, use Enter Checkout; final purchase still remains blocked.",
+                icon: "cart.badge.questionmark",
+                tone: "warning"
+            )
+        }
+        if state.pageKind == "menu_or_item" {
+            return WebsiteGuidedStep(
+                title: "Review item funnel",
+                detail: "Item/menu controls are visible. Match the item and modifiers, then use Tap Reviewed for add/customize/cart steps.",
+                icon: "list.bullet.rectangle",
+                tone: "safe"
+            )
+        }
         if let best = state.candidates.first(where: { !$0.blocked && !$0.url.isEmpty && $0.score > 0 }) {
             return WebsiteGuidedStep(
                 title: "Open ranked candidate",
@@ -1502,22 +1672,6 @@ struct MemlaBrowserView: View {
                 detail: "\(button.label) needs human review first. If this is the intended item/control, use Tap Reviewed.",
                 icon: "hand.tap",
                 tone: "warning"
-            )
-        }
-        if state.pageKind == "cart" {
-            return WebsiteGuidedStep(
-                title: "Verify cart",
-                detail: "Cart state is visible. Compare item, modifiers, tip, address, and total against the capsule before final checkout.",
-                icon: "cart.badge.questionmark",
-                tone: "warning"
-            )
-        }
-        if state.pageKind == "menu_or_item" {
-            return WebsiteGuidedStep(
-                title: "Review item page",
-                detail: "Menu or item controls are visible. Match the item and modifiers before adding anything to cart.",
-                icon: "list.bullet.rectangle",
-                tone: "safe"
             )
         }
         if state.residuals.contains("target_restaurant_not_visible") || state.residuals.contains("target_item_not_visible") {
