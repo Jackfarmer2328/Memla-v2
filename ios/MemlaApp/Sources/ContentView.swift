@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UIKit
 
 struct ContentView: View {
     @EnvironmentObject private var viewModel: MemlaViewModel
@@ -381,6 +382,15 @@ struct ContentView: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                         }
+                        if draft.domain == "messaging", !draft.body.isEmpty {
+                            Button("Open Message Draft") {
+                                openMessageDraft(body: draft.body)
+                            }
+                            .buttonStyle(.bordered)
+                            Text("You choose the recipient and press Send. Memla will not send this automatically.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
                         if !draft.residualConstraints.isEmpty {
                             Text(draft.residualConstraints.joined(separator: ", "))
                                 .font(.caption)
@@ -560,6 +570,16 @@ struct ContentView: View {
                 Spacer(minLength: 42)
             }
         }
+    }
+
+    private func openMessageDraft(body: String) {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&+=?")
+        let encodedBody = body.addingPercentEncoding(withAllowedCharacters: allowed) ?? body
+        guard let url = URL(string: "sms:?&body=\(encodedBody)") else {
+            return
+        }
+        UIApplication.shared.open(url)
     }
 }
 
