@@ -17,6 +17,7 @@ V1 tracks:
 - guided next-step planning after inspection
 - auto-reinspection after opening an in-browser bridge or URL-backed candidate
 - compact bottom console layout that preserves webview space by default
+- policy-gated safe button candidate taps
 
 V1 shows:
 
@@ -33,17 +34,18 @@ V1 shows:
 - ranked candidates scored against capsule slots such as restaurant, item, modifiers, or destination
 - guidance for the current safe next step, including hard stop guidance around checkout/payment states
 - a compact console with page kind, best candidate, and guidance, expandable into full candidates/search/residuals/checklist context
+- button candidates classified as safe, caution, or blocked
 
 Commerce capsules can now route through service-specific app links, service web links, or a generic web-search bridge when a service URL drops part of the capsule intent.
 
 V1 intentionally does not:
 
 - auto-fill non-search forms
-- auto-click non-search page controls
+- auto-click caution, unknown, or sensitive page controls
 - auto-click checkout
 - auto-submit purchases
 - bypass service login or payment confirmation
 
-Candidate opening is intentionally limited to non-final candidates with usable URLs. Button-only candidates are visible as evidence, but Memla does not synthesize arbitrary page button clicks in this version.
+Candidate opening is intentionally limited to non-final candidates with usable URLs. Button-only candidates can be tapped only when their label is classified as a safe non-final control such as search, filter, view, menu, close, or load more. Caution and blocked buttons remain disabled.
 
 The purpose is to create the controlled surface where verifier checks and safe fill/click primitives can attach after page-state extraction is visible and stable.
