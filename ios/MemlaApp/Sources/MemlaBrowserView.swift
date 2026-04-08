@@ -89,6 +89,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
     private var pageObservationTimer: Timer?
     private var lastObservedFingerprint: String = ""
     private var isAutoInspectQueued = false
+    private var lastDoorDashStorefrontWarmupURL: String = ""
+    private var doorDashStorefrontWarmupAttempts = 0
 
     override init() {
         let configuration = WKWebViewConfiguration()
@@ -126,6 +128,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         pageObservationTimer = nil
         lastObservedFingerprint = ""
         isAutoInspectQueued = false
+        lastDoorDashStorefrontWarmupURL = ""
+        doorDashStorefrontWarmupAttempts = 0
     }
 
     func navigate(to url: URL, autoInspect: Bool = false, capsule: ActionCapsule? = nil) {
@@ -137,6 +141,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         autoInspectCapsule = capsule
         observationCapsule = capsule
         lastObservedFingerprint = ""
+        lastDoorDashStorefrontWarmupURL = ""
+        doorDashStorefrontWarmupAttempts = 0
         webView.load(URLRequest(url: url))
         syncState()
     }
@@ -179,8 +185,10 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
                     self.inspectionStatus = "Memla could not read this page yet."
                     return
                 }
-                self.websiteState = Self.buildWebsiteState(payload: payload, capsule: capsule)
+                let state = Self.buildWebsiteState(payload: payload, capsule: capsule)
+                self.websiteState = state
                 self.inspectionStatus = "Page inspected."
+                self.maybeWarmDoorDashStorefront(payload: payload, state: state, capsule: capsule)
             }
         }
     }
@@ -338,6 +346,40 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
                 return
             }
             self.isAutoInspectQueued = false
+            self.inspectPage(capsule: capsule)
+        }
+    }
+
+    private func maybeWarmDoorDashStorefront(payload: [String: Any], state: WebsiteC2AState, capsule: ActionCapsule?) {
+        guard state.pageKind == "dd_storefront" else {
+            return
+        }
+        let itemCount = payload["doordash_item_card_count"] as? Int ?? 0
+        guard itemCount == 0 else {
+            lastDoorDashStorefrontWarmupURL = currentURL
+            doorDashStorefrontWarmupAttempts = 0
+            return
+        }
+        let url = currentURL
+        guard !url.isEmpty else {
+            return
+        }
+        if lastDoorDashStorefrontWarmupURL != url {
+            lastDoorDashStorefrontWarmupURL = url
+            doorDashStorefrontWarmupAttempts = 0
+        }
+        guard doorDashStorefrontWarmupAttempts < 1 else {
+            return
+        }
+        doorDashStorefrontWarmupAttempts += 1
+        inspectionStatus = "DoorDash menu is still loading..."
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { [weak self] in
+            guard let self = self else {
+                return
+            }
+            guard self.currentURL == url, !self.isLoading else {
+                return
+            }
             self.inspectPage(capsule: capsule)
         }
     }
@@ -1608,6 +1650,29 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           quickAddButtons.forEach((button) => {
             doordashHasAddToCartCTA = true;
             pushUnique(doordashCandidates, candidateFromElement(button, 'dd_add_to_cart', closestWithText(button, 18), 'Add to cart'));
+          });
+
+          const explicitStoreItemCards = Array.from(document.querySelectorAll('[role="button"][aria-label], button[aria-label]'))
+            .filter(visible)
+            .filter((el) => {
+              const label = labelForElement(el);
+              const root = closestWithText(el, 18, 240);
+              const text = clean([label, contextForElement(el, root)].join(' '));
+              if (!label || isDoorDashNoise(text)) {
+                return false;
+              }
+              if (/open menu|notification bell|group order|delivery|pickup|save|see more|search stores/i.test(text)) {
+                return false;
+              }
+              return /build your own|specialty pizza|custom pizza|pizza|wings|bread|pasta|dessert|sandwich|salad|bites/i.test(label)
+                && (/\\$\\d/.test(text) || label.length >= 6);
+            })
+            .slice(0, 18);
+          explicitStoreItemCards.forEach((el) => {
+            doordashItemCardCount += 1;
+            const root = closestWithText(el, 18, 240);
+            const itemLabel = firstMeaningfulTextLine(root) || clean(labelForElement(el));
+            pushUnique(doordashCandidates, candidateFromElement(el, 'dd_item_card', root, itemLabel));
           });
 
           const storefrontElements = Array.from(document.querySelectorAll('button,a[href],[role="button"]'))
