@@ -997,6 +997,14 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
     private static func serviceLabelAdjustment(role: String, label: String, context: String) -> Double {
         let text = normalizedText([label, context].joined(separator: " "))
         switch role {
+        case "dd_add_to_cart":
+            if text.contains("add to cart") && !text.contains("add item to cart") {
+                return 1.4
+            }
+            if text.contains("add item to cart") {
+                return -0.6
+            }
+            return 0.0
         case "dd_cart_cta":
             if text.contains("view cart") {
                 return 1.2
@@ -1925,11 +1933,8 @@ struct MemlaBrowserView: View {
                     }
                     ZStack(alignment: .bottom) {
                         MemlaBrowserWebView(browser: browser)
-                            .frame(
-                                minHeight: isRawPageVisible ? 300 : 1,
-                                idealHeight: isRawPageVisible ? 360 : 1,
-                                maxHeight: isRawPageVisible ? 420 : 1
-                            )
+                            .frame(height: isRawPageVisible ? 360 : 360)
+                            .frame(height: isRawPageVisible ? 360 : 1, alignment: .top)
                             .opacity(isRawPageVisible ? 1 : 0.02)
                             .allowsHitTesting(isRawPageVisible)
                             .clipped()
