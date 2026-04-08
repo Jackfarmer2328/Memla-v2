@@ -733,7 +733,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             let blockedText = kind == "button" ? label : candidateText
             let blocked = isIrreversibleCandidate(blockedText) || isBlockedServiceRole(role)
             let tapPolicy = buttonTapPolicy(kind: kind, url: url, label: label, context: context, blocked: blocked)
-            let adjustedScore = ranking.score + roleScoreAdjustment(role: role)
+            let adjustedScore = ranking.score + roleScoreAdjustment(role: role) + serviceLabelAdjustment(role: role, label: label, context: context)
             let resolvedLabel = displayLabel(label: label, url: url, context: context, role: role)
             let reason: String
             if blocked {
@@ -945,6 +945,27 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             return "Utility or account navigation"
         default:
             return "Visible candidate with no capsule slot match yet"
+        }
+    }
+
+    private static func serviceLabelAdjustment(role: String, label: String, context: String) -> Double {
+        let text = normalizedText([label, context].joined(separator: " "))
+        switch role {
+        case "dd_cart_cta":
+            if text.contains("view cart") {
+                return 1.2
+            }
+            if text.contains("open cart") || text.contains("open order cart") {
+                return 0.2
+            }
+            return 0.0
+        case "dd_store_card":
+            if text.contains("domino") || text.contains("pizza") || text.contains("taco") || text.contains("burger") || text.contains("johns") || text.contains("caesars") {
+                return 0.5
+            }
+            return 0.0
+        default:
+            return 0.0
         }
     }
 
@@ -1433,18 +1454,24 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           return lines.find((line) => {
             const lower = line.toLowerCase();
             return /[a-z]/i.test(line)
+              && !/^(get to know us|let us help you|doing business|welcome back!?|convenience & drugstores|deals & benefits|featured items|most ordered|restaurant|grocery|all)$/i.test(lower)
               && !/lower fees|delivery fee|dashpass|pickup|minutes|mins| mi\\b|\\bmin\\b|reviews?|\\(\\d\\+\\)/i.test(lower);
           }) || lines[0] || '';
         };
-        const closestWithText = (el, minLength = 20) => {
+        const closestWithText = (el, minLength = 20, maxLength = 260) => {
           let node = el;
+          let fallback = el;
           while (node && node !== document.body) {
-            if (clean(node.innerText || '').length >= minLength) {
+            const length = clean(node.innerText || '').length;
+            if (length >= minLength && length <= maxLength) {
               return node;
+            }
+            if (length >= minLength) {
+              fallback = node;
             }
             node = node.parentElement;
           }
-          return el;
+          return fallback || el;
         };
         const ancestorSet = (el) => {
           const nodes = new Set();
@@ -1506,16 +1533,29 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           .slice(0, 10);
         doordashStoreCardCount = storeCardElements.length;
         storeCardElements.forEach((anchor) => {
-          const cardRoot = closestWithText(anchor.parentElement || anchor, 24);
-          const label = firstMeaningfulTextLine(cardRoot) || labelForElement(anchor);
+          const cardRoot = closestWithText(anchor.parentElement || anchor, 24, 220);
+          const headingLabel = Array.from(cardRoot.querySelectorAll('h1,h2,h3,h4,[role="heading"]'))
+            .map((node) => clean(node.innerText || ''))
+            .find((line) => line && !/^(get to know us|let us help you|doing business|welcome back!?|convenience & drugstores|deals & benefits|featured items|most ordered)$/i.test(line));
+          const label = headingLabel || firstMeaningfulTextLine(cardRoot) || labelForElement(anchor);
           pushUnique(doordashCandidates, candidateFromElement(anchor, 'dd_store_card', cardRoot, label));
+        });
+
+        const cartReviewButtons = Array.from(document.querySelectorAll('button,a[href],[role="button"]'))
+          .filter(visible)
+          .filter((el) => /view cart|items? in cart|open order cart/i.test(labelForElement(el)));
+        cartReviewButtons.slice(0, 4).forEach((button) => {
+          doordashHasCartCTA = true;
+          const root = closestWithText(button, 12, 180);
+          const label = /view cart/i.test(labelForElement(button)) ? 'View cart' : 'Open cart';
+          pushUnique(doordashCandidates, candidateFromElement(button, 'dd_cart_cta', root, label));
         });
 
         const cartButton = Array.from(document.querySelectorAll('button[data-testid="OrderCartIconButton"], button[aria-controls="order-cart"]'))
           .filter(visible)[0];
         if (cartButton) {
           doordashHasCartCTA = true;
-          pushUnique(doordashCandidates, candidateFromElement(cartButton, 'dd_cart_cta', cartButton.closest('section,div'), 'View cart'));
+          pushUnique(doordashCandidates, candidateFromElement(cartButton, 'dd_cart_cta', cartButton.closest('section,div'), 'Open cart'));
         }
 
         if (continueAnchor) {
@@ -1535,12 +1575,13 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             pushUnique(doordashCandidates, candidateFromElement(modalClose, 'dd_modal_close', itemModal, 'Close item'));
           }
 
-          const addToCartButtons = Array.from(itemModal.querySelectorAll('button,[role="button"],a[href]'))
+          const addToCartButtons = Array.from(document.querySelectorAll('button,[role="button"],a[href]'))
             .filter(visible)
             .filter((el) => /add to cart/i.test(labelForElement(el)));
           addToCartButtons.forEach((button) => {
             doordashHasAddToCartCTA = true;
-            pushUnique(doordashCandidates, candidateFromElement(button, 'dd_add_to_cart', itemModal, 'Add to cart'));
+            const root = sharedAncestor(itemModal, button) || closestWithText(button, 18, 240);
+            pushUnique(doordashCandidates, candidateFromElement(button, 'dd_add_to_cart', root, 'Add to cart'));
           });
 
           const modalOptionButtons = Array.from(itemModal.querySelectorAll('button,[role="button"],a[href]'))
