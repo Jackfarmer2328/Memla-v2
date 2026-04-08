@@ -633,11 +633,19 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         let hasSeePricesCTA = payload["uber_has_see_prices_cta"] as? Bool ?? false
         let hasRequestCTA = payload["uber_has_request_cta"] as? Bool ?? false
         let vehicleCount = payload["uber_vehicle_option_count"] as? Int ?? 0
+        let hasRideBuilderHints = combined.contains("pickup location needs to be filled in")
+            || combined.contains("dropoff location needs to be filled in")
+            || combined.contains("see prices")
+            || (combined.contains("pickup now") && combined.contains("for me"))
+        let hasProductSelectionHints = combined.contains("request uber")
+            || combined.contains("request trip")
+            || combined.contains("add payment method")
+            || (combined.contains("uberx") && combined.contains("$"))
 
-        if url.contains("/go/product-selection") || hasRequestCTA || vehicleCount > 0 || combined.contains("request uber") {
+        if url.contains("/go/product-selection") || hasRequestCTA || vehicleCount > 0 || hasProductSelectionHints {
             return "ub_product_selection"
         }
-        if hasPickupInput || hasDropoffInput || pickupResults > 0 || dropoffResults > 0 || hasSeePricesCTA || url.contains("/start-riding") || url.contains("/looking") {
+        if hasPickupInput || hasDropoffInput || pickupResults > 0 || dropoffResults > 0 || hasSeePricesCTA || url.contains("/start-riding") || url.contains("/looking") || hasRideBuilderHints {
             return "ub_trip_builder"
         }
         return classifyPageKind(combined: combined, url: url, inputs: inputs)
@@ -955,6 +963,12 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
     }
 
     private static func classifyAuthState(pageKind: String, combined: String) -> String {
+        if pageKind.hasPrefix("ub_") {
+            if combined.contains("your account information") || combined.contains("add payment method") || combined.contains("pickup now") || combined.contains("request uber") {
+                return "likely_signed_in"
+            }
+            return "unknown"
+        }
         if pageKind == "login" {
             return "login_required"
         }
