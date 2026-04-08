@@ -1958,6 +1958,57 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           }
           collection.push(candidate);
         };
+        const rawLines = (el) => String(el?.innerText || '')
+          .split('\\n')
+          .map(clean)
+          .filter(Boolean);
+        const firstMeaningfulTextLine = (el) => {
+          const lines = rawLines(el);
+          return lines.find((line) => {
+            const lower = line.toLowerCase();
+            return /[a-z]/i.test(line)
+              && !/^(offers|featured items|all stores|all|delivery|pickup|build your cart|order delivery near you)$/i.test(lower)
+              && !/delivered by|delivery fee|minutes|mins| mi\\b|\\bmin\\b|reviews?|\\(\\d\\+\\)|results$/i.test(lower);
+          }) || lines[0] || '';
+        };
+        const closestWithText = (el, minLength = 20, maxLength = 260) => {
+          let node = el;
+          let fallback = el;
+          while (node && node !== document.body) {
+            const length = clean(node.innerText || '').length;
+            if (length >= minLength && length <= maxLength) {
+              return node;
+            }
+            if (length >= minLength) {
+              fallback = node;
+            }
+            node = node.parentElement;
+          }
+          return fallback || el;
+        };
+        const ancestorSet = (el) => {
+          const nodes = new Set();
+          let node = el;
+          while (node) {
+            nodes.add(node);
+            node = node.parentElement;
+          }
+          return nodes;
+        };
+        const sharedAncestor = (left, right) => {
+          if (!left && !right) return null;
+          if (!left) return closestWithText(right, 20);
+          if (!right) return closestWithText(left, 20);
+          const leftAncestors = ancestorSet(left);
+          let node = right;
+          while (node) {
+            if (leftAncestors.has(node)) {
+              return node;
+            }
+            node = node.parentElement;
+          }
+          return closestWithText(left, 20);
+        };
         const isUberNoise = (text) => /sign up|login redirect|main navigation menu|group order|favorite|view more options|save on ubereats|uber one|offers$|delivery fee$|sort$|rating$|price$|benefits eligible|snap$/i.test(text);
         const uberActionables = Array.from(document.querySelectorAll('a[href],button,[role="button"],[role="option"],input[type="button"],input[type="submit"]'))
           .filter(visible);
