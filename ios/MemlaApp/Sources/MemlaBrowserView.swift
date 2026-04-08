@@ -1787,11 +1787,13 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         let wrapperSelector = isPickup
             ? "div[data-testid=\"dotcom-ui.pickup-destination.placeholder.pickup\"]"
             : "div[data-testid=\"dotcom-ui.pickup-destination.placeholder.destination.drop0\"]"
+        let locationButtonSelector = "[data-testid=\"clear-button\"] [role=\"button\"], [data-testid=\"clear-button\"]"
         let reason = isPickup ? "focused_uber_pickup_field" : "focused_uber_destination_field"
         return """
         (() => {
           const target = document.querySelector('\(selector)');
           const wrapper = document.querySelector('\(wrapperSelector)') || target?.closest('[data-tracking="disabled"]');
+          const locationButton = \(isPickup ? "document.querySelector('\(locationButtonSelector)')" : "null");
           const activate = (node) => {
             if (!node) return;
             try { node.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
@@ -1806,6 +1808,10 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           };
           if (!target) {
             return { ok: false, reason: 'uber_ride_input_not_found' };
+          }
+          if (\(isPickup ? "true" : "false") && !String(target.value || '').trim() && locationButton) {
+            activate(locationButton);
+            return { ok: true, reason: 'activated_uber_pickup_location' };
           }
           activate(wrapper);
           activate(target);
@@ -2464,6 +2470,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           .filter(visible)[0] || null;
         const dropoffInput = Array.from(document.querySelectorAll('input[data-testid="dotcom-ui.pickup-destination.input.destination.drop0"]'))
           .filter(visible)[0] || null;
+        const pickupLocationButton = Array.from(document.querySelectorAll('[data-testid="clear-button"] [role="button"], [data-testid="clear-button"]'))
+          .filter(visible)[0] || null;
         const activeField = pickupInput === document.activeElement
           ? 'pickup'
           : (dropoffInput === document.activeElement || dropoffInput?.getAttribute('aria-expanded') === 'true')
@@ -2481,6 +2489,9 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
 
         if (pickupInput) {
           pushUnique(uberCandidates, candidateFromElement(pickupInput, 'ub_pickup_input', closestWithText(pickupInput, 8, 180), 'Set pickup'));
+        }
+        if (pickupLocationButton && uberPickupMissing) {
+          pushUnique(uberCandidates, candidateFromElement(pickupLocationButton, 'ub_pickup_current_location', closestWithText(pickupLocationButton, 8, 180), 'Use current location'));
         }
         if (dropoffInput) {
           pushUnique(uberCandidates, candidateFromElement(dropoffInput, 'ub_dropoff_input', closestWithText(dropoffInput, 8, 180), 'Set destination'));
@@ -3164,12 +3175,12 @@ struct MemlaBrowserView: View {
 
     private func mirrorCandidates(for state: WebsiteC2AState) -> [WebsiteC2ACandidate] {
         let deprioritizedRoles = Set(["review_link", "accessibility_link", "utility_link", "auth_link", "nav_link", "dd_menu_nav"])
-        let preferredRoles = Set(["store_link", "menu_item", "item_action_button", "cart_link", "cart_button", "control_button", "checkout_button", "dd_store_card", "dd_item_card", "dd_add_to_cart", "dd_continue_cta", "dd_cart_cta", "dd_tip_option", "dd_address_cta", "dd_modal_close", "ue_continue_browser", "ue_address_cta", "ue_address_result", "ue_search_entry", "ue_store_card", "ue_item_card", "ue_add_to_cart", "ue_cart_cta", "ue_continue_cta", "ue_modal_close", "ub_pickup_input", "ub_pickup_result", "ub_dropoff_input", "ub_dropoff_result", "ub_see_prices_cta", "ub_vehicle_option"])
+        let preferredRoles = Set(["store_link", "menu_item", "item_action_button", "cart_link", "cart_button", "control_button", "checkout_button", "dd_store_card", "dd_item_card", "dd_add_to_cart", "dd_continue_cta", "dd_cart_cta", "dd_tip_option", "dd_address_cta", "dd_modal_close", "ue_continue_browser", "ue_address_cta", "ue_address_result", "ue_search_entry", "ue_store_card", "ue_item_card", "ue_add_to_cart", "ue_cart_cta", "ue_continue_cta", "ue_modal_close", "ub_pickup_input", "ub_pickup_current_location", "ub_pickup_result", "ub_dropoff_input", "ub_dropoff_result", "ub_see_prices_cta", "ub_vehicle_option"])
         let visibleCandidates = state.candidates.filter { !deprioritizedRoles.contains($0.role) && !$0.blocked }
         let stateScopedRoles: Set<String>
         switch state.pageKind {
         case "ub_trip_builder":
-            stateScopedRoles = ["ub_pickup_result", "ub_pickup_input", "ub_dropoff_result", "ub_dropoff_input", "ub_see_prices_cta"]
+            stateScopedRoles = ["ub_pickup_current_location", "ub_pickup_result", "ub_pickup_input", "ub_dropoff_result", "ub_dropoff_input", "ub_see_prices_cta"]
         case "ub_product_selection":
             stateScopedRoles = ["ub_vehicle_option"]
         case "ue_entry_gate":
@@ -3223,6 +3234,8 @@ struct MemlaBrowserView: View {
         switch pageKind {
         case "ub_trip_builder":
             switch role {
+            case "ub_pickup_current_location":
+                return 104
             case "ub_pickup_result":
                 return 100
             case "ub_pickup_input":
@@ -3550,7 +3563,7 @@ struct MemlaBrowserView: View {
     }
 
     private func mirrorControlCandidates(for state: WebsiteC2AState) -> [WebsiteC2ACandidate] {
-        let controlRoles = Set(["item_action_button", "cart_button", "cart_link", "control_button", "checkout_button", "dd_add_to_cart", "dd_continue_cta", "dd_cart_cta", "dd_tip_option", "dd_address_cta", "dd_modal_close", "ue_continue_browser", "ue_address_cta", "ue_address_result", "ue_search_entry", "ue_add_to_cart", "ue_cart_cta", "ue_continue_cta", "ue_modal_close", "ub_pickup_input", "ub_pickup_result", "ub_dropoff_input", "ub_dropoff_result", "ub_see_prices_cta"])
+        let controlRoles = Set(["item_action_button", "cart_button", "cart_link", "control_button", "checkout_button", "dd_add_to_cart", "dd_continue_cta", "dd_cart_cta", "dd_tip_option", "dd_address_cta", "dd_modal_close", "ue_continue_browser", "ue_address_cta", "ue_address_result", "ue_search_entry", "ue_add_to_cart", "ue_cart_cta", "ue_continue_cta", "ue_modal_close", "ub_pickup_input", "ub_pickup_current_location", "ub_pickup_result", "ub_dropoff_input", "ub_dropoff_result", "ub_see_prices_cta"])
         return mirrorCandidates(for: state).filter { controlRoles.contains($0.role) }
     }
 
@@ -3830,6 +3843,8 @@ struct MemlaBrowserView: View {
         switch candidate.role {
         case "ub_pickup_input":
             return "Set Pickup"
+        case "ub_pickup_current_location":
+            return "Use Current Location"
         case "ub_pickup_result":
             return "Use Current Location"
         case "ub_dropoff_input":
@@ -4425,6 +4440,14 @@ struct MemlaBrowserView: View {
             let pickupMissing = state.serviceFacts["ub_pickup_missing"] == "true"
             let dropoffMissing = state.serviceFacts["ub_dropoff_missing"] == "true"
             if state.serviceFacts["ub_pickup_missing"] == "true" {
+                if let pickupLocation = candidates.first(where: { $0.role == "ub_pickup_current_location" && !$0.blocked }) {
+                    return MirrorAutoDriveAction(
+                        candidate: pickupLocation,
+                        allowCaution: true,
+                        status: "Using current location...",
+                        pendingRole: ""
+                    )
+                }
                 if let pickupResult = candidates.first(where: { $0.role == "ub_pickup_result" && !$0.blocked }) {
                     return MirrorAutoDriveAction(
                         candidate: pickupResult,
@@ -4634,6 +4657,10 @@ struct MemlaBrowserView: View {
 
     private func tapCandidate(_ candidate: WebsiteC2ACandidate, allowCaution: Bool = false) {
         if candidate.role == "ub_pickup_input" {
+            browser.focusUberRideField(isPickup: true, capsule: route.capsule)
+            return
+        }
+        if candidate.role == "ub_pickup_current_location" {
             browser.focusUberRideField(isPickup: true, capsule: route.capsule)
             return
         }
