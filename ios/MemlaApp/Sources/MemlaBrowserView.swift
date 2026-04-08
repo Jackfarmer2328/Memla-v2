@@ -397,6 +397,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         let tipCount = payload["doordash_tip_option_count"] as? Int ?? 0
         let hasPaymentSheet = payload["doordash_has_payment_sheet"] as? Bool ?? false
         let hasAddressCTA = payload["doordash_has_address_cta"] as? Bool ?? false
+        let hasCartCloseCTA = payload["doordash_has_cart_close_cta"] as? Bool ?? false
 
         if hasPaymentSheet || layerKind == "payment_sheet" || combined.contains("select payment method") {
             return "dd_payment_sheet"
@@ -404,11 +405,11 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         if url.contains("/consumer/checkout") {
             return "dd_checkout"
         }
+        if layerKind == "cart_drawer" || hasContinueCTA || hasCartCloseCTA {
+            return "dd_cart_drawer"
+        }
         if layerKind == "item_modal" || hasAddToCartCTA || modalTitle.contains("build your own pizza") || combined.contains("add to cart") {
             return "dd_item_modal"
-        }
-        if layerKind == "cart_drawer" || (hasCartCTA && hasContinueCTA) {
-            return "dd_cart_drawer"
         }
         if hasContinueCTA || hasAddressCTA || tipCount > 0 {
             return "dd_cart_page"
@@ -864,25 +865,25 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         case "store_link":
             return 2.2
         case "dd_store_card":
-            return 4.0
+            return 5.2
         case "menu_item":
             return 1.8
         case "dd_item_card":
-            return 3.0
+            return 3.4
         case "item_action_button":
             return 1.2
         case "dd_add_to_cart":
-            return 3.6
+            return 4.4
         case "dd_continue_cta":
-            return 2.8
+            return 5.0
         case "dd_cart_cta":
-            return 2.4
+            return 3.6
         case "dd_tip_option":
-            return 1.6
+            return 2.0
         case "dd_address_cta":
             return 1.0
         case "dd_modal_close":
-            return 0.2
+            return -0.4
         case "cart_link", "cart_button":
             return 1.0
         case "control_button":
@@ -892,7 +893,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         case "nav_link":
             return -3.5
         case "dd_menu_nav":
-            return -5.0
+            return -7.0
         case "accessibility_link":
             return -8.0
         case "utility_link", "auth_link":
@@ -1412,6 +1413,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
       let doordashHasAddToCartCTA = false;
       let doordashHasAddressCTA = false;
       let doordashHasPaymentSheet = false;
+      let doordashHasCartCloseCTA = false;
 
       if (/doordash\\.com$/i.test(location.hostname)) {
         const pushUnique = (collection, candidate) => {
@@ -1422,77 +1424,183 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           }
           collection.push(candidate);
         };
+        const rawLines = (el) => String(el?.innerText || '')
+          .split('\\n')
+          .map(clean)
+          .filter(Boolean);
+        const firstMeaningfulTextLine = (el) => {
+          const lines = rawLines(el);
+          return lines.find((line) => {
+            const lower = line.toLowerCase();
+            return /[a-z]/i.test(line)
+              && !/lower fees|delivery fee|dashpass|pickup|minutes|mins| mi\\b|\\bmin\\b|reviews?|\\(\\d\\+\\)/i.test(lower);
+          }) || lines[0] || '';
+        };
+        const closestWithText = (el, minLength = 20) => {
+          let node = el;
+          while (node && node !== document.body) {
+            if (clean(node.innerText || '').length >= minLength) {
+              return node;
+            }
+            node = node.parentElement;
+          }
+          return el;
+        };
+        const ancestorSet = (el) => {
+          const nodes = new Set();
+          let node = el;
+          while (node) {
+            nodes.add(node);
+            node = node.parentElement;
+          }
+          return nodes;
+        };
+        const sharedAncestor = (left, right) => {
+          if (!left && !right) return null;
+          if (!left) return closestWithText(right, 20);
+          if (!right) return closestWithText(left, 20);
+          const leftAncestors = ancestorSet(left);
+          let node = right;
+          while (node) {
+            if (leftAncestors.has(node)) {
+              return node;
+            }
+            node = node.parentElement;
+          }
+          return closestWithText(left, 20);
+        };
+        const isDoorDashMenuNavLabel = (label, text) => {
+          const cleanLabel = clean(label).toLowerCase();
+          const lowerText = clean(text).toLowerCase();
+          if (/\\$\\d/.test(lowerText)) return false;
+          if (/^(all|featured items|most ordered|breads|chicken & wings|chicken wings|oven-baked pastas|oven baked pastas|pastas|desserts|salads|drinks|sandwiches|wings|sides|beverages)$/.test(cleanLabel)) {
+            return true;
+          }
+          if ((/specialty pizzas?|build your own(?: pizza)?/.test(cleanLabel) || /specialty pizzas?|build your own(?: pizza)?/.test(lowerText)) && !/\\$\\d/.test(lowerText)) {
+            return true;
+          }
+          return false;
+        };
+        const isDoorDashNoise = (text) => /open app|login|log in|become a dasher|merchant|gift cards|notification bell|save$|see all$|pricing & fees|open menu/i.test(text);
+
+        const continueAnchor = Array.from(document.querySelectorAll('a[href*="/consumer/checkout"]'))
+          .filter(visible)
+          .find((el) => /continue/i.test(labelForElement(el)));
+        const cartCloseButton = Array.from(document.querySelectorAll('button[data-testid="dbd-pre-checkout-header-close-button"], button[aria-label="Close"]'))
+          .filter(visible)[0] || null;
 
         const visibleDialogs = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"]')).filter(visible);
         const paymentSheet = visibleDialogs.find((el) => /select payment method|credit\\/debit card|paypal|venmo|cash app pay|klarna/i.test(clean(el.innerText)));
         const itemModal = visibleDialogs.find((el) => /add to cart|choose your size|recommended options|build your own pizza|custom pizza/i.test(clean(el.innerText)));
-        const activeRoot = paymentSheet || itemModal || null;
-        doordashActiveLayer = paymentSheet ? 'payment_sheet' : itemModal ? 'item_modal' : 'page';
+        const cartDrawer = continueAnchor || cartCloseButton ? sharedAncestor(continueAnchor, cartCloseButton) : null;
+        const activeRoot = paymentSheet || cartDrawer || itemModal || null;
+        doordashActiveLayer = paymentSheet ? 'payment_sheet' : cartDrawer ? 'cart_drawer' : itemModal ? 'item_modal' : 'page';
         doordashHasPaymentSheet = Boolean(paymentSheet);
-        doordashModalTitle = clean((activeRoot?.querySelector('h1,h2,h3,[role="heading"]')?.innerText) || '');
+        doordashHasCartCloseCTA = Boolean(cartCloseButton);
+        doordashModalTitle = doordashActiveLayer === 'cart_drawer'
+          ? 'Cart'
+          : clean((activeRoot?.querySelector('h1,h2,h3,[role="heading"]')?.innerText) || '');
 
         const storeCardElements = Array.from(document.querySelectorAll('[data-anchor-id="StoreCard"]'))
           .filter(visible)
           .slice(0, 10);
         doordashStoreCardCount = storeCardElements.length;
         storeCardElements.forEach((anchor) => {
-          const rawText = String(anchor.closest('article,li,section,div')?.innerText || '');
-          const lines = rawText.split('\\n').map(clean).filter(Boolean);
-          const label = lines.find((line) => /pizza|domino|burger|taco|kitchen|grill|cafe|restaurant/i.test(line)) || lines[0] || labelForElement(anchor);
-          pushUnique(doordashCandidates, candidateFromElement(anchor, 'dd_store_card', anchor.closest('article,li,section,div'), label));
-        });
-
-        const searchResultsRoots = activeRoot ? [activeRoot] : [document];
-        searchResultsRoots.forEach((root) => {
-          const menuButtons = Array.from(root.querySelectorAll('button,a[href],[role="button"]'))
-            .filter(visible)
-            .slice(0, 90);
-
-          menuButtons.forEach((el) => {
-            const label = labelForElement(el);
-            const context = contextForElement(el, root);
-            const text = clean([label, context].join(' '));
-            if (!text) return;
-
-            if (/open app|login|become a dasher|merchant|gift cards/i.test(text)) {
-              return;
-            }
-
-            if (/add to cart/i.test(text)) {
-              doordashHasAddToCartCTA = true;
-              pushUnique(doordashCandidates, candidateFromElement(el, 'dd_add_to_cart', root, label || 'Add to cart'));
-              return;
-            }
-
-            if (/continue/i.test(text) && !/continue browsing/i.test(text)) {
-              doordashHasContinueCTA = true;
-              pushUnique(doordashCandidates, candidateFromElement(el, 'dd_continue_cta', root, label || 'Continue'));
-              return;
-            }
-
-            if ((el.getAttribute('aria-controls') || '') === 'order-cart' || (el.getAttribute('data-testid') || '') === 'OrderCartIconButton') {
-              doordashHasCartCTA = true;
-              pushUnique(doordashCandidates, candidateFromElement(el, 'dd_cart_cta', root, label || 'View cart'));
-              return;
-            }
-
-            if (/\\$\\d/.test(text) || /build your own|specialty pizza|custom pizza|pizza|wings|bread|pasta|dessert/i.test(label)) {
-              const role = /all|featured|most ordered|specialty pizza|build your own|salads|pastas|sides/i.test(label) && !/\\$\\d/.test(text)
-                ? 'dd_menu_nav'
-                : 'dd_item_card';
-              if (role === 'dd_item_card') {
-                doordashItemCardCount += 1;
-              }
-              pushUnique(doordashCandidates, candidateFromElement(el, role, root, label));
-            }
-          });
+          const cardRoot = closestWithText(anchor.parentElement || anchor, 24);
+          const label = firstMeaningfulTextLine(cardRoot) || labelForElement(anchor);
+          pushUnique(doordashCandidates, candidateFromElement(anchor, 'dd_store_card', cardRoot, label));
         });
 
         const cartButton = Array.from(document.querySelectorAll('button[data-testid="OrderCartIconButton"], button[aria-controls="order-cart"]'))
           .filter(visible)[0];
         if (cartButton) {
           doordashHasCartCTA = true;
-          pushUnique(doordashCandidates, candidateFromElement(cartButton, 'dd_cart_cta', cartButton.closest('section,div'), labelForElement(cartButton) || 'View cart'));
+          pushUnique(doordashCandidates, candidateFromElement(cartButton, 'dd_cart_cta', cartButton.closest('section,div'), 'View cart'));
+        }
+
+        if (continueAnchor) {
+          doordashHasContinueCTA = true;
+          pushUnique(doordashCandidates, candidateFromElement(continueAnchor, 'dd_continue_cta', cartDrawer || continueAnchor.closest('section,div'), 'Continue'));
+        }
+
+        if (cartCloseButton && cartDrawer) {
+          pushUnique(doordashCandidates, candidateFromElement(cartCloseButton, 'dd_modal_close', cartDrawer, 'Close cart'));
+        }
+
+        if (itemModal) {
+          const modalClose = Array.from(itemModal.querySelectorAll('button,[role="button"]'))
+            .filter(visible)
+            .find((el) => /^x$/i.test(labelForElement(el)) || /close|dismiss/i.test(labelForElement(el)));
+          if (modalClose) {
+            pushUnique(doordashCandidates, candidateFromElement(modalClose, 'dd_modal_close', itemModal, 'Close item'));
+          }
+
+          const addToCartButtons = Array.from(itemModal.querySelectorAll('button,[role="button"],a[href]'))
+            .filter(visible)
+            .filter((el) => /add to cart/i.test(labelForElement(el)));
+          addToCartButtons.forEach((button) => {
+            doordashHasAddToCartCTA = true;
+            pushUnique(doordashCandidates, candidateFromElement(button, 'dd_add_to_cart', itemModal, 'Add to cart'));
+          });
+
+          const modalOptionButtons = Array.from(itemModal.querySelectorAll('button,[role="button"],a[href]'))
+            .filter(visible)
+            .filter((el) => {
+              const label = labelForElement(el);
+              const text = clean([label, contextForElement(el, itemModal)].join(' '));
+              if (!text || isDoorDashNoise(text) || /close|dismiss|add special instructions|add to cart/i.test(text)) {
+                return false;
+              }
+              return /ordered recently|small|medium|large|hand tossed|crust|seasoning|pizza|\\$\\d|recommended/i.test(text);
+            })
+            .slice(0, 14);
+          modalOptionButtons.forEach((el) => {
+            doordashItemCardCount += 1;
+            const root = closestWithText(el, 18);
+            const label = firstMeaningfulTextLine(root) || labelForElement(el);
+            pushUnique(doordashCandidates, candidateFromElement(el, 'dd_item_card', root, label));
+          });
+        } else if (!cartDrawer) {
+          const quickAddButtons = Array.from(document.querySelectorAll('button[data-testid="quick-add-button"]'))
+            .filter(visible)
+            .slice(0, 8);
+          quickAddButtons.forEach((button) => {
+            doordashHasAddToCartCTA = true;
+            pushUnique(doordashCandidates, candidateFromElement(button, 'dd_add_to_cart', closestWithText(button, 18), 'Add to cart'));
+          });
+
+          const storefrontElements = Array.from(document.querySelectorAll('button,a[href],[role="button"]'))
+            .filter(visible)
+            .slice(0, 140);
+          storefrontElements.forEach((el) => {
+            const label = labelForElement(el);
+            const root = closestWithText(el, 18);
+            const context = contextForElement(el, root);
+            const text = clean([label, context].join(' '));
+            if (!text || isDoorDashNoise(text)) return;
+            if ((el.getAttribute('aria-controls') || '') === 'order-cart' || (el.getAttribute('data-testid') || '') === 'OrderCartIconButton') {
+              return;
+            }
+            if (/continue/i.test(text) && !/continue browsing/i.test(text)) {
+              doordashHasContinueCTA = true;
+              pushUnique(doordashCandidates, candidateFromElement(el, 'dd_continue_cta', root, 'Continue'));
+              return;
+            }
+            if (/add to cart/i.test(text)) {
+              doordashHasAddToCartCTA = true;
+              pushUnique(doordashCandidates, candidateFromElement(el, 'dd_add_to_cart', root, 'Add to cart'));
+              return;
+            }
+            if (isDoorDashMenuNavLabel(label, text)) {
+              pushUnique(doordashCandidates, candidateFromElement(el, 'dd_menu_nav', root, clean(label)));
+              return;
+            }
+            if (/build your own|specialty pizza|custom pizza|pizza|wings|bread|pasta|dessert|sandwich|salad|bites/i.test(text) && (/\\$\\d/.test(text) || (el.getAttribute('role') || '') === 'button' || (el.getAttribute('aria-label') || ''))) {
+              doordashItemCardCount += 1;
+              const itemLabel = firstMeaningfulTextLine(root) || clean(label);
+              pushUnique(doordashCandidates, candidateFromElement(el, 'dd_item_card', root, itemLabel));
+            }
+          });
         }
 
         const tipButtons = Array.from(document.querySelectorAll('button[data-anchor-id="TipPickerOption"]'))
@@ -1519,15 +1627,6 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
               pushUnique(doordashCandidates, candidateFromElement(button, 'dd_payment_method', paymentSheet, labelForElement(button)));
             });
         }
-
-        if (activeRoot) {
-          const closeButton = Array.from(activeRoot.querySelectorAll('button,[role="button"]'))
-            .filter(visible)
-            .find((el) => /^x$/i.test(labelForElement(el)) || /close|dismiss/i.test(labelForElement(el)));
-          if (closeButton) {
-            pushUnique(doordashCandidates, candidateFromElement(closeButton, 'dd_modal_close', activeRoot, labelForElement(closeButton) || 'Dismiss'));
-          }
-        }
       }
 
       const text = clean(document.body ? document.body.innerText : '');
@@ -1550,7 +1649,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         doordash_has_continue_cta: doordashHasContinueCTA,
         doordash_has_add_to_cart_cta: doordashHasAddToCartCTA,
         doordash_has_address_cta: doordashHasAddressCTA,
-        doordash_has_payment_sheet: doordashHasPaymentSheet
+        doordash_has_payment_sheet: doordashHasPaymentSheet,
+        doordash_has_cart_close_cta: doordashHasCartCloseCTA
       };
     })();
     """
@@ -2075,9 +2175,9 @@ struct MemlaBrowserView: View {
         case "dd_search_results":
             stateScopedRoles = ["dd_store_card"]
         case "dd_storefront":
-            stateScopedRoles = ["dd_item_card", "dd_cart_cta", "dd_modal_close"]
+            stateScopedRoles = ["dd_item_card", "dd_add_to_cart", "dd_cart_cta"]
         case "dd_item_modal":
-            stateScopedRoles = ["dd_add_to_cart", "dd_item_card", "dd_modal_close", "dd_tip_option"]
+            stateScopedRoles = ["dd_add_to_cart", "dd_item_card", "dd_modal_close"]
         case "dd_cart_drawer", "dd_cart_page":
             stateScopedRoles = ["dd_cart_cta", "dd_continue_cta", "dd_tip_option", "dd_address_cta", "dd_modal_close"]
         case "dd_checkout":
@@ -2094,7 +2194,83 @@ struct MemlaBrowserView: View {
         let preferred = candidatePool.filter { candidate in
             candidate.score > 0 || preferredRoles.contains(candidate.role)
         }
-        return preferred.isEmpty ? Array(candidatePool.prefix(4)) : Array(preferred.prefix(4))
+        let effectivePool = preferred.isEmpty ? candidatePool : preferred
+        let sorted = effectivePool.sorted { left, right in
+            let leftPriority = mirrorRolePriority(pageKind: state.pageKind, role: left.role)
+            let rightPriority = mirrorRolePriority(pageKind: state.pageKind, role: right.role)
+            if leftPriority != rightPriority {
+                return leftPriority > rightPriority
+            }
+            if left.score != right.score {
+                return left.score > right.score
+            }
+            return left.label.localizedCaseInsensitiveCompare(right.label) == .orderedAscending
+        }
+        return Array(sorted.prefix(4))
+    }
+
+    private func mirrorRolePriority(pageKind: String, role: String) -> Int {
+        switch pageKind {
+        case "dd_search_results":
+            switch role {
+            case "dd_store_card":
+                return 100
+            default:
+                return 10
+            }
+        case "dd_storefront":
+            switch role {
+            case "dd_item_card":
+                return 100
+            case "dd_add_to_cart":
+                return 90
+            case "dd_cart_cta":
+                return 70
+            case "dd_modal_close":
+                return 5
+            default:
+                return 10
+            }
+        case "dd_item_modal":
+            switch role {
+            case "dd_add_to_cart":
+                return 100
+            case "dd_item_card":
+                return 75
+            case "dd_modal_close":
+                return 10
+            default:
+                return 15
+            }
+        case "dd_cart_drawer", "dd_cart_page":
+            switch role {
+            case "dd_continue_cta":
+                return 100
+            case "dd_cart_cta":
+                return 70
+            case "dd_tip_option":
+                return 60
+            case "dd_address_cta":
+                return 50
+            case "dd_modal_close":
+                return 5
+            default:
+                return 10
+            }
+        case "dd_checkout":
+            switch role {
+            case "dd_tip_option":
+                return 100
+            case "dd_address_cta":
+                return 90
+            case "dd_modal_close":
+                return 10
+            default:
+                return 15
+            }
+        default:
+            return 10
+        }
     }
 
     private func mirrorFacts(for state: WebsiteC2AState) -> [WebsiteMirrorFact] {
@@ -2485,6 +2661,8 @@ struct MemlaBrowserView: View {
             return "Open Store"
         case "dd_item_card":
             return "Open Item"
+        case "dd_continue_cta":
+            return "Continue"
         case "cart_link", "dd_cart_cta":
             return "Open Cart"
         default:
