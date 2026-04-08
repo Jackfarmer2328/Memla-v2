@@ -372,7 +372,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             return
         }
         doorDashStorefrontWarmupAttempts += 1
-        inspectionStatus = "DoorDash menu is still loading..."
+        inspectionStatus = "Memla is peeking into the DoorDash menu..."
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { [weak self] in
             guard let self = self else {
                 return
@@ -380,7 +380,11 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             guard self.currentURL == url, !self.isLoading else {
                 return
             }
-            self.inspectPage(capsule: capsule)
+            self.webView.evaluateJavaScript(Self.doorDashStorefrontPeekScript) { [weak self] _, _ in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                    self?.inspectPage(capsule: capsule)
+                }
+            }
         }
     }
 
@@ -1758,6 +1762,31 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         doordash_has_payment_sheet: doordashHasPaymentSheet,
         doordash_has_cart_close_cta: doordashHasCartCloseCTA
       };
+    })();
+    """
+
+    private static let doorDashStorefrontPeekScript = """
+    (() => {
+      const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+      const visible = (el) => {
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 1 && rect.height > 1;
+      };
+      const candidates = Array.from(document.querySelectorAll('[role="button"][aria-label], button[aria-label], h2, h3, [role="heading"]'))
+        .filter(visible);
+      const target = candidates.find((el) => {
+        const text = clean(el.getAttribute('aria-label') || el.innerText || '');
+        return /build your own|specialty pizza|featured items|most ordered|pizza|wings|breads|dessert|sandwich|salad|pasta/i.test(text);
+      });
+      if (target && typeof target.scrollIntoView === 'function') {
+        target.scrollIntoView({ block: 'center', inline: 'nearest' });
+        return { ok: true, reason: 'scrolled_to_menu_target' };
+      }
+      window.scrollBy(0, Math.min(Math.max(window.innerHeight * 0.9, 320), 720));
+      return { ok: true, reason: 'scrolled_storefront_down' };
     })();
     """
 
