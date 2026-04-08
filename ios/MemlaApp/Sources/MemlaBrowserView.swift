@@ -408,7 +408,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         if layerKind == "cart_drawer" || hasContinueCTA || hasCartCloseCTA {
             return "dd_cart_drawer"
         }
-        if layerKind == "item_modal" || hasAddToCartCTA || modalTitle.contains("build your own pizza") || combined.contains("add to cart") {
+        if layerKind == "item_modal" || (!modalTitle.isEmpty && layerKind != "page") {
             return "dd_item_modal"
         }
         if hasContinueCTA || hasAddressCTA || tipCount > 0 {
@@ -2214,11 +2214,11 @@ struct MemlaBrowserView: View {
         let stateScopedRoles: Set<String>
         switch state.pageKind {
         case "dd_search_results":
-            stateScopedRoles = ["dd_store_card"]
+            stateScopedRoles = ["dd_store_card", "dd_cart_cta"]
         case "dd_storefront":
             stateScopedRoles = ["dd_item_card", "dd_add_to_cart", "dd_cart_cta"]
         case "dd_item_modal":
-            stateScopedRoles = ["dd_add_to_cart", "dd_item_card", "dd_modal_close"]
+            stateScopedRoles = ["dd_add_to_cart", "dd_item_card", "dd_cart_cta", "dd_modal_close"]
         case "dd_cart_drawer", "dd_cart_page":
             stateScopedRoles = ["dd_cart_cta", "dd_continue_cta", "dd_tip_option", "dd_address_cta", "dd_modal_close"]
         case "dd_checkout":
@@ -2256,6 +2256,8 @@ struct MemlaBrowserView: View {
             switch role {
             case "dd_store_card":
                 return 100
+            case "dd_cart_cta":
+                return 85
             default:
                 return 10
             }
@@ -2276,6 +2278,8 @@ struct MemlaBrowserView: View {
             switch role {
             case "dd_add_to_cart":
                 return 100
+            case "dd_cart_cta":
+                return 85
             case "dd_item_card":
                 return 75
             case "dd_modal_close":
