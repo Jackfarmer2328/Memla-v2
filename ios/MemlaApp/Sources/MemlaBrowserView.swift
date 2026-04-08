@@ -400,19 +400,37 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         let combined = ([title, url, textSnippet] + headings + inputs + buttons + links).joined(separator: " ").lowercased()
         let normalizedCombined = normalizedText(combined)
         let isDoorDash = isDoorDashDomain(url: url)
-        let pageKind = isDoorDash
-            ? classifyDoorDashPage(payload: payload, combined: combined, url: url, inputs: inputs)
-            : classifyPageKind(combined: combined, url: url, inputs: inputs)
-        let candidateSource = isDoorDash ? (payload["doordash_candidates"] ?? payload["candidates"]) : payload["candidates"]
+        let isUberEats = isUberEatsDomain(url: url)
+        let pageKind: String
+        if isDoorDash {
+            pageKind = classifyDoorDashPage(payload: payload, combined: combined, url: url, inputs: inputs)
+        } else if isUberEats {
+            pageKind = classifyUberEatsPage(payload: payload, combined: combined, url: url, inputs: inputs)
+        } else {
+            pageKind = classifyPageKind(combined: combined, url: url, inputs: inputs)
+        }
+        let candidateSource: Any?
+        if isDoorDash {
+            candidateSource = payload["doordash_candidates"] ?? payload["candidates"]
+        } else if isUberEats {
+            candidateSource = payload["ubereats_candidates"] ?? payload["candidates"]
+        } else {
+            candidateSource = payload["candidates"]
+        }
         let candidates = candidateArray(candidateSource, capsule: capsule, pageKind: pageKind)
         let safeActions = candidateActions(pageKind: pageKind, inputs: inputs, buttons: buttons, links: links, candidates: candidates)
         let residuals = residualsForPage(pageKind: pageKind, combined: normalizedCombined, textSnippet: textSnippet, capsule: capsule)
         let authState = classifyAuthState(pageKind: pageKind, combined: combined)
         let authDomain = domainFrom(url: url)
         let capsuleVerification = capsuleVerificationForPage(pageKind: pageKind, combined: normalizedCombined, capsule: capsule)
-        let summary = isDoorDash
-            ? doorDashSummary(payload: payload, pageKind: pageKind, candidates: candidates)
-            : "Compiled \(pageKind.replacingOccurrences(of: "_", with: " ")) with \(inputs.count) inputs, \(buttons.count) buttons, \(links.count) links, and \(candidates.count) candidates."
+        let summary: String
+        if isDoorDash {
+            summary = doorDashSummary(payload: payload, pageKind: pageKind, candidates: candidates)
+        } else if isUberEats {
+            summary = uberEatsSummary(payload: payload, pageKind: pageKind, candidates: candidates)
+        } else {
+            summary = "Compiled \(pageKind.replacingOccurrences(of: "_", with: " ")) with \(inputs.count) inputs, \(buttons.count) buttons, \(links.count) links, and \(candidates.count) candidates."
+        }
         return WebsiteC2AState(
             pageKind: pageKind,
             summary: summary,
@@ -432,6 +450,10 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
 
     private static func isDoorDashDomain(url: String) -> Bool {
         domainFrom(url: url).contains("doordash.com")
+    }
+
+    private static func isUberEatsDomain(url: String) -> Bool {
+        domainFrom(url: url).contains("ubereats.com")
     }
 
     private static func classifyDoorDashPage(payload: [String: Any], combined: String, url: String, inputs: [String]) -> String {
@@ -496,6 +518,60 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         }
     }
 
+    private static func classifyUberEatsPage(payload: [String: Any], combined: String, url: String, inputs: [String]) -> String {
+        let layerKind = stringValue(payload["ubereats_active_layer"])
+        let hasStoreCards = (payload["ubereats_store_card_count"] as? Int ?? 0) > 0
+        let hasItemCards = (payload["ubereats_item_card_count"] as? Int ?? 0) > 0
+        let hasCartCTA = payload["ubereats_has_cart_cta"] as? Bool ?? false
+        let hasContinueCTA = payload["ubereats_has_continue_cta"] as? Bool ?? false
+        let hasAddToCartCTA = payload["ubereats_has_add_to_cart_cta"] as? Bool ?? false
+        let hasAddressGate = payload["ubereats_has_address_gate"] as? Bool ?? false
+        let hasContinueBrowser = payload["ubereats_has_continue_browser"] as? Bool ?? false
+        let hasSearchEntry = payload["ubereats_has_search_entry"] as? Bool ?? false
+
+        if url.contains("/checkout") || combined.contains("continue to payment") || combined.contains("order summary") {
+            return "ue_checkout"
+        }
+        if layerKind == "item_modal" {
+            return "ue_item_modal"
+        }
+        if hasContinueCTA || hasCartCTA {
+            return "ue_cart_page"
+        }
+        if hasStoreCards || url.contains("/search") {
+            return "ue_search_results"
+        }
+        if hasItemCards || url.contains("/store/") {
+            return "ue_storefront"
+        }
+        if hasContinueBrowser || hasAddressGate || hasSearchEntry {
+            return "ue_entry_gate"
+        }
+        return classifyPageKind(combined: combined, url: url, inputs: inputs)
+    }
+
+    private static func uberEatsSummary(payload: [String: Any], pageKind: String, candidates: [WebsiteC2ACandidate]) -> String {
+        let storeCardCount = payload["ubereats_store_card_count"] as? Int ?? 0
+        let itemCardCount = payload["ubereats_item_card_count"] as? Int ?? 0
+        let layerKind = stringValue(payload["ubereats_active_layer"])
+        switch pageKind {
+        case "ue_entry_gate":
+            return "Uber Eats entry gate detected. Continue in browser or address setup is still in front of the food flow."
+        case "ue_search_results":
+            return "Uber Eats search results distilled into \(storeCardCount) store cards."
+        case "ue_storefront":
+            return "Uber Eats storefront with \(itemCardCount) relevant menu items."
+        case "ue_item_modal":
+            return "Uber Eats item customizer is active."
+        case "ue_cart_page":
+            return "Uber Eats cart is ready to advance."
+        case "ue_checkout":
+            return "Uber Eats checkout detected. Mirror should stop before payment."
+        default:
+            return "Uber Eats \(pageKind.replacingOccurrences(of: "_", with: " ")) layer \(layerKind) with \(candidates.count) candidates."
+        }
+    }
+
     private static func classifyPageKind(combined: String, url: String, inputs: [String]) -> String {
         if combined.contains("captcha") || combined.contains("verify you are human") {
             return "blocked_or_bot_check"
@@ -533,6 +609,27 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         var actions: [String] = []
         if pageKind == "dd_search_results" {
             actions.append("open_ranked_candidate")
+        }
+        if pageKind == "ue_entry_gate" {
+            actions.append("inspect_visible_candidates")
+        }
+        if pageKind == "ue_search_results" {
+            actions.append("open_ranked_candidate")
+        }
+        if pageKind == "ue_storefront" {
+            actions.append("open_ranked_candidate")
+            actions.append("review_item_and_modifiers")
+        }
+        if pageKind == "ue_item_modal" {
+            actions.append("review_item_and_modifiers")
+            actions.append("review_then_tap_candidate")
+        }
+        if pageKind == "ue_cart_page" {
+            actions.append("verify_cart_against_capsule")
+            actions.append("review_then_enter_checkout")
+        }
+        if pageKind == "ue_checkout" {
+            actions.append("stop_before_purchase")
         }
         if pageKind == "dd_storefront" {
             actions.append("open_ranked_candidate")
@@ -590,6 +687,19 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             residuals.append("final_confirmation_required")
             residuals.append("irreversible_action_nearby")
         }
+        if pageKind == "ue_entry_gate" {
+            residuals.append("address_or_browser_gate")
+        }
+        if pageKind == "ue_item_modal" {
+            residuals.append("active_customizer_layer")
+        }
+        if pageKind == "ue_cart_page" {
+            residuals.append("cart_verification_required")
+        }
+        if pageKind == "ue_checkout" {
+            residuals.append("final_confirmation_required")
+            residuals.append("irreversible_action_nearby")
+        }
         if pageKind == "dd_item_modal" {
             residuals.append("active_customizer_layer")
         }
@@ -629,7 +739,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         guard let capsule = capsule else {
             return nil
         }
-        let relevantPages = ["menu_or_item", "cart", "checkout", "dd_storefront", "dd_item_modal", "dd_cart_drawer", "dd_cart_page", "dd_checkout", "dd_payment_sheet"]
+        let relevantPages = ["menu_or_item", "cart", "checkout", "dd_storefront", "dd_item_modal", "dd_cart_drawer", "dd_cart_page", "dd_checkout", "dd_payment_sheet", "ue_storefront", "ue_item_modal", "ue_cart_page", "ue_checkout"]
         guard relevantPages.contains(pageKind) else {
             return nil
         }
@@ -679,6 +789,9 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         if pageKind == "dd_storefront" || pageKind == "dd_item_modal" {
             warnings.append("review_item_options_before_cart")
         }
+        if pageKind == "ue_storefront" || pageKind == "ue_item_modal" {
+            warnings.append("review_item_options_before_cart")
+        }
         if pageKind == "cart" {
             warnings.append("verify_cart_before_checkout")
             warnings.append("checkout_is_reviewed_navigation_only")
@@ -687,10 +800,17 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             warnings.append("verify_cart_before_checkout")
             warnings.append("checkout_is_reviewed_navigation_only")
         }
+        if pageKind == "ue_cart_page" {
+            warnings.append("verify_cart_before_checkout")
+            warnings.append("checkout_is_reviewed_navigation_only")
+        }
         if pageKind == "checkout" {
             warnings.append("human_must_complete_final_payment_or_place_order")
         }
         if pageKind == "dd_checkout" || pageKind == "dd_payment_sheet" {
+            warnings.append("human_must_complete_final_payment_or_place_order")
+        }
+        if pageKind == "ue_checkout" {
             warnings.append("human_must_complete_final_payment_or_place_order")
         }
 
@@ -826,7 +946,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
     }
 
     private static func isBlockedServiceRole(_ role: String) -> Bool {
-        ["dd_payment_method", "dd_payment_sheet"].contains(role)
+        ["dd_payment_method", "dd_payment_sheet", "ue_payment_method"].contains(role)
     }
 
     private static func displayLabel(label: String, url: String, context: String, role: String) -> String {
@@ -913,23 +1033,43 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             return 2.2
         case "dd_store_card":
             return 5.2
+        case "ue_store_card":
+            return 5.0
         case "menu_item":
             return 1.8
         case "dd_item_card":
             return 3.4
+        case "ue_item_card":
+            return 3.2
         case "item_action_button":
             return 1.2
         case "dd_add_to_cart":
             return 4.4
+        case "ue_add_to_cart":
+            return 4.2
         case "dd_continue_cta":
             return 5.0
+        case "ue_continue_cta":
+            return 4.8
         case "dd_cart_cta":
             return 3.6
+        case "ue_cart_cta":
+            return 3.8
         case "dd_tip_option":
             return 2.0
         case "dd_address_cta":
             return 1.0
         case "dd_modal_close":
+            return -0.4
+        case "ue_continue_browser":
+            return 1.4
+        case "ue_address_cta":
+            return 1.0
+        case "ue_address_result":
+            return 2.0
+        case "ue_search_entry":
+            return 1.3
+        case "ue_modal_close":
             return -0.4
         case "cart_link", "cart_button":
             return 1.0
@@ -960,24 +1100,44 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             return "Visible store/result candidate"
         case "dd_store_card":
             return "DoorDash merchant card"
+        case "ue_store_card":
+            return "Uber Eats merchant card"
         case "menu_item":
             return "Visible menu or item candidate"
         case "dd_item_card":
             return "DoorDash menu item card"
+        case "ue_item_card":
+            return "Uber Eats menu item card"
         case "item_action_button":
             return "Visible item funnel control"
         case "dd_add_to_cart":
             return "DoorDash add-to-cart control"
+        case "ue_add_to_cart":
+            return "Uber Eats add-to-order control"
         case "dd_continue_cta":
             return "DoorDash continue-to-checkout control"
+        case "ue_continue_cta":
+            return "Uber Eats cart-to-checkout control"
         case "dd_cart_cta":
             return "DoorDash cart CTA"
+        case "ue_cart_cta":
+            return "Uber Eats cart CTA"
         case "dd_tip_option":
             return "DoorDash tip selector"
         case "dd_address_cta":
             return "DoorDash address/edit control"
         case "dd_modal_close":
             return "Dismiss the active sheet if needed"
+        case "ue_continue_browser":
+            return "Continue in browser gate"
+        case "ue_address_cta":
+            return "Uber Eats address setup control"
+        case "ue_address_result":
+            return "Uber Eats address autocomplete result"
+        case "ue_search_entry":
+            return "Uber Eats search entry"
+        case "ue_modal_close":
+            return "Dismiss the active Uber Eats sheet"
         case "cart_link", "cart_button":
             return "Visible cart navigation control"
         case "nav_link":
@@ -1015,6 +1175,29 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             }
             return 0.0
         case "dd_store_card":
+            if text.contains("domino") || text.contains("pizza") || text.contains("taco") || text.contains("burger") || text.contains("johns") || text.contains("caesars") {
+                return 0.5
+            }
+            return 0.0
+        case "ue_add_to_cart":
+            if text.contains("add to order") {
+                return 1.4
+            }
+            if text.contains("quick add") {
+                return -0.2
+            }
+            return 0.0
+        case "ue_cart_cta":
+            if text.contains("view cart") || text.contains("view order") {
+                return 1.3
+            }
+            return 0.0
+        case "ue_continue_cta":
+            if text == "next" || text.contains("go to checkout") {
+                return 1.4
+            }
+            return 0.0
+        case "ue_store_card":
             if text.contains("domino") || text.contains("pizza") || text.contains("taco") || text.contains("burger") || text.contains("johns") || text.contains("caesars") {
                 return 0.5
             }
@@ -1298,7 +1481,14 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           const target = fields.find((el) => {
             const type = (el.getAttribute('type') || '').toLowerCase();
             const label = labelFor(el);
-            return type === 'search' || label.includes('search') || label.includes('restaurant') || label.includes('store') || label.includes('food');
+            return type === 'search'
+              || label.includes('search')
+              || label.includes('restaurant')
+              || label.includes('store')
+              || label.includes('food')
+              || label.includes('address')
+              || label.includes('delivery')
+              || label.includes('location');
           }) || fields[0];
           if (!target) {
             return { ok: false, reason: 'search_input_not_found' };
@@ -1355,7 +1545,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             const rect = el.getBoundingClientRect();
             return rect.width > 1 && rect.height > 1;
           };
-          const elements = Array.from(document.querySelectorAll('a[href],button,[role="button"],input[type="button"],input[type="submit"]'))
+          const elements = Array.from(document.querySelectorAll('a[href],button,[role="button"],[role="option"],input[type="button"],input[type="submit"]'))
             .filter(visible);
           const target = elements[targetIndex];
           if (!target) {
@@ -1436,7 +1626,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           return rawHref;
         }
       };
-      const interactiveElements = Array.from(document.querySelectorAll('a[href],button,[role="button"],input[type="button"],input[type="submit"]'))
+      const interactiveElements = Array.from(document.querySelectorAll('a[href],button,[role="button"],[role="option"],input[type="button"],input[type="submit"]'))
         .filter(visible);
       interactiveElements.forEach((el, index) => {
         try {
@@ -1490,6 +1680,17 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
       let doordashHasAddressCTA = false;
       let doordashHasPaymentSheet = false;
       let doordashHasCartCloseCTA = false;
+      let ubereatsCandidates = [];
+      let ubereatsActiveLayer = 'page';
+      let ubereatsModalTitle = '';
+      let ubereatsStoreCardCount = 0;
+      let ubereatsItemCardCount = 0;
+      let ubereatsHasCartCTA = false;
+      let ubereatsHasContinueCTA = false;
+      let ubereatsHasAddToCartCTA = false;
+      let ubereatsHasAddressGate = false;
+      let ubereatsHasContinueBrowser = false;
+      let ubereatsHasSearchEntry = false;
 
       if (/doordash\\.com$/i.test(location.hostname)) {
         const pushUnique = (collection, candidate) => {
@@ -1748,6 +1949,108 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         }
       }
 
+      if (/ubereats\\.com$/i.test(location.hostname)) {
+        const pushUnique = (collection, candidate) => {
+          if (!candidate || (!candidate.label && !candidate.url)) return;
+          const key = [candidate.service_role || '', candidate.label || '', candidate.url || '', candidate.id || ''].join('|');
+          if (collection.some((existing) => [existing.service_role || '', existing.label || '', existing.url || '', existing.id || ''].join('|') === key)) {
+            return;
+          }
+          collection.push(candidate);
+        };
+        const isUberNoise = (text) => /sign up|login redirect|main navigation menu|group order|favorite|view more options|save on ubereats|uber one|offers$|delivery fee$|sort$|rating$|price$|benefits eligible|snap$/i.test(text);
+        const uberActionables = Array.from(document.querySelectorAll('a[href],button,[role="button"],[role="option"],input[type="button"],input[type="submit"]'))
+          .filter(visible);
+        const continueBrowserControl = uberActionables.find((el) => /continue in browser/i.test(clean([labelForElement(el), contextForElement(el)].join(' '))));
+        const addressGateControl = uberActionables.find((el) => /enter delivery address/i.test(clean([labelForElement(el), contextForElement(el)].join(' '))));
+        const searchEntryControl = Array.from(document.querySelectorAll('[data-testid="header-mobile-search-entry"]'))
+          .filter(visible)[0] || uberActionables.find((el) => /search uber eats/i.test(clean([labelForElement(el), contextForElement(el)].join(' '))));
+        const addressResults = Array.from(document.querySelectorAll('[data-testid="location-result"], [role="option"][data-testid="location-result"]'))
+          .filter(visible)
+          .slice(0, 5);
+        const addToCartButton = Array.from(document.querySelectorAll('button[data-testid="add-to-cart-button"]'))
+          .filter(visible)[0] || uberActionables.find((el) => /add \\d+ to order|add to order/i.test(labelForElement(el)));
+        const viewCartButton = Array.from(document.querySelectorAll('a[data-testid="view-cart-button"],button[data-testid="view-cart-button"]'))
+          .filter(visible)[0] || uberActionables.find((el) => /view cart|view order/i.test(labelForElement(el)));
+        const nextButton = Array.from(document.querySelectorAll('a[data-testid="go-to-checkout-button"],button[data-testid="go-to-checkout-button"]'))
+          .filter(visible)[0] || uberActionables.find((el) => /^next$/i.test(labelForElement(el)));
+        const modalClose = uberActionables.find((el) => /close/i.test(labelForElement(el)) || /^x$/i.test(labelForElement(el)));
+        const itemModal = addToCartButton ? (sharedAncestor(addToCartButton, modalClose) || closestWithText(addToCartButton, 18, 420)) : null;
+
+        ubereatsActiveLayer = addToCartButton ? 'item_modal' : (nextButton || viewCartButton ? 'cart_page' : ((continueBrowserControl || addressGateControl || addressResults.length || searchEntryControl) ? 'entry_gate' : 'page'));
+        ubereatsModalTitle = itemModal ? clean((itemModal.querySelector('h1,h2,h3,[role="heading"]')?.innerText) || '') : '';
+        ubereatsHasContinueBrowser = Boolean(continueBrowserControl);
+        ubereatsHasAddressGate = Boolean(addressGateControl) || addressResults.length > 0;
+        ubereatsHasSearchEntry = Boolean(searchEntryControl);
+
+        if (continueBrowserControl) {
+          pushUnique(ubereatsCandidates, candidateFromElement(continueBrowserControl, 'ue_continue_browser', closestWithText(continueBrowserControl, 18, 240), 'Continue in browser'));
+        }
+        if (addressGateControl) {
+          pushUnique(ubereatsCandidates, candidateFromElement(addressGateControl, 'ue_address_cta', closestWithText(addressGateControl, 18, 240), 'Enter delivery address'));
+        }
+        addressResults.forEach((option) => {
+          const root = closestWithText(option, 18, 240);
+          const label = firstMeaningfulTextLine(root) || labelForElement(option);
+          pushUnique(ubereatsCandidates, candidateFromElement(option, 'ue_address_result', root, label));
+        });
+        if (searchEntryControl) {
+          pushUnique(ubereatsCandidates, candidateFromElement(searchEntryControl, 'ue_search_entry', closestWithText(searchEntryControl, 18, 220), 'Search Uber Eats'));
+        }
+
+        const storeCards = Array.from(document.querySelectorAll('a[data-testid="store-card"]'))
+          .filter(visible)
+          .slice(0, 12);
+        ubereatsStoreCardCount = storeCards.length;
+        storeCards.forEach((anchor) => {
+          const root = closestWithText(anchor, 18, 260);
+          const headingLabel = Array.from(root.querySelectorAll('h1,h2,h3,h4,[role="heading"]'))
+            .map((node) => clean(node.innerText || ''))
+            .find((line) => line && !/\\d+ results/i.test(line));
+          const label = headingLabel || firstMeaningfulTextLine(root) || labelForElement(anchor);
+          pushUnique(ubereatsCandidates, candidateFromElement(anchor, 'ue_store_card', root, label));
+        });
+
+        if (addToCartButton) {
+          ubereatsHasAddToCartCTA = true;
+          pushUnique(ubereatsCandidates, candidateFromElement(addToCartButton, 'ue_add_to_cart', itemModal || closestWithText(addToCartButton, 18, 320), 'Add to order'));
+          if (modalClose && itemModal) {
+            pushUnique(ubereatsCandidates, candidateFromElement(modalClose, 'ue_modal_close', itemModal, 'Close item'));
+          }
+        } else {
+          const quickAddButtons = Array.from(document.querySelectorAll('button[data-testid="quick-add-button"]'))
+            .filter(visible)
+            .slice(0, 6);
+          quickAddButtons.forEach((button) => {
+            ubereatsHasAddToCartCTA = true;
+            pushUnique(ubereatsCandidates, candidateFromElement(button, 'ue_add_to_cart', closestWithText(button, 18, 220), 'Quick add'));
+          });
+
+          const itemAnchors = Array.from(document.querySelectorAll('a[data-testid^="store-item-"]'))
+            .filter(visible)
+            .filter((anchor) => {
+              const text = clean([labelForElement(anchor), contextForElement(anchor, closestWithText(anchor, 18, 260))].join(' '));
+              return text && !isUberNoise(text);
+            })
+            .slice(0, 18);
+          itemAnchors.forEach((anchor) => {
+            ubereatsItemCardCount += 1;
+            const root = closestWithText(anchor, 18, 260);
+            const label = firstMeaningfulTextLine(root) || labelForElement(anchor);
+            pushUnique(ubereatsCandidates, candidateFromElement(anchor, 'ue_item_card', root, label));
+          });
+        }
+
+        if (viewCartButton) {
+          ubereatsHasCartCTA = true;
+          pushUnique(ubereatsCandidates, candidateFromElement(viewCartButton, 'ue_cart_cta', closestWithText(viewCartButton, 18, 260), 'View order'));
+        }
+        if (nextButton) {
+          ubereatsHasContinueCTA = true;
+          pushUnique(ubereatsCandidates, candidateFromElement(nextButton, 'ue_continue_cta', closestWithText(nextButton, 18, 260), 'Next'));
+        }
+      }
+
       const text = clean(document.body ? document.body.innerText : '');
       return {
         title: document.title || '',
@@ -1769,7 +2072,18 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         doordash_has_add_to_cart_cta: doordashHasAddToCartCTA,
         doordash_has_address_cta: doordashHasAddressCTA,
         doordash_has_payment_sheet: doordashHasPaymentSheet,
-        doordash_has_cart_close_cta: doordashHasCartCloseCTA
+        doordash_has_cart_close_cta: doordashHasCartCloseCTA,
+        ubereats_candidates: ubereatsCandidates.slice(0, 40),
+        ubereats_active_layer: ubereatsActiveLayer,
+        ubereats_modal_title: ubereatsModalTitle,
+        ubereats_store_card_count: ubereatsStoreCardCount,
+        ubereats_item_card_count: ubereatsItemCardCount,
+        ubereats_has_cart_cta: ubereatsHasCartCTA,
+        ubereats_has_continue_cta: ubereatsHasContinueCTA,
+        ubereats_has_add_to_cart_cta: ubereatsHasAddToCartCTA,
+        ubereats_has_address_gate: ubereatsHasAddressGate,
+        ubereats_has_continue_browser: ubereatsHasContinueBrowser,
+        ubereats_has_search_entry: ubereatsHasSearchEntry
       };
     })();
     """
@@ -2190,7 +2504,7 @@ struct MemlaBrowserView: View {
                 }
                 Spacer(minLength: 0)
             }
-            if state.pageKind.hasPrefix("dd_"), !autoDriveStatus.isEmpty {
+            if (state.pageKind.hasPrefix("dd_") || state.pageKind.hasPrefix("ue_")), !autoDriveStatus.isEmpty {
                 Label(autoDriveStatus, systemImage: "bolt.fill")
                     .font(.caption2)
                     .foregroundStyle(.green)
@@ -2212,7 +2526,7 @@ struct MemlaBrowserView: View {
                     }
                 }
             }
-            if let verification = state.capsuleVerification, (state.pageKind == "cart" || state.pageKind == "checkout") {
+            if let verification = state.capsuleVerification, (state.pageKind == "cart" || state.pageKind == "checkout" || state.pageKind == "ue_cart_page" || state.pageKind == "ue_checkout") {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Mirror Verification")
                         .font(.caption.weight(.semibold))
@@ -2271,7 +2585,7 @@ struct MemlaBrowserView: View {
                 }
 
                 if let verification = state.capsuleVerification {
-                    mirrorSectionCard(title: state.pageKind == "checkout" ? "Final Review" : "Checkpoint Verification", systemImage: state.pageKind == "checkout" ? "hand.raised.fill" : "checklist") {
+                    mirrorSectionCard(title: (state.pageKind == "checkout" || state.pageKind == "ue_checkout") ? "Final Review" : "Checkpoint Verification", systemImage: (state.pageKind == "checkout" || state.pageKind == "ue_checkout") ? "hand.raised.fill" : "checklist") {
                         capsuleVerificationControls(for: state)
                         if !verification.missing.isEmpty {
                             Text("Still missing: \(verification.missing.map { readableRequirement($0) }.joined(separator: ", "))")
@@ -2351,10 +2665,20 @@ struct MemlaBrowserView: View {
 
     private func mirrorCandidates(for state: WebsiteC2AState) -> [WebsiteC2ACandidate] {
         let deprioritizedRoles = Set(["review_link", "accessibility_link", "utility_link", "auth_link", "nav_link", "dd_menu_nav"])
-        let preferredRoles = Set(["store_link", "menu_item", "item_action_button", "cart_link", "cart_button", "control_button", "checkout_button", "dd_store_card", "dd_item_card", "dd_add_to_cart", "dd_continue_cta", "dd_cart_cta", "dd_tip_option", "dd_address_cta", "dd_modal_close"])
+        let preferredRoles = Set(["store_link", "menu_item", "item_action_button", "cart_link", "cart_button", "control_button", "checkout_button", "dd_store_card", "dd_item_card", "dd_add_to_cart", "dd_continue_cta", "dd_cart_cta", "dd_tip_option", "dd_address_cta", "dd_modal_close", "ue_continue_browser", "ue_address_cta", "ue_address_result", "ue_search_entry", "ue_store_card", "ue_item_card", "ue_add_to_cart", "ue_cart_cta", "ue_continue_cta", "ue_modal_close"])
         let visibleCandidates = state.candidates.filter { !deprioritizedRoles.contains($0.role) && !$0.blocked }
         let stateScopedRoles: Set<String>
         switch state.pageKind {
+        case "ue_entry_gate":
+            stateScopedRoles = ["ue_continue_browser", "ue_address_cta", "ue_address_result", "ue_search_entry"]
+        case "ue_search_results":
+            stateScopedRoles = ["ue_store_card"]
+        case "ue_storefront":
+            stateScopedRoles = ["ue_item_card", "ue_add_to_cart", "ue_cart_cta"]
+        case "ue_item_modal":
+            stateScopedRoles = ["ue_add_to_cart", "ue_item_card", "ue_modal_close"]
+        case "ue_cart_page":
+            stateScopedRoles = ["ue_continue_cta", "ue_cart_cta", "ue_modal_close"]
         case "dd_search_results":
             stateScopedRoles = ["dd_store_card", "dd_cart_cta"]
         case "dd_storefront":
@@ -2394,6 +2718,59 @@ struct MemlaBrowserView: View {
 
     private func mirrorRolePriority(pageKind: String, role: String) -> Int {
         switch pageKind {
+        case "ue_entry_gate":
+            switch role {
+            case "ue_continue_browser":
+                return 100
+            case "ue_address_result":
+                return 95
+            case "ue_address_cta":
+                return 85
+            case "ue_search_entry":
+                return 70
+            default:
+                return 10
+            }
+        case "ue_search_results":
+            switch role {
+            case "ue_store_card":
+                return 100
+            default:
+                return 10
+            }
+        case "ue_storefront":
+            switch role {
+            case "ue_item_card":
+                return 100
+            case "ue_add_to_cart":
+                return 85
+            case "ue_cart_cta":
+                return 75
+            default:
+                return 10
+            }
+        case "ue_item_modal":
+            switch role {
+            case "ue_add_to_cart":
+                return 100
+            case "ue_item_card":
+                return 70
+            case "ue_modal_close":
+                return 10
+            default:
+                return 12
+            }
+        case "ue_cart_page":
+            switch role {
+            case "ue_continue_cta":
+                return 100
+            case "ue_cart_cta":
+                return 70
+            case "ue_modal_close":
+                return 10
+            default:
+                return 12
+            }
         case "dd_search_results":
             switch role {
             case "dd_store_card":
@@ -2480,6 +2857,18 @@ struct MemlaBrowserView: View {
 
     private func mirrorTitle(for state: WebsiteC2AState) -> String {
         switch state.pageKind {
+        case "ue_entry_gate":
+            return "Uber Eats entry gate"
+        case "ue_search_results":
+            return "Uber Eats search results distilled"
+        case "ue_storefront":
+            return "Uber Eats storefront distilled"
+        case "ue_item_modal":
+            return "Uber Eats customizer is active"
+        case "ue_cart_page":
+            return "Uber Eats cart is ready"
+        case "ue_checkout":
+            return "Uber Eats checkout detected"
         case "dd_search_results":
             return "DoorDash search results distilled"
         case "dd_storefront":
@@ -2518,6 +2907,18 @@ struct MemlaBrowserView: View {
 
     private func mirrorIcon(for state: WebsiteC2AState) -> String {
         switch state.pageKind {
+        case "ue_entry_gate":
+            return "rectangle.and.text.magnifyingglass"
+        case "ue_search_results":
+            return "building.2"
+        case "ue_storefront":
+            return "storefront"
+        case "ue_item_modal":
+            return "square.and.pencil"
+        case "ue_cart_page":
+            return "cart"
+        case "ue_checkout":
+            return "hand.raised.fill"
         case "dd_search_results":
             return "building.2"
         case "dd_storefront":
@@ -2543,6 +2944,10 @@ struct MemlaBrowserView: View {
 
     private func mirrorColor(for state: WebsiteC2AState) -> Color {
         switch state.pageKind {
+        case "ue_entry_gate", "ue_search_results", "ue_storefront", "ue_item_modal", "ue_cart_page":
+            return .green
+        case "ue_checkout":
+            return .red
         case "dd_search_results", "dd_storefront", "dd_item_modal", "dd_cart_drawer", "dd_cart_page":
             return .green
         case "dd_checkout", "dd_payment_sheet":
@@ -2602,18 +3007,30 @@ struct MemlaBrowserView: View {
     }
 
     private func mirrorItemCandidates(for state: WebsiteC2AState) -> [WebsiteC2ACandidate] {
-        let itemRoles = Set(["store_link", "menu_item", "dd_store_card", "dd_item_card"])
+        let itemRoles = Set(["store_link", "menu_item", "dd_store_card", "dd_item_card", "ue_store_card", "ue_item_card"])
         let filtered = mirrorCandidates(for: state).filter { itemRoles.contains($0.role) }
         return filtered.isEmpty ? mirrorCandidates(for: state).filter { !$0.url.isEmpty } : filtered
     }
 
     private func mirrorControlCandidates(for state: WebsiteC2AState) -> [WebsiteC2ACandidate] {
-        let controlRoles = Set(["item_action_button", "cart_button", "cart_link", "control_button", "checkout_button", "dd_add_to_cart", "dd_continue_cta", "dd_cart_cta", "dd_tip_option", "dd_address_cta", "dd_modal_close"])
+        let controlRoles = Set(["item_action_button", "cart_button", "cart_link", "control_button", "checkout_button", "dd_add_to_cart", "dd_continue_cta", "dd_cart_cta", "dd_tip_option", "dd_address_cta", "dd_modal_close", "ue_continue_browser", "ue_address_cta", "ue_address_result", "ue_search_entry", "ue_add_to_cart", "ue_cart_cta", "ue_continue_cta", "ue_modal_close"])
         return mirrorCandidates(for: state).filter { controlRoles.contains($0.role) }
     }
 
     private func mirrorItemSectionTitle(for state: WebsiteC2AState) -> String {
         switch state.pageKind {
+        case "ue_entry_gate":
+            return "Setup Gates"
+        case "ue_search_results":
+            return "Store Cards"
+        case "ue_storefront":
+            return "Menu Items"
+        case "ue_item_modal":
+            return "Customizer Items"
+        case "ue_cart_page":
+            return "Cart Signals"
+        case "ue_checkout":
+            return "Checkout Signals"
         case "dd_search_results":
             return "Store Cards"
         case "dd_storefront":
@@ -2714,9 +3131,10 @@ struct MemlaBrowserView: View {
     @ViewBuilder
     private func capsuleVerificationControls(for state: WebsiteC2AState) -> some View {
         if let verification = state.capsuleVerification {
+            let isFinalReview = state.pageKind == "checkout" || state.pageKind == "ue_checkout"
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
-                    Label("Capsule Match", systemImage: state.pageKind == "checkout" ? "hand.raised.fill" : "checklist")
+                    Label("Capsule Match", systemImage: isFinalReview ? "hand.raised.fill" : "checklist")
                         .font(.caption.weight(.semibold))
                     Spacer()
                     Text(readableRequirement(state.pageKind))
@@ -2750,12 +3168,12 @@ struct MemlaBrowserView: View {
                 if !verification.warnings.isEmpty {
                     Text("Policy: \(verification.warnings.map { readableRequirement($0) }.joined(separator: ", "))")
                         .font(.caption2)
-                        .foregroundStyle(state.pageKind == "checkout" ? .red : .secondary)
+                        .foregroundStyle(isFinalReview ? .red : .secondary)
                         .lineLimit(2)
                 }
             }
             .padding(8)
-            .background((state.pageKind == "checkout" ? Color.red : Color.blue).opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .background((isFinalReview ? Color.red : Color.blue).opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
     }
 
@@ -2848,9 +3266,17 @@ struct MemlaBrowserView: View {
             return "Open Store"
         case "dd_item_card":
             return "Open Item"
+        case "ue_store_card":
+            return "Open Store"
+        case "ue_item_card":
+            return "Open Item"
         case "dd_continue_cta":
             return "Continue"
+        case "ue_continue_cta":
+            return "Next"
         case "cart_link", "dd_cart_cta":
+            return "Open Cart"
+        case "ue_cart_cta":
             return "Open Cart"
         default:
             return "Open"
@@ -2865,6 +3291,22 @@ struct MemlaBrowserView: View {
             return "Continue"
         case "dd_add_to_cart":
             return "Add To Cart"
+        case "ue_continue_browser":
+            return "Continue In Browser"
+        case "ue_address_cta":
+            return "Open Address"
+        case "ue_address_result":
+            return "Select Address"
+        case "ue_search_entry":
+            return "Open Search"
+        case "ue_cart_cta":
+            return "Open Cart"
+        case "ue_continue_cta":
+            return "Next"
+        case "ue_add_to_cart":
+            return "Add To Order"
+        case "ue_modal_close":
+            return "Dismiss"
         case "dd_tip_option":
             return "Set Tip"
         case "dd_modal_close":
@@ -3020,6 +3462,54 @@ struct MemlaBrowserView: View {
     }
 
     private func guidedStep(for state: WebsiteC2AState) -> WebsiteGuidedStep {
+        if state.pageKind == "ue_checkout" {
+            return WebsiteGuidedStep(
+                title: "Review checkout details",
+                detail: "Uber Eats checkout is visible. Verify address, payment, fees, and total here, then leave payment and final submission to the user.",
+                icon: "checklist",
+                tone: "warning"
+            )
+        }
+        if state.pageKind == "ue_cart_page" {
+            return WebsiteGuidedStep(
+                title: "Move from cart to checkout",
+                detail: "Uber Eats cart state is active. Focus on View order and Next, then stop once checkout is reached.",
+                icon: "cart.badge.questionmark",
+                tone: "warning"
+            )
+        }
+        if state.pageKind == "ue_item_modal" {
+            return WebsiteGuidedStep(
+                title: "Use the customizer layer",
+                detail: "The active Uber Eats item customizer is open. Focus on size, quantity, modifiers, and Add to order, not the background storefront.",
+                icon: "slider.horizontal.3",
+                tone: "safe"
+            )
+        }
+        if state.pageKind == "ue_storefront" {
+            return WebsiteGuidedStep(
+                title: "Pick a menu item",
+                detail: "Uber Eats storefront detected. Prefer actual food items like Build Your Own Pizza over utility links or store info.",
+                icon: "fork.knife",
+                tone: "safe"
+            )
+        }
+        if state.pageKind == "ue_search_results" {
+            return WebsiteGuidedStep(
+                title: "Pick the right store card",
+                detail: "Uber Eats search results are visible. Prefer merchant cards that match the requested restaurant and ignore generic filters or favorites.",
+                icon: "building.2",
+                tone: "safe"
+            )
+        }
+        if state.pageKind == "ue_entry_gate" {
+            return WebsiteGuidedStep(
+                title: "Clear the entry gate",
+                detail: "Uber Eats is still at browser/address setup. Continue in browser or complete the delivery address step before Memla can drive the food flow.",
+                icon: "rectangle.and.text.magnifyingglass",
+                tone: "warning"
+            )
+        }
         if state.pageKind == "dd_payment_sheet" {
             return WebsiteGuidedStep(
                 title: "Stop at payment sheet",
@@ -3237,7 +3727,7 @@ struct MemlaBrowserView: View {
     }
 
     private func handleAutoDriveUpdate(for state: WebsiteC2AState) {
-        guard autoDriveEnabled, state.pageKind.hasPrefix("dd_") else {
+        guard autoDriveEnabled, (state.pageKind.hasPrefix("dd_") || state.pageKind.hasPrefix("ue_")) else {
             return
         }
         guard !browser.isLoading, !browser.isInspecting, !browser.isRunningButtonAction else {
@@ -3247,7 +3737,7 @@ struct MemlaBrowserView: View {
         let signature = doorDashAutoDriveSignature(for: state)
         let candidates = mirrorCandidates(for: state)
 
-        if state.pageKind == "dd_payment_sheet" || state.pageKind == "dd_checkout" {
+        if state.pageKind == "dd_payment_sheet" || state.pageKind == "dd_checkout" || state.pageKind == "ue_checkout" {
             pendingDoorDashRole = ""
             pendingDoorDashLabel = ""
             addToCartRetryCount = 0
@@ -3262,9 +3752,9 @@ struct MemlaBrowserView: View {
             return
         }
 
-        if pendingDoorDashRole == "dd_add_to_cart" {
-            if state.pageKind == "dd_item_modal",
-               let retryCandidate = candidates.first(where: { $0.role == "dd_add_to_cart" && !$0.blocked }),
+        if pendingDoorDashRole == "dd_add_to_cart" || pendingDoorDashRole == "ue_add_to_cart" {
+            if (state.pageKind == "dd_item_modal" || state.pageKind == "ue_item_modal"),
+               let retryCandidate = candidates.first(where: { $0.role == pendingDoorDashRole && !$0.blocked }),
                addToCartRetryCount < 1 {
                 addToCartRetryCount += 1
                 autoDriveStatus = "Retrying Add to cart..."
@@ -3275,7 +3765,8 @@ struct MemlaBrowserView: View {
             }
             if state.pageKind == "dd_cart_drawer"
                 || state.pageKind == "dd_cart_page"
-                || candidates.contains(where: { $0.role == "dd_continue_cta" || $0.role == "dd_cart_cta" }) {
+                || state.pageKind == "ue_cart_page"
+                || candidates.contains(where: { ["dd_continue_cta", "dd_cart_cta", "ue_continue_cta", "ue_cart_cta"].contains($0.role) }) {
                 preferCartProgress = true
             }
             pendingDoorDashRole = ""
@@ -3291,13 +3782,15 @@ struct MemlaBrowserView: View {
             lastAutoDriveSignature = signature
             if state.pageKind == "dd_storefront" {
                 autoDriveStatus = "Waiting for DoorDash menu items..."
+            } else if state.pageKind == "ue_storefront" {
+                autoDriveStatus = "Waiting for Uber Eats menu items..."
             }
             return
         }
 
         lastAutoDriveSignature = signature
         autoDriveStatus = action.status
-        if action.pendingRole == "dd_add_to_cart" {
+        if action.pendingRole == "dd_add_to_cart" || action.pendingRole == "ue_add_to_cart" {
             pendingDoorDashRole = action.pendingRole
             pendingDoorDashLabel = action.candidate.label
             addToCartRetryCount = 0
@@ -3318,6 +3811,84 @@ struct MemlaBrowserView: View {
 
     private func doorDashAutoAction(for state: WebsiteC2AState, candidates: [WebsiteC2ACandidate]) -> MirrorAutoDriveAction? {
         switch state.pageKind {
+        case "ue_entry_gate":
+            if let continueBrowser = candidates.first(where: { $0.role == "ue_continue_browser" && !$0.blocked }) {
+                return MirrorAutoDriveAction(
+                    candidate: continueBrowser,
+                    allowCaution: true,
+                    status: "Continuing in browser...",
+                    pendingRole: ""
+                )
+            }
+            if let address = candidates.first(where: { $0.role == "ue_address_result" && !$0.blocked }) {
+                return MirrorAutoDriveAction(
+                    candidate: address,
+                    allowCaution: true,
+                    status: "Selecting delivery address...",
+                    pendingRole: ""
+                )
+            }
+        case "ue_search_results":
+            if let store = candidates.first(where: { $0.role == "ue_store_card" && !$0.blocked }) {
+                return MirrorAutoDriveAction(
+                    candidate: store,
+                    allowCaution: false,
+                    status: "Opening \(store.label)...",
+                    pendingRole: ""
+                )
+            }
+        case "ue_storefront":
+            if preferCartProgress,
+               let cart = candidates.first(where: { $0.role == "ue_cart_cta" && !$0.blocked }) {
+                return MirrorAutoDriveAction(
+                    candidate: cart,
+                    allowCaution: cart.tapSafety == "caution",
+                    status: "Opening cart...",
+                    pendingRole: ""
+                )
+            }
+            if let item = candidates.first(where: { $0.role == "ue_item_card" && !$0.blocked }) {
+                return MirrorAutoDriveAction(
+                    candidate: item,
+                    allowCaution: item.tapSafety == "caution",
+                    status: "Opening \(item.label)...",
+                    pendingRole: ""
+                )
+            }
+            if let add = candidates.first(where: { $0.role == "ue_add_to_cart" && !$0.blocked }) {
+                return MirrorAutoDriveAction(
+                    candidate: add,
+                    allowCaution: true,
+                    status: "Adding item to order...",
+                    pendingRole: "ue_add_to_cart"
+                )
+            }
+        case "ue_item_modal":
+            if let add = candidates.first(where: { $0.role == "ue_add_to_cart" && !$0.blocked }) {
+                return MirrorAutoDriveAction(
+                    candidate: add,
+                    allowCaution: true,
+                    status: "Adding item to order...",
+                    pendingRole: "ue_add_to_cart"
+                )
+            }
+        case "ue_cart_page":
+            if let next = candidates.first(where: { $0.role == "ue_continue_cta" && !$0.blocked }) {
+                return MirrorAutoDriveAction(
+                    candidate: next,
+                    allowCaution: true,
+                    status: "Continuing to checkout...",
+                    pendingRole: ""
+                )
+            }
+            if let cart = candidates.first(where: { $0.role == "ue_cart_cta" && !$0.blocked }) {
+                return MirrorAutoDriveAction(
+                    candidate: cart,
+                    allowCaution: cart.tapSafety == "caution",
+                    status: "Opening cart...",
+                    pendingRole: ""
+                )
+            }
         case "dd_search_results":
             if let store = candidates.first(where: { $0.role == "dd_store_card" && !$0.blocked }) {
                 return MirrorAutoDriveAction(
