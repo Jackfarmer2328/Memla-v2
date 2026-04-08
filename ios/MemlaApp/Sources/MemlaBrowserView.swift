@@ -352,14 +352,20 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         let links = stringArray(payload["links"])
         let combined = ([title, url, textSnippet] + headings + inputs + buttons + links).joined(separator: " ").lowercased()
         let normalizedCombined = normalizedText(combined)
-        let pageKind = classifyPageKind(combined: combined, url: url, inputs: inputs)
-        let candidates = candidateArray(payload["candidates"], capsule: capsule, pageKind: pageKind)
+        let isDoorDash = isDoorDashDomain(url: url)
+        let pageKind = isDoorDash
+            ? classifyDoorDashPage(payload: payload, combined: combined, url: url, inputs: inputs)
+            : classifyPageKind(combined: combined, url: url, inputs: inputs)
+        let candidateSource = isDoorDash ? (payload["doordash_candidates"] ?? payload["candidates"]) : payload["candidates"]
+        let candidates = candidateArray(candidateSource, capsule: capsule, pageKind: pageKind)
         let safeActions = candidateActions(pageKind: pageKind, inputs: inputs, buttons: buttons, links: links, candidates: candidates)
         let residuals = residualsForPage(pageKind: pageKind, combined: normalizedCombined, textSnippet: textSnippet, capsule: capsule)
         let authState = classifyAuthState(pageKind: pageKind, combined: combined)
         let authDomain = domainFrom(url: url)
         let capsuleVerification = capsuleVerificationForPage(pageKind: pageKind, combined: normalizedCombined, capsule: capsule)
-        let summary = "Compiled \(pageKind.replacingOccurrences(of: "_", with: " ")) with \(inputs.count) inputs, \(buttons.count) buttons, \(links.count) links, and \(candidates.count) candidates."
+        let summary = isDoorDash
+            ? doorDashSummary(payload: payload, pageKind: pageKind, candidates: candidates)
+            : "Compiled \(pageKind.replacingOccurrences(of: "_", with: " ")) with \(inputs.count) inputs, \(buttons.count) buttons, \(links.count) links, and \(candidates.count) candidates."
         return WebsiteC2AState(
             pageKind: pageKind,
             summary: summary,
@@ -375,6 +381,71 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             textSnippet: textSnippet,
             capsuleVerification: capsuleVerification
         )
+    }
+
+    private static func isDoorDashDomain(url: String) -> Bool {
+        domainFrom(url: url).contains("doordash.com")
+    }
+
+    private static func classifyDoorDashPage(payload: [String: Any], combined: String, url: String, inputs: [String]) -> String {
+        let layerKind = stringValue(payload["doordash_active_layer"])
+        let modalTitle = normalizedText(stringValue(payload["doordash_modal_title"]))
+        let hasStoreCards = (payload["doordash_store_card_count"] as? Int ?? 0) > 0
+        let hasCartCTA = payload["doordash_has_cart_cta"] as? Bool ?? false
+        let hasContinueCTA = payload["doordash_has_continue_cta"] as? Bool ?? false
+        let hasAddToCartCTA = payload["doordash_has_add_to_cart_cta"] as? Bool ?? false
+        let tipCount = payload["doordash_tip_option_count"] as? Int ?? 0
+        let hasPaymentSheet = payload["doordash_has_payment_sheet"] as? Bool ?? false
+        let hasAddressCTA = payload["doordash_has_address_cta"] as? Bool ?? false
+
+        if hasPaymentSheet || layerKind == "payment_sheet" || combined.contains("select payment method") {
+            return "dd_payment_sheet"
+        }
+        if url.contains("/consumer/checkout") {
+            return "dd_checkout"
+        }
+        if layerKind == "item_modal" || hasAddToCartCTA || modalTitle.contains("build your own pizza") || combined.contains("add to cart") {
+            return "dd_item_modal"
+        }
+        if layerKind == "cart_drawer" || (hasCartCTA && hasContinueCTA) {
+            return "dd_cart_drawer"
+        }
+        if hasContinueCTA || hasAddressCTA || tipCount > 0 {
+            return "dd_cart_page"
+        }
+        if hasStoreCards || url.contains("/search/store/") {
+            return "dd_search_results"
+        }
+        if url.contains("/store/") {
+            return "dd_storefront"
+        }
+        return classifyPageKind(combined: combined, url: url, inputs: inputs)
+    }
+
+    private static func doorDashSummary(payload: [String: Any], pageKind: String, candidates: [WebsiteC2ACandidate]) -> String {
+        let storeCardCount = payload["doordash_store_card_count"] as? Int ?? 0
+        let itemCardCount = payload["doordash_item_card_count"] as? Int ?? 0
+        let tipCount = payload["doordash_tip_option_count"] as? Int ?? 0
+        let layerKind = stringValue(payload["doordash_active_layer"])
+        let modalTitle = stringValue(payload["doordash_modal_title"])
+        switch pageKind {
+        case "dd_search_results":
+            return "DoorDash search results distilled into \(storeCardCount) store cards."
+        case "dd_storefront":
+            return "DoorDash storefront with \(itemCardCount) relevant item/menu cards."
+        case "dd_item_modal":
+            return "DoorDash item modal detected\(modalTitle.isEmpty ? "" : ": \(modalTitle)")."
+        case "dd_cart_drawer":
+            return "DoorDash cart drawer is active with a continue path."
+        case "dd_cart_page":
+            return "DoorDash cart page detected with \(tipCount) tip options."
+        case "dd_checkout":
+            return "DoorDash checkout detected. Mirror should stop before payment."
+        case "dd_payment_sheet":
+            return "DoorDash payment sheet is active. Human confirmation boundary reached."
+        default:
+            return "DoorDash \(pageKind.replacingOccurrences(of: "_", with: " ")) layer \(layerKind) with \(candidates.count) candidates."
+        }
     }
 
     private static func classifyPageKind(combined: String, url: String, inputs: [String]) -> String {
@@ -412,6 +483,24 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
 
     private static func candidateActions(pageKind: String, inputs: [String], buttons: [String], links: [String], candidates: [WebsiteC2ACandidate]) -> [String] {
         var actions: [String] = []
+        if pageKind == "dd_search_results" {
+            actions.append("open_ranked_candidate")
+        }
+        if pageKind == "dd_storefront" {
+            actions.append("open_ranked_candidate")
+            actions.append("review_item_and_modifiers")
+        }
+        if pageKind == "dd_item_modal" {
+            actions.append("review_item_and_modifiers")
+            actions.append("review_then_tap_candidate")
+        }
+        if pageKind == "dd_cart_drawer" || pageKind == "dd_cart_page" {
+            actions.append("verify_cart_against_capsule")
+            actions.append("review_then_enter_checkout")
+        }
+        if pageKind == "dd_checkout" || pageKind == "dd_payment_sheet" {
+            actions.append("stop_before_purchase")
+        }
         if pageKind == "search_form" || inputs.contains(where: { $0.lowercased().contains("search") }) {
             actions.append("fill_search_query")
         }
@@ -448,6 +537,17 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
 
     private static func residualsForPage(pageKind: String, combined: String, textSnippet: String, capsule: ActionCapsule?) -> [String] {
         var residuals: [String] = []
+        if pageKind == "dd_payment_sheet" {
+            residuals.append("payment_sheet_active")
+            residuals.append("final_confirmation_required")
+            residuals.append("irreversible_action_nearby")
+        }
+        if pageKind == "dd_item_modal" {
+            residuals.append("active_customizer_layer")
+        }
+        if pageKind == "dd_cart_drawer" {
+            residuals.append("cart_drawer_active")
+        }
         if pageKind == "login" {
             residuals.append("login_required")
         }
@@ -481,7 +581,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         guard let capsule = capsule else {
             return nil
         }
-        let relevantPages = ["menu_or_item", "cart", "checkout"]
+        let relevantPages = ["menu_or_item", "cart", "checkout", "dd_storefront", "dd_item_modal", "dd_cart_drawer", "dd_cart_page", "dd_checkout", "dd_payment_sheet"]
         guard relevantPages.contains(pageKind) else {
             return nil
         }
@@ -528,11 +628,21 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         if pageKind == "menu_or_item" {
             warnings.append("review_item_options_before_cart")
         }
+        if pageKind == "dd_storefront" || pageKind == "dd_item_modal" {
+            warnings.append("review_item_options_before_cart")
+        }
         if pageKind == "cart" {
             warnings.append("verify_cart_before_checkout")
             warnings.append("checkout_is_reviewed_navigation_only")
         }
+        if pageKind == "dd_cart_drawer" || pageKind == "dd_cart_page" {
+            warnings.append("verify_cart_before_checkout")
+            warnings.append("checkout_is_reviewed_navigation_only")
+        }
         if pageKind == "checkout" {
+            warnings.append("human_must_complete_final_payment_or_place_order")
+        }
+        if pageKind == "dd_checkout" || pageKind == "dd_payment_sheet" {
             warnings.append("human_must_complete_final_payment_or_place_order")
         }
 
@@ -612,14 +722,15 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             let kind = stringValue(raw["kind"])
             let context = stringValue(raw["context"])
             let domIndex = Int(stringValue(raw["id"])) ?? index
+            let serviceRole = stringValue(raw["service_role"])
             guard !label.isEmpty || !url.isEmpty else {
                 return nil
             }
             let candidateText = [label, url, context].joined(separator: " ")
             let ranking = rankCandidate(candidateText, targets: targets)
-            let role = candidateRole(pageKind: pageKind, kind: kind, url: url, label: label, context: context)
+            let role = serviceRole.isEmpty ? candidateRole(pageKind: pageKind, kind: kind, url: url, label: label, context: context) : serviceRole
             let blockedText = kind == "button" ? label : candidateText
-            let blocked = isIrreversibleCandidate(blockedText)
+            let blocked = isIrreversibleCandidate(blockedText) || isBlockedServiceRole(role)
             let tapPolicy = buttonTapPolicy(kind: kind, url: url, label: label, context: context, blocked: blocked)
             let adjustedScore = ranking.score + roleScoreAdjustment(role: role)
             let resolvedLabel = displayLabel(label: label, url: url, context: context, role: role)
@@ -646,7 +757,16 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
                 reason: reason
             )
         }
-        return Array(candidates.sorted { left, right in
+        var seenKeys = Set<String>()
+        let deduped = candidates.filter { candidate in
+            let key = [candidate.role, normalizedText(candidate.label), candidate.url].joined(separator: "|")
+            if seenKeys.contains(key) {
+                return false
+            }
+            seenKeys.insert(key)
+            return true
+        }
+        return Array(deduped.sorted { left, right in
             if left.blocked != right.blocked {
                 return !left.blocked
             }
@@ -655,6 +775,10 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             }
             return left.score > right.score
         }.prefix(12))
+    }
+
+    private static func isBlockedServiceRole(_ role: String) -> Bool {
+        ["dd_payment_method", "dd_payment_sheet"].contains(role)
     }
 
     private static func displayLabel(label: String, url: String, context: String, role: String) -> String {
@@ -739,10 +863,26 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         switch role {
         case "store_link":
             return 2.2
+        case "dd_store_card":
+            return 4.0
         case "menu_item":
             return 1.8
+        case "dd_item_card":
+            return 3.0
         case "item_action_button":
             return 1.2
+        case "dd_add_to_cart":
+            return 3.6
+        case "dd_continue_cta":
+            return 2.8
+        case "dd_cart_cta":
+            return 2.4
+        case "dd_tip_option":
+            return 1.6
+        case "dd_address_cta":
+            return 1.0
+        case "dd_modal_close":
+            return 0.2
         case "cart_link", "cart_button":
             return 1.0
         case "control_button":
@@ -751,12 +891,16 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             return -6.0
         case "nav_link":
             return -3.5
+        case "dd_menu_nav":
+            return -5.0
         case "accessibility_link":
             return -8.0
         case "utility_link", "auth_link":
             return -4.0
         case "checkout_link", "checkout_button":
             return -1.0
+        case "dd_payment_method":
+            return -10.0
         default:
             return 0.0
         }
@@ -766,14 +910,32 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         switch role {
         case "store_link":
             return "Visible store/result candidate"
+        case "dd_store_card":
+            return "DoorDash merchant card"
         case "menu_item":
             return "Visible menu or item candidate"
+        case "dd_item_card":
+            return "DoorDash menu item card"
         case "item_action_button":
             return "Visible item funnel control"
+        case "dd_add_to_cart":
+            return "DoorDash add-to-cart control"
+        case "dd_continue_cta":
+            return "DoorDash continue-to-checkout control"
+        case "dd_cart_cta":
+            return "DoorDash cart CTA"
+        case "dd_tip_option":
+            return "DoorDash tip selector"
+        case "dd_address_cta":
+            return "DoorDash address/edit control"
+        case "dd_modal_close":
+            return "Dismiss the active sheet if needed"
         case "cart_link", "cart_button":
             return "Visible cart navigation control"
         case "nav_link":
             return "Category/navigation link inside the page"
+        case "dd_menu_nav":
+            return "DoorDash category navigation"
         case "review_link":
             return "Review content is usually not task-relevant"
         case "accessibility_link":
@@ -943,6 +1105,11 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             "buy now",
             "payment",
             "pay now",
+            "credit debit card",
+            "paypal",
+            "venmo",
+            "cash app pay",
+            "klarna",
             "confirm order",
             "book ride",
             "reserve",
@@ -981,6 +1148,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             "checkout",
             "continue",
             "next",
+            "tip",
             "sign in",
             "log in",
             "accept",
@@ -1183,38 +1351,185 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         const rect = el.getBoundingClientRect();
         return rect.width > 1 && rect.height > 1;
       };
-      const collectText = (selector, limit, mapper) => Array.from(document.querySelectorAll(selector))
+      const absoluteHref = (el) => {
+        const rawHref = el?.getAttribute?.('href') || '';
+        try {
+          return rawHref ? new URL(rawHref, location.href).href : '';
+        } catch (_) {
+          return rawHref;
+        }
+      };
+      const interactiveElements = Array.from(document.querySelectorAll('a[href],button,[role="button"],input[type="button"],input[type="submit"]'))
+        .filter(visible);
+      interactiveElements.forEach((el, index) => {
+        try {
+          el.dataset.memlaIndex = String(index);
+        } catch (_) {}
+      });
+      const elementIndex = (el) => Number(el?.dataset?.memlaIndex ?? interactiveElements.indexOf(el));
+      const labelForElement = (el) => clean(el?.innerText || el?.value || el?.getAttribute?.('aria-label') || el?.getAttribute?.('title') || absoluteHref(el));
+      const contextForElement = (el, rootOverride) => clean((rootOverride || el.closest('article,li,section,div,[role="dialog"]'))?.innerText || '').slice(0, 420);
+      const candidateFromElement = (el, role, rootOverride, overrideLabel) => ({
+        id: String(elementIndex(el)),
+        kind: el.matches('a[href]') ? 'link' : 'button',
+        label: clean(overrideLabel || labelForElement(el)),
+        url: absoluteHref(el),
+        context: contextForElement(el, rootOverride),
+        service_role: role
+      });
+      const collectText = (selector, limit, mapper, root = document) => Array.from(root.querySelectorAll(selector))
         .filter(visible)
         .map(mapper)
         .map(clean)
         .filter(Boolean)
         .slice(0, limit);
+
       const headings = collectText('h1,h2,h3,[role="heading"]', 10, (el) => el.innerText || el.textContent);
       const inputs = collectText('input,textarea,select', 18, (el) => el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.name || el.id || el.type || el.tagName);
       const buttons = collectText('button,[role="button"],input[type="button"],input[type="submit"],a[role="button"]', 24, (el) => el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title'));
       const links = collectText('a[href]', 24, (el) => el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || el.href);
-      const candidates = Array.from(document.querySelectorAll('a[href],button,[role="button"],input[type="button"],input[type="submit"]'))
-        .filter(visible)
-        .map((el, index) => {
-          const rawHref = el.getAttribute('href') || '';
-          let href = '';
-          try {
-            href = rawHref ? new URL(rawHref, location.href).href : '';
-          } catch (_) {
-            href = rawHref;
-          }
-          const label = clean(el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || rawHref);
-          const context = clean(el.closest('article,li,section,div')?.innerText || '').slice(0, 280);
+      const candidates = interactiveElements
+        .map((el) => {
           return {
-            id: String(index),
+            id: String(elementIndex(el)),
             kind: el.matches('a[href]') ? 'link' : 'button',
-            label,
-            url: href,
-            context
+            label: labelForElement(el),
+            url: absoluteHref(el),
+            context: contextForElement(el)
           };
         })
         .filter((candidate) => candidate.label || candidate.url)
         .slice(0, 40);
+
+      let doordashCandidates = [];
+      let doordashActiveLayer = 'page';
+      let doordashModalTitle = '';
+      let doordashStoreCardCount = 0;
+      let doordashItemCardCount = 0;
+      let doordashTipOptionCount = 0;
+      let doordashHasCartCTA = false;
+      let doordashHasContinueCTA = false;
+      let doordashHasAddToCartCTA = false;
+      let doordashHasAddressCTA = false;
+      let doordashHasPaymentSheet = false;
+
+      if (/doordash\\.com$/i.test(location.hostname)) {
+        const pushUnique = (collection, candidate) => {
+          if (!candidate || (!candidate.label && !candidate.url)) return;
+          const key = [candidate.service_role || '', candidate.label || '', candidate.url || '', candidate.id || ''].join('|');
+          if (collection.some((existing) => [existing.service_role || '', existing.label || '', existing.url || '', existing.id || ''].join('|') === key)) {
+            return;
+          }
+          collection.push(candidate);
+        };
+
+        const visibleDialogs = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"]')).filter(visible);
+        const paymentSheet = visibleDialogs.find((el) => /select payment method|credit\\/debit card|paypal|venmo|cash app pay|klarna/i.test(clean(el.innerText)));
+        const itemModal = visibleDialogs.find((el) => /add to cart|choose your size|recommended options|build your own pizza|custom pizza/i.test(clean(el.innerText)));
+        const activeRoot = paymentSheet || itemModal || null;
+        doordashActiveLayer = paymentSheet ? 'payment_sheet' : itemModal ? 'item_modal' : 'page';
+        doordashHasPaymentSheet = Boolean(paymentSheet);
+        doordashModalTitle = clean((activeRoot?.querySelector('h1,h2,h3,[role="heading"]')?.innerText) || '');
+
+        const storeCardElements = Array.from(document.querySelectorAll('[data-anchor-id="StoreCard"]'))
+          .filter(visible)
+          .slice(0, 10);
+        doordashStoreCardCount = storeCardElements.length;
+        storeCardElements.forEach((anchor) => {
+          const rawText = String(anchor.closest('article,li,section,div')?.innerText || '');
+          const lines = rawText.split('\\n').map(clean).filter(Boolean);
+          const label = lines.find((line) => /pizza|domino|burger|taco|kitchen|grill|cafe|restaurant/i.test(line)) || lines[0] || labelForElement(anchor);
+          pushUnique(doordashCandidates, candidateFromElement(anchor, 'dd_store_card', anchor.closest('article,li,section,div'), label));
+        });
+
+        const searchResultsRoots = activeRoot ? [activeRoot] : [document];
+        searchResultsRoots.forEach((root) => {
+          const menuButtons = Array.from(root.querySelectorAll('button,a[href],[role="button"]'))
+            .filter(visible)
+            .slice(0, 90);
+
+          menuButtons.forEach((el) => {
+            const label = labelForElement(el);
+            const context = contextForElement(el, root);
+            const text = clean([label, context].join(' '));
+            if (!text) return;
+
+            if (/open app|login|become a dasher|merchant|gift cards/i.test(text)) {
+              return;
+            }
+
+            if (/add to cart/i.test(text)) {
+              doordashHasAddToCartCTA = true;
+              pushUnique(doordashCandidates, candidateFromElement(el, 'dd_add_to_cart', root, label || 'Add to cart'));
+              return;
+            }
+
+            if (/continue/i.test(text) && !/continue browsing/i.test(text)) {
+              doordashHasContinueCTA = true;
+              pushUnique(doordashCandidates, candidateFromElement(el, 'dd_continue_cta', root, label || 'Continue'));
+              return;
+            }
+
+            if ((el.getAttribute('aria-controls') || '') === 'order-cart' || (el.getAttribute('data-testid') || '') === 'OrderCartIconButton') {
+              doordashHasCartCTA = true;
+              pushUnique(doordashCandidates, candidateFromElement(el, 'dd_cart_cta', root, label || 'View cart'));
+              return;
+            }
+
+            if (/\\$\\d/.test(text) || /build your own|specialty pizza|custom pizza|pizza|wings|bread|pasta|dessert/i.test(label)) {
+              const role = /all|featured|most ordered|specialty pizza|build your own|salads|pastas|sides/i.test(label) && !/\\$\\d/.test(text)
+                ? 'dd_menu_nav'
+                : 'dd_item_card';
+              if (role === 'dd_item_card') {
+                doordashItemCardCount += 1;
+              }
+              pushUnique(doordashCandidates, candidateFromElement(el, role, root, label));
+            }
+          });
+        });
+
+        const cartButton = Array.from(document.querySelectorAll('button[data-testid="OrderCartIconButton"], button[aria-controls="order-cart"]'))
+          .filter(visible)[0];
+        if (cartButton) {
+          doordashHasCartCTA = true;
+          pushUnique(doordashCandidates, candidateFromElement(cartButton, 'dd_cart_cta', cartButton.closest('section,div'), labelForElement(cartButton) || 'View cart'));
+        }
+
+        const tipButtons = Array.from(document.querySelectorAll('button[data-anchor-id="TipPickerOption"]'))
+          .filter(visible)
+          .slice(0, 6);
+        doordashTipOptionCount = tipButtons.length;
+        tipButtons.forEach((button) => {
+          pushUnique(doordashCandidates, candidateFromElement(button, 'dd_tip_option', button.closest('[role="radiogroup"],section,div'), labelForElement(button)));
+        });
+
+        const addressButtons = Array.from(document.querySelectorAll('button,[role="button"],a[href]'))
+          .filter(visible)
+          .filter((el) => /\\d{3,} .*\\b(st|street|rd|road|ct|court|ave|avenue|blvd|lane|ln|drive|dr)\\b/i.test(clean(el.innerText || '')))
+          .slice(0, 2);
+        doordashHasAddressCTA = addressButtons.length > 0;
+        addressButtons.forEach((button) => {
+          pushUnique(doordashCandidates, candidateFromElement(button, 'dd_address_cta', button.closest('section,div'), labelForElement(button)));
+        });
+
+        if (paymentSheet) {
+          Array.from(paymentSheet.querySelectorAll('button,[role="button"]'))
+            .filter(visible)
+            .forEach((button) => {
+              pushUnique(doordashCandidates, candidateFromElement(button, 'dd_payment_method', paymentSheet, labelForElement(button)));
+            });
+        }
+
+        if (activeRoot) {
+          const closeButton = Array.from(activeRoot.querySelectorAll('button,[role="button"]'))
+            .filter(visible)
+            .find((el) => /^x$/i.test(labelForElement(el)) || /close|dismiss/i.test(labelForElement(el)));
+          if (closeButton) {
+            pushUnique(doordashCandidates, candidateFromElement(closeButton, 'dd_modal_close', activeRoot, labelForElement(closeButton) || 'Dismiss'));
+          }
+        }
+      }
+
       const text = clean(document.body ? document.body.innerText : '');
       return {
         title: document.title || '',
@@ -1224,7 +1539,18 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         inputs,
         buttons,
         links,
-        candidates
+        candidates,
+        doordash_candidates: doordashCandidates.slice(0, 40),
+        doordash_active_layer: doordashActiveLayer,
+        doordash_modal_title: doordashModalTitle,
+        doordash_store_card_count: doordashStoreCardCount,
+        doordash_item_card_count: doordashItemCardCount,
+        doordash_tip_option_count: doordashTipOptionCount,
+        doordash_has_cart_cta: doordashHasCartCTA,
+        doordash_has_continue_cta: doordashHasContinueCTA,
+        doordash_has_add_to_cart_cta: doordashHasAddToCartCTA,
+        doordash_has_address_cta: doordashHasAddressCTA,
+        doordash_has_payment_sheet: doordashHasPaymentSheet
       };
     })();
     """
@@ -1741,13 +2067,34 @@ struct MemlaBrowserView: View {
     }
 
     private func mirrorCandidates(for state: WebsiteC2AState) -> [WebsiteC2ACandidate] {
-        let deprioritizedRoles = Set(["review_link", "accessibility_link", "utility_link", "auth_link", "nav_link"])
-        let preferredRoles = Set(["store_link", "menu_item", "item_action_button", "cart_link", "cart_button", "control_button", "checkout_button"])
+        let deprioritizedRoles = Set(["review_link", "accessibility_link", "utility_link", "auth_link", "nav_link", "dd_menu_nav"])
+        let preferredRoles = Set(["store_link", "menu_item", "item_action_button", "cart_link", "cart_button", "control_button", "checkout_button", "dd_store_card", "dd_item_card", "dd_add_to_cart", "dd_continue_cta", "dd_cart_cta", "dd_tip_option", "dd_address_cta", "dd_modal_close"])
         let visibleCandidates = state.candidates.filter { !deprioritizedRoles.contains($0.role) && !$0.blocked }
-        let preferred = visibleCandidates.filter { candidate in
+        let stateScopedRoles: Set<String>
+        switch state.pageKind {
+        case "dd_search_results":
+            stateScopedRoles = ["dd_store_card"]
+        case "dd_storefront":
+            stateScopedRoles = ["dd_item_card", "dd_cart_cta", "dd_modal_close"]
+        case "dd_item_modal":
+            stateScopedRoles = ["dd_add_to_cart", "dd_item_card", "dd_modal_close", "dd_tip_option"]
+        case "dd_cart_drawer", "dd_cart_page":
+            stateScopedRoles = ["dd_cart_cta", "dd_continue_cta", "dd_tip_option", "dd_address_cta", "dd_modal_close"]
+        case "dd_checkout":
+            stateScopedRoles = ["dd_tip_option", "dd_address_cta", "dd_modal_close"]
+        case "dd_payment_sheet":
+            stateScopedRoles = ["dd_modal_close"]
+        default:
+            stateScopedRoles = preferredRoles
+        }
+        let stateScoped = visibleCandidates.filter { candidate in
+            stateScopedRoles.contains(candidate.role)
+        }
+        let candidatePool = stateScoped.isEmpty ? visibleCandidates : stateScoped
+        let preferred = candidatePool.filter { candidate in
             candidate.score > 0 || preferredRoles.contains(candidate.role)
         }
-        return preferred.isEmpty ? Array(visibleCandidates.prefix(4)) : Array(preferred.prefix(4))
+        return preferred.isEmpty ? Array(candidatePool.prefix(4)) : Array(preferred.prefix(4))
     }
 
     private func mirrorFacts(for state: WebsiteC2AState) -> [WebsiteMirrorFact] {
@@ -1770,6 +2117,20 @@ struct MemlaBrowserView: View {
 
     private func mirrorTitle(for state: WebsiteC2AState) -> String {
         switch state.pageKind {
+        case "dd_search_results":
+            return "DoorDash search results distilled"
+        case "dd_storefront":
+            return "DoorDash storefront distilled"
+        case "dd_item_modal":
+            return "DoorDash customizer is active"
+        case "dd_cart_drawer":
+            return "DoorDash cart drawer is active"
+        case "dd_cart_page":
+            return "DoorDash cart is ready"
+        case "dd_checkout":
+            return "DoorDash checkout detected"
+        case "dd_payment_sheet":
+            return "Payment sheet is active"
         case "login":
             return "Session needs recovery"
         case "search_results", "search_form":
@@ -1794,6 +2155,16 @@ struct MemlaBrowserView: View {
 
     private func mirrorIcon(for state: WebsiteC2AState) -> String {
         switch state.pageKind {
+        case "dd_search_results":
+            return "building.2"
+        case "dd_storefront":
+            return "storefront"
+        case "dd_item_modal":
+            return "square.and.pencil"
+        case "dd_cart_drawer", "dd_cart_page":
+            return "cart"
+        case "dd_checkout", "dd_payment_sheet":
+            return "hand.raised.fill"
         case "login":
             return "person.badge.key"
         case "menu_or_item":
@@ -1809,6 +2180,10 @@ struct MemlaBrowserView: View {
 
     private func mirrorColor(for state: WebsiteC2AState) -> Color {
         switch state.pageKind {
+        case "dd_search_results", "dd_storefront", "dd_item_modal", "dd_cart_drawer", "dd_cart_page":
+            return .green
+        case "dd_checkout", "dd_payment_sheet":
+            return .red
         case "login":
             return .orange
         case "checkout":
@@ -1864,18 +2239,28 @@ struct MemlaBrowserView: View {
     }
 
     private func mirrorItemCandidates(for state: WebsiteC2AState) -> [WebsiteC2ACandidate] {
-        let itemRoles = Set(["store_link", "menu_item"])
+        let itemRoles = Set(["store_link", "menu_item", "dd_store_card", "dd_item_card"])
         let filtered = mirrorCandidates(for: state).filter { itemRoles.contains($0.role) }
         return filtered.isEmpty ? mirrorCandidates(for: state).filter { !$0.url.isEmpty } : filtered
     }
 
     private func mirrorControlCandidates(for state: WebsiteC2AState) -> [WebsiteC2ACandidate] {
-        let controlRoles = Set(["item_action_button", "cart_button", "cart_link", "control_button", "checkout_button"])
+        let controlRoles = Set(["item_action_button", "cart_button", "cart_link", "control_button", "checkout_button", "dd_add_to_cart", "dd_continue_cta", "dd_cart_cta", "dd_tip_option", "dd_address_cta", "dd_modal_close"])
         return mirrorCandidates(for: state).filter { controlRoles.contains($0.role) }
     }
 
     private func mirrorItemSectionTitle(for state: WebsiteC2AState) -> String {
         switch state.pageKind {
+        case "dd_search_results":
+            return "Store Cards"
+        case "dd_storefront":
+            return "Menu Items"
+        case "dd_item_modal":
+            return "Customizer Items"
+        case "dd_cart_drawer":
+            return "Cart Signals"
+        case "dd_checkout":
+            return "Checkout Signals"
         case "search_results", "search_form":
             return "Relevant Results"
         case "menu_or_item":
@@ -2069,19 +2454,18 @@ struct MemlaBrowserView: View {
             .buttonStyle(.bordered)
             .disabled(true)
         } else if !candidate.url.isEmpty {
-            Button("Open") {
+            Button(candidateOpenTitle(candidate)) {
                 openCandidate(candidate)
             }
             .buttonStyle(.bordered)
         } else if candidate.kind == "button" && candidate.tapSafety == "safe" {
-            Button(browser.isRunningButtonAction ? "Tapping..." : "Tap") {
+            Button(browser.isRunningButtonAction ? "Tapping..." : candidateTapTitle(candidate, allowCaution: false)) {
                 tapCandidate(candidate)
             }
             .buttonStyle(.borderedProminent)
             .disabled(browser.isRunningButtonAction)
         } else if candidate.kind == "button" && candidate.tapSafety == "caution" {
-            let reviewedTitle = candidate.label.localizedCaseInsensitiveContains("checkout") ? "Enter Checkout" : "Tap Reviewed"
-            Button(browser.isRunningButtonAction ? "Tapping..." : reviewedTitle) {
+            Button(browser.isRunningButtonAction ? "Tapping..." : candidateTapTitle(candidate, allowCaution: true)) {
                 tapCandidate(candidate, allowCaution: true)
             }
             .buttonStyle(.bordered)
@@ -2092,6 +2476,41 @@ struct MemlaBrowserView: View {
             }
             .buttonStyle(.bordered)
             .disabled(true)
+        }
+    }
+
+    private func candidateOpenTitle(_ candidate: WebsiteC2ACandidate) -> String {
+        switch candidate.role {
+        case "dd_store_card":
+            return "Open Store"
+        case "dd_item_card":
+            return "Open Item"
+        case "cart_link", "dd_cart_cta":
+            return "Open Cart"
+        default:
+            return "Open"
+        }
+    }
+
+    private func candidateTapTitle(_ candidate: WebsiteC2ACandidate, allowCaution: Bool) -> String {
+        switch candidate.role {
+        case "dd_cart_cta":
+            return "Open Cart"
+        case "dd_continue_cta":
+            return "Continue"
+        case "dd_add_to_cart":
+            return "Add To Cart"
+        case "dd_tip_option":
+            return "Set Tip"
+        case "dd_modal_close":
+            return "Dismiss"
+        case "checkout_button":
+            return "Enter Checkout"
+        default:
+            if allowCaution {
+                return candidate.label.localizedCaseInsensitiveContains("checkout") ? "Enter Checkout" : "Tap Reviewed"
+            }
+            return "Tap"
         }
     }
 
@@ -2236,6 +2655,54 @@ struct MemlaBrowserView: View {
     }
 
     private func guidedStep(for state: WebsiteC2AState) -> WebsiteGuidedStep {
+        if state.pageKind == "dd_payment_sheet" {
+            return WebsiteGuidedStep(
+                title: "Stop at payment sheet",
+                detail: "DoorDash opened payment selection. This is a hard human boundary, so Memla should not pick a payment method or continue.",
+                icon: "hand.raised.fill",
+                tone: "danger"
+            )
+        }
+        if state.pageKind == "dd_checkout" {
+            return WebsiteGuidedStep(
+                title: "Review checkout details",
+                detail: "Address, tip, order summary, and total are visible. Verify them here, then leave payment and final order submission to the user.",
+                icon: "checklist",
+                tone: "warning"
+            )
+        }
+        if state.pageKind == "dd_cart_drawer" || state.pageKind == "dd_cart_page" {
+            return WebsiteGuidedStep(
+                title: "Move from cart to checkout",
+                detail: "DoorDash cart state is active. Suppress store browsing and focus on cart, continue, tip, and address controls.",
+                icon: "cart.badge.questionmark",
+                tone: "warning"
+            )
+        }
+        if state.pageKind == "dd_item_modal" {
+            return WebsiteGuidedStep(
+                title: "Use the customizer layer",
+                detail: "The active DoorDash item modal is open. Focus on size, quantity, modifiers, and Add to cart, not the background storefront.",
+                icon: "slider.horizontal.3",
+                tone: "safe"
+            )
+        }
+        if state.pageKind == "dd_storefront" {
+            return WebsiteGuidedStep(
+                title: "Pick a menu item",
+                detail: "DoorDash storefront detected. Prefer food item cards and suppress category or marketing links.",
+                icon: "fork.knife",
+                tone: "safe"
+            )
+        }
+        if state.pageKind == "dd_search_results" {
+            return WebsiteGuidedStep(
+                title: "Pick the right store card",
+                detail: "DoorDash search results are visible. Prefer merchant cards that match the requested restaurant, rating, and distance.",
+                icon: "building.2",
+                tone: "safe"
+            )
+        }
         if state.pageKind == "checkout" || state.residuals.contains("irreversible_action_nearby") {
             return WebsiteGuidedStep(
                 title: "Stop before final action",
