@@ -39,6 +39,7 @@ struct WebsiteC2AState {
     let authState: String
     let authDomain: String
     let textSnippet: String
+    let serviceFacts: [String: String]
     let capsuleVerification: WebsiteCapsuleVerification?
 }
 
@@ -228,6 +229,40 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         }
     }
 
+    func fillUberRideLocation(_ query: String, isPickup: Bool, capsule: ActionCapsule?) {
+        let cleanQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanQuery.isEmpty else {
+            searchActionStatus = "Ride location query is empty."
+            return
+        }
+        isRunningSearchAction = true
+        searchActionStatus = isPickup ? "Filling pickup..." : "Filling destination..."
+        webView.evaluateJavaScript(Self.uberRideLocationFillScript(query: cleanQuery, isPickup: isPickup)) { [weak self] result, error in
+            DispatchQueue.main.async {
+                guard let self = self else {
+                    return
+                }
+                self.isRunningSearchAction = false
+                if let error = error {
+                    self.searchActionStatus = error.localizedDescription
+                    return
+                }
+                guard let payload = result as? [String: Any] else {
+                    self.searchActionStatus = "Ride location fill returned no page result."
+                    return
+                }
+                let reason = Self.stringValue(payload["reason"]).replacingOccurrences(of: "_", with: " ")
+                let ok = payload["ok"] as? Bool ?? false
+                self.searchActionStatus = ok ? reason.capitalized : "Ride fill blocked: \(reason)"
+                if ok {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+                        self.inspectPage(capsule: capsule)
+                    }
+                }
+            }
+        }
+    }
+
     func tapButtonCandidate(_ candidate: WebsiteC2ACandidate, allowCaution: Bool = false, capsule: ActionCapsule?) {
         let canTap = candidate.tapSafety == "safe" || (allowCaution && candidate.tapSafety == "caution")
         guard canTap, candidate.kind == "button", candidate.url.isEmpty else {
@@ -401,11 +436,14 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         let normalizedCombined = normalizedText(combined)
         let isDoorDash = isDoorDashDomain(url: url)
         let isUberEats = isUberEatsDomain(url: url)
+        let isUberRide = isUberRideDomain(url: url)
         let pageKind: String
         if isDoorDash {
             pageKind = classifyDoorDashPage(payload: payload, combined: combined, url: url, inputs: inputs)
         } else if isUberEats {
             pageKind = classifyUberEatsPage(payload: payload, combined: combined, url: url, inputs: inputs)
+        } else if isUberRide {
+            pageKind = classifyUberRidePage(payload: payload, combined: combined, url: url, inputs: inputs)
         } else {
             pageKind = classifyPageKind(combined: combined, url: url, inputs: inputs)
         }
@@ -414,21 +452,30 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             candidateSource = payload["doordash_candidates"] ?? payload["candidates"]
         } else if isUberEats {
             candidateSource = payload["ubereats_candidates"] ?? payload["candidates"]
+        } else if isUberRide {
+            candidateSource = payload["uber_candidates"] ?? payload["candidates"]
         } else {
             candidateSource = payload["candidates"]
         }
         let candidates = candidateArray(candidateSource, capsule: capsule, pageKind: pageKind)
         let safeActions = candidateActions(pageKind: pageKind, inputs: inputs, buttons: buttons, links: links, candidates: candidates)
-        let residuals = residualsForPage(pageKind: pageKind, combined: normalizedCombined, textSnippet: textSnippet, capsule: capsule)
+        let residuals = residualsForPage(payload: payload, pageKind: pageKind, combined: normalizedCombined, textSnippet: textSnippet, capsule: capsule)
         let authState = classifyAuthState(pageKind: pageKind, combined: combined)
         let authDomain = domainFrom(url: url)
         let capsuleVerification = capsuleVerificationForPage(pageKind: pageKind, combined: normalizedCombined, capsule: capsule)
+        let serviceFacts: [String: String]
         let summary: String
         if isDoorDash {
+            serviceFacts = [:]
             summary = doorDashSummary(payload: payload, pageKind: pageKind, candidates: candidates)
         } else if isUberEats {
+            serviceFacts = [:]
             summary = uberEatsSummary(payload: payload, pageKind: pageKind, candidates: candidates)
+        } else if isUberRide {
+            serviceFacts = uberRideFacts(payload: payload)
+            summary = uberRideSummary(payload: payload, pageKind: pageKind, candidates: candidates)
         } else {
+            serviceFacts = [:]
             summary = "Compiled \(pageKind.replacingOccurrences(of: "_", with: " ")) with \(inputs.count) inputs, \(buttons.count) buttons, \(links.count) links, and \(candidates.count) candidates."
         }
         return WebsiteC2AState(
@@ -444,6 +491,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             authState: authState,
             authDomain: authDomain,
             textSnippet: textSnippet,
+            serviceFacts: serviceFacts,
             capsuleVerification: capsuleVerification
         )
     }
@@ -454,6 +502,11 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
 
     private static func isUberEatsDomain(url: String) -> Bool {
         domainFrom(url: url).contains("ubereats.com")
+    }
+
+    private static func isUberRideDomain(url: String) -> Bool {
+        let domain = domainFrom(url: url)
+        return domain.contains("uber.com") && !domain.contains("ubereats.com")
     }
 
     private static func classifyDoorDashPage(payload: [String: Any], combined: String, url: String, inputs: [String]) -> String {
@@ -572,6 +625,49 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         }
     }
 
+    private static func classifyUberRidePage(payload: [String: Any], combined: String, url: String, inputs: [String]) -> String {
+        let hasPickupInput = payload["uber_has_pickup_input"] as? Bool ?? false
+        let hasDropoffInput = payload["uber_has_dropoff_input"] as? Bool ?? false
+        let pickupResults = payload["uber_pickup_result_count"] as? Int ?? 0
+        let dropoffResults = payload["uber_dropoff_result_count"] as? Int ?? 0
+        let hasSeePricesCTA = payload["uber_has_see_prices_cta"] as? Bool ?? false
+        let hasRequestCTA = payload["uber_has_request_cta"] as? Bool ?? false
+        let vehicleCount = payload["uber_vehicle_option_count"] as? Int ?? 0
+
+        if url.contains("/go/product-selection") || hasRequestCTA || vehicleCount > 0 || combined.contains("request uber") {
+            return "ub_product_selection"
+        }
+        if hasPickupInput || hasDropoffInput || pickupResults > 0 || dropoffResults > 0 || hasSeePricesCTA || url.contains("/start-riding") || url.contains("/looking") {
+            return "ub_trip_builder"
+        }
+        return classifyPageKind(combined: combined, url: url, inputs: inputs)
+    }
+
+    private static func uberRideSummary(payload: [String: Any], pageKind: String, candidates: [WebsiteC2ACandidate]) -> String {
+        let pickupResults = payload["uber_pickup_result_count"] as? Int ?? 0
+        let dropoffResults = payload["uber_dropoff_result_count"] as? Int ?? 0
+        let vehicleCount = payload["uber_vehicle_option_count"] as? Int ?? 0
+        switch pageKind {
+        case "ub_trip_builder":
+            return "Uber trip builder detected with \(pickupResults + dropoffResults) location results and ride setup controls."
+        case "ub_product_selection":
+            return "Uber product selection is visible with \(vehicleCount) ride options. Stop before the final request button."
+        default:
+            return "Uber ride flow with \(candidates.count) candidates."
+        }
+    }
+
+    private static func uberRideFacts(payload: [String: Any]) -> [String: String] {
+        [
+            "ub_pickup_missing": String(payload["uber_pickup_missing"] as? Bool ?? false),
+            "ub_dropoff_missing": String(payload["uber_dropoff_missing"] as? Bool ?? false),
+            "ub_pickup_value": stringValue(payload["uber_pickup_value"]),
+            "ub_dropoff_value": stringValue(payload["uber_dropoff_value"]),
+            "ub_has_request_cta": String(payload["uber_has_request_cta"] as? Bool ?? false),
+            "ub_has_see_prices_cta": String(payload["uber_has_see_prices_cta"] as? Bool ?? false),
+        ]
+    }
+
     private static func classifyPageKind(combined: String, url: String, inputs: [String]) -> String {
         if combined.contains("captcha") || combined.contains("verify you are human") {
             return "blocked_or_bot_check"
@@ -607,6 +703,14 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
 
     private static func candidateActions(pageKind: String, inputs: [String], buttons: [String], links: [String], candidates: [WebsiteC2ACandidate]) -> [String] {
         var actions: [String] = []
+        if pageKind == "ub_trip_builder" {
+            actions.append("set_trip_locations")
+            actions.append("review_then_tap_candidate")
+        }
+        if pageKind == "ub_product_selection" {
+            actions.append("review_trip_quote")
+            actions.append("stop_before_request")
+        }
         if pageKind == "dd_search_results" {
             actions.append("open_ranked_candidate")
         }
@@ -680,8 +784,22 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         return Array(dictUnique(actions))
     }
 
-    private static func residualsForPage(pageKind: String, combined: String, textSnippet: String, capsule: ActionCapsule?) -> [String] {
+    private static func residualsForPage(payload: [String: Any], pageKind: String, combined: String, textSnippet: String, capsule: ActionCapsule?) -> [String] {
         var residuals: [String] = []
+        if pageKind == "ub_trip_builder" {
+            residuals.append("trip_builder_active")
+            if payload["uber_pickup_missing"] as? Bool ?? false {
+                residuals.append("pickup_location_not_verified")
+            }
+            if payload["uber_dropoff_missing"] as? Bool ?? false {
+                residuals.append("destination_not_verified")
+            }
+        }
+        if pageKind == "ub_product_selection" {
+            residuals.append("ride_request_ready")
+            residuals.append("final_confirmation_required")
+            residuals.append("irreversible_action_nearby")
+        }
         if pageKind == "dd_payment_sheet" {
             residuals.append("payment_sheet_active")
             residuals.append("final_confirmation_required")
@@ -739,7 +857,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         guard let capsule = capsule else {
             return nil
         }
-        let relevantPages = ["menu_or_item", "cart", "checkout", "dd_storefront", "dd_item_modal", "dd_cart_drawer", "dd_cart_page", "dd_checkout", "dd_payment_sheet", "ue_storefront", "ue_item_modal", "ue_cart_page", "ue_checkout"]
+        let relevantPages = ["menu_or_item", "cart", "checkout", "dd_storefront", "dd_item_modal", "dd_cart_drawer", "dd_cart_page", "dd_checkout", "dd_payment_sheet", "ue_storefront", "ue_item_modal", "ue_cart_page", "ue_checkout", "ub_trip_builder", "ub_product_selection"]
         guard relevantPages.contains(pageKind) else {
             return nil
         }
@@ -782,9 +900,17 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         verifySlot("item")
         verifySlot("modifiers")
         verifySlot("tip")
+        verifySlot("destination")
+        verifySlot("pickup_time")
 
         if pageKind == "menu_or_item" {
             warnings.append("review_item_options_before_cart")
+        }
+        if pageKind == "ub_trip_builder" {
+            warnings.append("verify_pickup_and_destination_before_price_quote")
+        }
+        if pageKind == "ub_product_selection" {
+            warnings.append("human_must_confirm_final_ride_request")
         }
         if pageKind == "dd_storefront" || pageKind == "dd_item_modal" {
             warnings.append("review_item_options_before_cart")
@@ -946,7 +1072,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
     }
 
     private static func isBlockedServiceRole(_ role: String) -> Bool {
-        ["dd_payment_method", "dd_payment_sheet", "ue_payment_method"].contains(role)
+        ["dd_payment_method", "dd_payment_sheet", "ue_payment_method", "ub_request_cta", "ub_payment_cta"].contains(role)
     }
 
     private static func displayLabel(label: String, url: String, context: String, role: String) -> String {
@@ -1035,6 +1161,20 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             return 5.2
         case "ue_store_card":
             return 5.0
+        case "ub_pickup_input":
+            return 1.0
+        case "ub_pickup_result":
+            return 4.4
+        case "ub_dropoff_input":
+            return 1.8
+        case "ub_dropoff_result":
+            return 4.8
+        case "ub_see_prices_cta":
+            return 4.5
+        case "ub_vehicle_option":
+            return 2.4
+        case "ub_request_cta":
+            return -8.0
         case "menu_item":
             return 1.8
         case "dd_item_card":
@@ -1102,6 +1242,20 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             return "DoorDash merchant card"
         case "ue_store_card":
             return "Uber Eats merchant card"
+        case "ub_pickup_input":
+            return "Uber pickup field"
+        case "ub_pickup_result":
+            return "Uber pickup autocomplete result"
+        case "ub_dropoff_input":
+            return "Uber destination field"
+        case "ub_dropoff_result":
+            return "Uber destination autocomplete result"
+        case "ub_see_prices_cta":
+            return "Uber price quote control"
+        case "ub_vehicle_option":
+            return "Uber vehicle option"
+        case "ub_request_cta":
+            return "Uber final request button"
         case "menu_item":
             return "Visible menu or item candidate"
         case "dd_item_card":
@@ -1158,6 +1312,18 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
     private static func serviceLabelAdjustment(role: String, label: String, context: String) -> Double {
         let text = normalizedText([label, context].joined(separator: " "))
         switch role {
+        case "ub_pickup_result":
+            if text.contains("allow location access") || text.contains("current location") {
+                return 1.4
+            }
+            return 0.0
+        case "ub_dropoff_result":
+            if text.contains("stadium") || text.contains("bank") || text.contains("minneapolis") {
+                return 0.4
+            }
+            return 0.0
+        case "ub_see_prices_cta":
+            return text.contains("see prices") ? 1.2 : 0.0
         case "dd_add_to_cart":
             if text.contains("add to cart") && !text.contains("add item to cart") {
                 return 1.4
@@ -1340,6 +1506,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             "payment",
             "pay now",
             "confirm order",
+            "request uber",
+            "request trip",
             "book ride",
             "reserve",
             "send message",
@@ -1371,6 +1539,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             "cash app pay",
             "klarna",
             "confirm order",
+            "request uber",
+            "request trip",
             "book ride",
             "reserve",
             "send",
@@ -1530,6 +1700,43 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         """
     }
 
+    private static func uberRideLocationFillScript(query: String, isPickup: Bool) -> String {
+        let queryLiteral = javascriptStringLiteral(query)
+        let selector = isPickup
+            ? "input[data-testid=\"dotcom-ui.pickup-destination.input.pickup\"]"
+            : "input[data-testid=\"dotcom-ui.pickup-destination.input.destination.drop0\"]"
+        let reason = isPickup ? "filled_uber_pickup" : "filled_uber_destination"
+        return """
+        (() => {
+          const query = \(queryLiteral);
+          const target = document.querySelector('\(selector)');
+          if (!target) {
+            return { ok: false, reason: 'uber_ride_input_not_found' };
+          }
+          target.scrollIntoView({ block: 'center', inline: 'center' });
+          if (typeof target.click === 'function') {
+            target.click();
+          }
+          if (typeof target.focus === 'function') {
+            target.focus();
+          }
+          const valueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+          if (valueSetter) {
+            valueSetter.call(target, query);
+          } else {
+            target.value = query;
+          }
+          try {
+            target.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: query }));
+          } catch (_) {
+            target.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+          target.dispatchEvent(new Event('change', { bubbles: true }));
+          return { ok: true, reason: '\(reason)', query };
+        })();
+        """
+    }
+
     private static func buttonTapScript(domIndex: Int, allowCaution: Bool) -> String {
         let allowCautionLiteral = allowCaution ? "true" : "false"
         return """
@@ -1545,7 +1752,15 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             const rect = el.getBoundingClientRect();
             return rect.width > 1 && rect.height > 1;
           };
-          const elements = Array.from(document.querySelectorAll('a[href],button,[role="button"],[role="option"],input[type="button"],input[type="submit"]'))
+          const isTextInput = (el) => {
+            if (!el) return false;
+            const tag = (el.tagName || '').toLowerCase();
+            if (tag === 'textarea' || tag === 'select') return true;
+            if (tag !== 'input') return false;
+            const type = (el.getAttribute('type') || '').toLowerCase();
+            return !['hidden', 'password', 'checkbox', 'radio', 'file', 'submit', 'button'].includes(type);
+          };
+          const elements = Array.from(document.querySelectorAll('a[href],button,[role="button"],[role="option"],input,textarea,select,input[type="button"],input[type="submit"]'))
             .filter(visible);
           const target = elements[targetIndex];
           if (!target) {
@@ -1553,6 +1768,16 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           }
           if (target.matches('a[href]')) {
             return { ok: false, reason: 'link_candidate_not_tapped' };
+          }
+          if (isTextInput(target)) {
+            target.scrollIntoView({ block: 'center', inline: 'center' });
+            if (typeof target.click === 'function') {
+              target.click();
+            }
+            if (typeof target.focus === 'function') {
+              target.focus();
+            }
+            return { ok: true, reason: 'focused_input_candidate', label: clean(target.getAttribute('aria-label') || target.getAttribute('placeholder') || target.getAttribute('name') || target.id) };
           }
           const label = clean(target.innerText || target.value || target.getAttribute('aria-label') || target.getAttribute('title'));
           const context = clean(target.closest('article,li,section,div')?.innerText || '');
@@ -1626,7 +1851,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           return rawHref;
         }
       };
-      const interactiveElements = Array.from(document.querySelectorAll('a[href],button,[role="button"],[role="option"],input[type="button"],input[type="submit"]'))
+      const interactiveElements = Array.from(document.querySelectorAll('a[href],button,[role="button"],[role="option"],input,textarea,select,input[type="button"],input[type="submit"]'))
         .filter(visible);
       interactiveElements.forEach((el, index) => {
         try {
@@ -1691,6 +1916,19 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
       let ubereatsHasAddressGate = false;
       let ubereatsHasContinueBrowser = false;
       let ubereatsHasSearchEntry = false;
+      let uberCandidates = [];
+      let uberActiveLayer = 'page';
+      let uberPickupValue = '';
+      let uberDropoffValue = '';
+      let uberPickupMissing = false;
+      let uberDropoffMissing = false;
+      let uberPickupResultCount = 0;
+      let uberDropoffResultCount = 0;
+      let uberVehicleOptionCount = 0;
+      let uberHasPickupInput = false;
+      let uberHasDropoffInput = false;
+      let uberHasSeePricesCTA = false;
+      let uberHasRequestCTA = false;
 
       if (/doordash\\.com$/i.test(location.hostname)) {
         const pushUnique = (collection, candidate) => {
@@ -2102,6 +2340,123 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         }
       }
 
+      if (/(^|\\.)uber\\.com$/i.test(location.hostname) && !/ubereats\\.com$/i.test(location.hostname)) {
+        const pushUnique = (collection, candidate) => {
+          if (!candidate || (!candidate.label && !candidate.url)) return;
+          const key = [candidate.service_role || '', candidate.label || '', candidate.url || '', candidate.id || ''].join('|');
+          if (collection.some((existing) => [existing.service_role || '', existing.label || '', existing.url || '', existing.id || ''].join('|') === key)) {
+            return;
+          }
+          collection.push(candidate);
+        };
+        const rawLines = (el) => String(el?.innerText || '')
+          .split('\\n')
+          .map(clean)
+          .filter(Boolean);
+        const firstMeaningfulTextLine = (el) => {
+          const lines = rawLines(el);
+          return lines.find((line) => {
+            const lower = line.toLowerCase();
+            return /[a-z]/i.test(line)
+              && !/^(see prices|book your first ride|get ready for your first trip|plan your journey|ways to ride and more|pickup now|for me|back)$/i.test(lower)
+              && !/minutes|mins|eta|arrives|affordable rides|available|up to \\d/i.test(lower);
+          }) || lines[0] || '';
+        };
+        const closestWithText = (el, minLength = 18, maxLength = 320) => {
+          let node = el;
+          let fallback = el;
+          while (node && node !== document.body) {
+            const length = clean(node.innerText || '').length;
+            if (length >= minLength && length <= maxLength) {
+              return node;
+            }
+            if (length >= minLength) {
+              fallback = node;
+            }
+            node = node.parentElement;
+          }
+          return fallback || el;
+        };
+        const isUberRideNoise = (text) => /explore the uber platform|book your first ride|help center|investors|newsroom|blog|learn more|restaurants|hotels|entertainment|transport|attractions|ways to ride and more|plan your journey/i.test(text);
+        const rideActionables = Array.from(document.querySelectorAll('a[href],button,[role="button"],[role="option"],input,textarea,select'))
+          .filter(visible);
+        const pickupInput = Array.from(document.querySelectorAll('input[data-testid="dotcom-ui.pickup-destination.input.pickup"]'))
+          .filter(visible)[0] || null;
+        const dropoffInput = Array.from(document.querySelectorAll('input[data-testid="dotcom-ui.pickup-destination.input.destination.drop0"]'))
+          .filter(visible)[0] || null;
+        const activeField = pickupInput === document.activeElement
+          ? 'pickup'
+          : (dropoffInput === document.activeElement || dropoffInput?.getAttribute('aria-expanded') === 'true')
+            ? 'dropoff'
+            : pickupInput?.getAttribute('aria-expanded') === 'true'
+              ? 'pickup'
+              : '';
+        uberHasPickupInput = Boolean(pickupInput);
+        uberHasDropoffInput = Boolean(dropoffInput);
+        uberPickupValue = clean(pickupInput?.value || '');
+        uberDropoffValue = clean(dropoffInput?.value || '');
+        uberPickupMissing = Boolean(pickupInput) && !uberPickupValue;
+        uberDropoffMissing = Boolean(dropoffInput) && !uberDropoffValue;
+        uberActiveLayer = 'trip_builder';
+
+        if (pickupInput) {
+          pushUnique(uberCandidates, candidateFromElement(pickupInput, 'ub_pickup_input', closestWithText(pickupInput, 8, 180), 'Set pickup'));
+        }
+        if (dropoffInput) {
+          pushUnique(uberCandidates, candidateFromElement(dropoffInput, 'ub_dropoff_input', closestWithText(dropoffInput, 8, 180), 'Set destination'));
+        }
+
+        const locationResults = Array.from(document.querySelectorAll('[data-testid="pudo-result"], [role="option"][data-testid="pudo-result"]'))
+          .filter(visible)
+          .slice(0, 6);
+        locationResults.forEach((option) => {
+          const root = closestWithText(option, 18, 240);
+          const text = clean([labelForElement(option), contextForElement(option, root)].join(' '));
+          const role = activeField === 'pickup' || /allow location access|current location|pickup address/i.test(text)
+            ? 'ub_pickup_result'
+            : 'ub_dropoff_result';
+          const label = firstMeaningfulTextLine(root) || labelForElement(option);
+          if (role === 'ub_pickup_result') {
+            uberPickupResultCount += 1;
+          } else {
+            uberDropoffResultCount += 1;
+          }
+          pushUnique(uberCandidates, candidateFromElement(option, role, root, label));
+        });
+
+        const seePricesControl = rideActionables.find((el) => /see prices/i.test(clean([labelForElement(el), contextForElement(el)].join(' '))));
+        if (seePricesControl) {
+          uberHasSeePricesCTA = true;
+          pushUnique(uberCandidates, candidateFromElement(seePricesControl, 'ub_see_prices_cta', closestWithText(seePricesControl, 18, 220), 'See prices'));
+        }
+
+        const vehicleNodes = Array.from(document.querySelectorAll('button,[role="button"],a[href]'))
+          .filter(visible)
+          .filter((el) => {
+            const text = clean([labelForElement(el), contextForElement(el, closestWithText(el, 18, 320))].join(' '));
+            return text
+              && !isUberRideNoise(text)
+              && /uberx|uberxl|electric|comfort|black|share/i.test(text)
+              && /\$\d/.test(text);
+          })
+          .slice(0, 6);
+        uberVehicleOptionCount = vehicleNodes.length;
+        vehicleNodes.forEach((node) => {
+          const root = closestWithText(node, 18, 320);
+          const label = firstMeaningfulTextLine(root) || labelForElement(node);
+          pushUnique(uberCandidates, candidateFromElement(node, 'ub_vehicle_option', root, label));
+        });
+
+        const requestRideButton = Array.from(document.querySelectorAll('button[data-testid="request_trip_button"],a[data-testid="request_trip_button"],button,[role="button"]'))
+          .filter(visible)
+          .find((el) => /request uber|request trip/i.test(clean([labelForElement(el), contextForElement(el)].join(' '))));
+        if (requestRideButton) {
+          uberHasRequestCTA = true;
+          uberActiveLayer = 'product_selection';
+          pushUnique(uberCandidates, candidateFromElement(requestRideButton, 'ub_request_cta', closestWithText(requestRideButton, 18, 240), clean(labelForElement(requestRideButton)) || 'Request ride'));
+        }
+      }
+
       const text = clean(document.body ? document.body.innerText : '');
       return {
         title: document.title || '',
@@ -2134,7 +2489,20 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         ubereats_has_add_to_cart_cta: ubereatsHasAddToCartCTA,
         ubereats_has_address_gate: ubereatsHasAddressGate,
         ubereats_has_continue_browser: ubereatsHasContinueBrowser,
-        ubereats_has_search_entry: ubereatsHasSearchEntry
+        ubereats_has_search_entry: ubereatsHasSearchEntry,
+        uber_candidates: uberCandidates.slice(0, 40),
+        uber_active_layer: uberActiveLayer,
+        uber_pickup_value: uberPickupValue,
+        uber_dropoff_value: uberDropoffValue,
+        uber_pickup_missing: uberPickupMissing,
+        uber_dropoff_missing: uberDropoffMissing,
+        uber_pickup_result_count: uberPickupResultCount,
+        uber_dropoff_result_count: uberDropoffResultCount,
+        uber_vehicle_option_count: uberVehicleOptionCount,
+        uber_has_pickup_input: uberHasPickupInput,
+        uber_has_dropoff_input: uberHasDropoffInput,
+        uber_has_see_prices_cta: uberHasSeePricesCTA,
+        uber_has_request_cta: uberHasRequestCTA
       };
     })();
     """
@@ -2716,10 +3084,14 @@ struct MemlaBrowserView: View {
 
     private func mirrorCandidates(for state: WebsiteC2AState) -> [WebsiteC2ACandidate] {
         let deprioritizedRoles = Set(["review_link", "accessibility_link", "utility_link", "auth_link", "nav_link", "dd_menu_nav"])
-        let preferredRoles = Set(["store_link", "menu_item", "item_action_button", "cart_link", "cart_button", "control_button", "checkout_button", "dd_store_card", "dd_item_card", "dd_add_to_cart", "dd_continue_cta", "dd_cart_cta", "dd_tip_option", "dd_address_cta", "dd_modal_close", "ue_continue_browser", "ue_address_cta", "ue_address_result", "ue_search_entry", "ue_store_card", "ue_item_card", "ue_add_to_cart", "ue_cart_cta", "ue_continue_cta", "ue_modal_close"])
+        let preferredRoles = Set(["store_link", "menu_item", "item_action_button", "cart_link", "cart_button", "control_button", "checkout_button", "dd_store_card", "dd_item_card", "dd_add_to_cart", "dd_continue_cta", "dd_cart_cta", "dd_tip_option", "dd_address_cta", "dd_modal_close", "ue_continue_browser", "ue_address_cta", "ue_address_result", "ue_search_entry", "ue_store_card", "ue_item_card", "ue_add_to_cart", "ue_cart_cta", "ue_continue_cta", "ue_modal_close", "ub_pickup_input", "ub_pickup_result", "ub_dropoff_input", "ub_dropoff_result", "ub_see_prices_cta", "ub_vehicle_option"])
         let visibleCandidates = state.candidates.filter { !deprioritizedRoles.contains($0.role) && !$0.blocked }
         let stateScopedRoles: Set<String>
         switch state.pageKind {
+        case "ub_trip_builder":
+            stateScopedRoles = ["ub_pickup_result", "ub_pickup_input", "ub_dropoff_result", "ub_dropoff_input", "ub_see_prices_cta"]
+        case "ub_product_selection":
+            stateScopedRoles = ["ub_vehicle_option"]
         case "ue_entry_gate":
             stateScopedRoles = ["ue_continue_browser", "ue_address_cta", "ue_address_result", "ue_search_entry"]
         case "ue_search_results":
@@ -2769,6 +3141,28 @@ struct MemlaBrowserView: View {
 
     private func mirrorRolePriority(pageKind: String, role: String) -> Int {
         switch pageKind {
+        case "ub_trip_builder":
+            switch role {
+            case "ub_pickup_result":
+                return 100
+            case "ub_pickup_input":
+                return 92
+            case "ub_dropoff_result":
+                return 88
+            case "ub_dropoff_input":
+                return 84
+            case "ub_see_prices_cta":
+                return 80
+            default:
+                return 12
+            }
+        case "ub_product_selection":
+            switch role {
+            case "ub_vehicle_option":
+                return 100
+            default:
+                return 10
+            }
         case "ue_entry_gate":
             switch role {
             case "ue_continue_browser":
@@ -2908,6 +3302,10 @@ struct MemlaBrowserView: View {
 
     private func mirrorTitle(for state: WebsiteC2AState) -> String {
         switch state.pageKind {
+        case "ub_trip_builder":
+            return "Uber trip builder distilled"
+        case "ub_product_selection":
+            return "Uber ride options are ready"
         case "ue_entry_gate":
             return "Uber Eats entry gate"
         case "ue_search_results":
@@ -2958,6 +3356,10 @@ struct MemlaBrowserView: View {
 
     private func mirrorIcon(for state: WebsiteC2AState) -> String {
         switch state.pageKind {
+        case "ub_trip_builder":
+            return "car.circle"
+        case "ub_product_selection":
+            return "car.side"
         case "ue_entry_gate":
             return "rectangle.and.text.magnifyingglass"
         case "ue_search_results":
@@ -2995,6 +3397,10 @@ struct MemlaBrowserView: View {
 
     private func mirrorColor(for state: WebsiteC2AState) -> Color {
         switch state.pageKind {
+        case "ub_trip_builder":
+            return .green
+        case "ub_product_selection":
+            return .orange
         case "ue_entry_gate", "ue_search_results", "ue_storefront", "ue_item_modal", "ue_cart_page":
             return .green
         case "ue_checkout":
@@ -3058,18 +3464,22 @@ struct MemlaBrowserView: View {
     }
 
     private func mirrorItemCandidates(for state: WebsiteC2AState) -> [WebsiteC2ACandidate] {
-        let itemRoles = Set(["store_link", "menu_item", "dd_store_card", "dd_item_card", "ue_store_card", "ue_item_card"])
+        let itemRoles = Set(["store_link", "menu_item", "dd_store_card", "dd_item_card", "ue_store_card", "ue_item_card", "ub_vehicle_option"])
         let filtered = mirrorCandidates(for: state).filter { itemRoles.contains($0.role) }
         return filtered.isEmpty ? mirrorCandidates(for: state).filter { !$0.url.isEmpty } : filtered
     }
 
     private func mirrorControlCandidates(for state: WebsiteC2AState) -> [WebsiteC2ACandidate] {
-        let controlRoles = Set(["item_action_button", "cart_button", "cart_link", "control_button", "checkout_button", "dd_add_to_cart", "dd_continue_cta", "dd_cart_cta", "dd_tip_option", "dd_address_cta", "dd_modal_close", "ue_continue_browser", "ue_address_cta", "ue_address_result", "ue_search_entry", "ue_add_to_cart", "ue_cart_cta", "ue_continue_cta", "ue_modal_close"])
+        let controlRoles = Set(["item_action_button", "cart_button", "cart_link", "control_button", "checkout_button", "dd_add_to_cart", "dd_continue_cta", "dd_cart_cta", "dd_tip_option", "dd_address_cta", "dd_modal_close", "ue_continue_browser", "ue_address_cta", "ue_address_result", "ue_search_entry", "ue_add_to_cart", "ue_cart_cta", "ue_continue_cta", "ue_modal_close", "ub_pickup_input", "ub_pickup_result", "ub_dropoff_input", "ub_dropoff_result", "ub_see_prices_cta"])
         return mirrorCandidates(for: state).filter { controlRoles.contains($0.role) }
     }
 
     private func mirrorItemSectionTitle(for state: WebsiteC2AState) -> String {
         switch state.pageKind {
+        case "ub_trip_builder":
+            return "Trip Controls"
+        case "ub_product_selection":
+            return "Ride Options"
         case "ue_entry_gate":
             return "Setup Gates"
         case "ue_search_results":
@@ -3313,6 +3723,8 @@ struct MemlaBrowserView: View {
 
     private func candidateOpenTitle(_ candidate: WebsiteC2ACandidate) -> String {
         switch candidate.role {
+        case "ub_see_prices_cta":
+            return "See Prices"
         case "dd_store_card":
             return "Open Store"
         case "dd_item_card":
@@ -3336,6 +3748,16 @@ struct MemlaBrowserView: View {
 
     private func candidateTapTitle(_ candidate: WebsiteC2ACandidate, allowCaution: Bool) -> String {
         switch candidate.role {
+        case "ub_pickup_input":
+            return "Set Pickup"
+        case "ub_pickup_result":
+            return "Use Current Location"
+        case "ub_dropoff_input":
+            return "Set Destination"
+        case "ub_dropoff_result":
+            return "Choose Destination"
+        case "ub_see_prices_cta":
+            return "See Prices"
         case "dd_cart_cta":
             return "Open Cart"
         case "dd_continue_cta":
@@ -3513,6 +3935,22 @@ struct MemlaBrowserView: View {
     }
 
     private func guidedStep(for state: WebsiteC2AState) -> WebsiteGuidedStep {
+        if state.pageKind == "ub_product_selection" {
+            return WebsiteGuidedStep(
+                title: "Review the ride quote",
+                detail: "Uber ride options are visible. Compare the vehicle choice and price, then stop before the final Request Uber button.",
+                icon: "car.side",
+                tone: "warning"
+            )
+        }
+        if state.pageKind == "ub_trip_builder" {
+            return WebsiteGuidedStep(
+                title: "Set pickup and destination",
+                detail: "Uber needs pickup and dropoff first. Prefer current location for pickup, select the destination result, then use See prices.",
+                icon: "mappin.and.ellipse",
+                tone: "safe"
+            )
+        }
         if state.pageKind == "ue_checkout" {
             return WebsiteGuidedStep(
                 title: "Review checkout details",
@@ -3778,7 +4216,7 @@ struct MemlaBrowserView: View {
     }
 
     private func handleAutoDriveUpdate(for state: WebsiteC2AState) {
-        guard autoDriveEnabled, (state.pageKind.hasPrefix("dd_") || state.pageKind.hasPrefix("ue_")) else {
+        guard autoDriveEnabled, (state.pageKind.hasPrefix("dd_") || state.pageKind.hasPrefix("ue_") || state.pageKind.hasPrefix("ub_")) else {
             return
         }
         guard !browser.isLoading, !browser.isInspecting, !browser.isRunningButtonAction else {
@@ -3788,11 +4226,13 @@ struct MemlaBrowserView: View {
         let signature = doorDashAutoDriveSignature(for: state)
         let candidates = mirrorCandidates(for: state)
 
-        if state.pageKind == "dd_payment_sheet" || state.pageKind == "dd_checkout" || state.pageKind == "ue_checkout" {
+        if state.pageKind == "dd_payment_sheet" || state.pageKind == "dd_checkout" || state.pageKind == "ue_checkout" || state.pageKind == "ub_product_selection" {
             pendingDoorDashRole = ""
             pendingDoorDashLabel = ""
             addToCartRetryCount = 0
-            autoDriveStatus = "Reached checkout. Waiting for your final confirmation."
+            autoDriveStatus = state.pageKind == "ub_product_selection"
+                ? "Uber ride is priced. Waiting for your final request confirmation."
+                : "Reached checkout. Waiting for your final confirmation."
             lastAutoDriveSignature = signature
             return
         }
@@ -3825,7 +4265,44 @@ struct MemlaBrowserView: View {
             addToCartRetryCount = 0
         }
 
+        if pendingDoorDashRole == "ub_fill_destination" {
+            if candidates.contains(where: { $0.role == "ub_dropoff_result" }) || candidates.contains(where: { $0.role == "ub_see_prices_cta" }) {
+                pendingDoorDashRole = ""
+                pendingDoorDashLabel = ""
+            } else if addToCartRetryCount < 1,
+                      let destination = route.capsule?.slots["destination"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !destination.isEmpty {
+                addToCartRetryCount += 1
+                autoDriveStatus = "Retrying destination entry..."
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
+                    browser.fillUberRideLocation(destination, isPickup: false, capsule: route.capsule)
+                }
+                return
+            } else {
+                pendingDoorDashRole = ""
+                pendingDoorDashLabel = ""
+                addToCartRetryCount = 0
+            }
+        }
+
         guard signature != lastAutoDriveSignature else {
+            return
+        }
+
+        if state.pageKind == "ub_trip_builder",
+           state.serviceFacts["ub_pickup_missing"] != "true",
+           !candidates.contains(where: { $0.role == "ub_dropoff_result" }),
+           let destination = route.capsule?.slots["destination"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !destination.isEmpty,
+           state.serviceFacts["ub_dropoff_missing"] == "true" {
+            lastAutoDriveSignature = signature
+            pendingDoorDashRole = "ub_fill_destination"
+            pendingDoorDashLabel = destination
+            addToCartRetryCount = 0
+            autoDriveStatus = "Typing destination..."
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                browser.fillUberRideLocation(destination, isPickup: false, capsule: route.capsule)
+            }
             return
         }
 
@@ -3835,6 +4312,8 @@ struct MemlaBrowserView: View {
                 autoDriveStatus = "Waiting for DoorDash menu items..."
             } else if state.pageKind == "ue_storefront" {
                 autoDriveStatus = "Waiting for Uber Eats menu items..."
+            } else if state.pageKind == "ub_trip_builder" {
+                autoDriveStatus = "Waiting for Uber trip fields..."
             }
             return
         }
@@ -3862,6 +4341,44 @@ struct MemlaBrowserView: View {
 
     private func doorDashAutoAction(for state: WebsiteC2AState, candidates: [WebsiteC2ACandidate]) -> MirrorAutoDriveAction? {
         switch state.pageKind {
+        case "ub_trip_builder":
+            let pickupMissing = state.serviceFacts["ub_pickup_missing"] == "true"
+            let dropoffMissing = state.serviceFacts["ub_dropoff_missing"] == "true"
+            if state.serviceFacts["ub_pickup_missing"] == "true" {
+                if let pickupResult = candidates.first(where: { $0.role == "ub_pickup_result" && !$0.blocked }) {
+                    return MirrorAutoDriveAction(
+                        candidate: pickupResult,
+                        allowCaution: true,
+                        status: "Using current pickup location...",
+                        pendingRole: ""
+                    )
+                }
+                if let pickupInput = candidates.first(where: { $0.role == "ub_pickup_input" && !$0.blocked }) {
+                    return MirrorAutoDriveAction(
+                        candidate: pickupInput,
+                        allowCaution: true,
+                        status: "Opening pickup field...",
+                        pendingRole: ""
+                    )
+                }
+            }
+            if let dropoffResult = candidates.first(where: { $0.role == "ub_dropoff_result" && !$0.blocked }) {
+                return MirrorAutoDriveAction(
+                    candidate: dropoffResult,
+                    allowCaution: true,
+                    status: "Choosing destination...",
+                    pendingRole: ""
+                )
+            }
+            if !pickupMissing && !dropoffMissing,
+               let seePrices = candidates.first(where: { $0.role == "ub_see_prices_cta" && !$0.blocked }) {
+                return MirrorAutoDriveAction(
+                    candidate: seePrices,
+                    allowCaution: seePrices.tapSafety == "caution",
+                    status: "Getting ride prices...",
+                    pendingRole: ""
+                )
+            }
         case "ue_entry_gate":
             if let continueBrowser = candidates.first(where: { $0.role == "ue_continue_browser" && !$0.blocked }) {
                 return MirrorAutoDriveAction(

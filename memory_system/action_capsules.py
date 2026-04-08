@@ -175,7 +175,7 @@ def _service_search_url(service: str, query: str) -> str:
     if service.lower() == "uber eats":
         return f"https://www.ubereats.com/search?q={clean_query}" if clean_query else "https://www.ubereats.com/"
     if service.lower() == "uber":
-        return "https://m.uber.com/"
+        return "https://www.uber.com/us/en/start-riding/"
     if clean_query:
         return f"https://www.google.com/search?q={quote(service + ' ' + _clean_text(query), safe='')}"
     return ""
