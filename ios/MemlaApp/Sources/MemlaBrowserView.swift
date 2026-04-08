@@ -1917,38 +1917,50 @@ struct MemlaBrowserView: View {
     private var rawPageSurface: some View {
         VStack(spacing: 0) {
             Divider()
-            if isRawPageVisible {
-                browserToolbar
-                Divider()
-                ZStack(alignment: .bottom) {
-                    MemlaBrowserWebView(browser: browser)
-                        .frame(minHeight: 300, idealHeight: 360, maxHeight: 420)
-                    if hasC2AConsole && !isC2AConsoleClosed {
-                        websiteC2AConsole
+            ZStack(alignment: .top) {
+                VStack(spacing: 0) {
+                    if isRawPageVisible {
+                        browserToolbar
+                        Divider()
                     }
-                }
-            } else {
-                HStack(spacing: 10) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Raw Page Hidden")
-                            .font(.caption.weight(.semibold))
-                        Text("Memla is using the website underneath. Open it only if you need recovery or debugging.")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                    }
-                    Spacer()
-                    Button("Show Raw Page") {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            isRawPageVisible = true
-                            isC2AConsoleClosed = false
+                    ZStack(alignment: .bottom) {
+                        MemlaBrowserWebView(browser: browser)
+                            .frame(
+                                minHeight: isRawPageVisible ? 300 : 1,
+                                idealHeight: isRawPageVisible ? 360 : 1,
+                                maxHeight: isRawPageVisible ? 420 : 1
+                            )
+                            .opacity(isRawPageVisible ? 1 : 0.02)
+                            .allowsHitTesting(isRawPageVisible)
+                            .clipped()
+                        if isRawPageVisible, hasC2AConsole, !isC2AConsoleClosed {
+                            websiteC2AConsole
                         }
                     }
-                    .buttonStyle(.bordered)
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
-                .background(Color(.secondarySystemBackground))
+                if !isRawPageVisible {
+                    HStack(spacing: 10) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Raw Page Hidden")
+                                .font(.caption.weight(.semibold))
+                            Text("Memla is keeping the website mounted underneath so the mirror can keep reading and steering it.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                        Spacer()
+                        Button("Show Raw Page") {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                isRawPageVisible = true
+                                isC2AConsoleClosed = false
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+                    .background(Color(.secondarySystemBackground))
+                }
             }
         }
     }
