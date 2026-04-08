@@ -2437,7 +2437,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             return text
               && !isUberRideNoise(text)
               && /uberx|uberxl|electric|comfort|black|share/i.test(text)
-              && /\$\d/.test(text);
+              && /\\$\\d/.test(text);
           })
           .slice(0, 6);
         uberVehicleOptionCount = vehicleNodes.length;
