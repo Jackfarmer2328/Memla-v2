@@ -453,14 +453,14 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         if layerKind == "item_modal" || (!modalTitle.isEmpty && layerKind != "page") {
             return "dd_item_modal"
         }
-        if hasContinueCTA || hasAddressCTA || tipCount > 0 {
-            return "dd_cart_page"
-        }
         if hasStoreCards || url.contains("/search/store/") {
             return "dd_search_results"
         }
         if url.contains("/store/") {
             return "dd_storefront"
+        }
+        if hasContinueCTA || tipCount > 0 || hasAddressCTA {
+            return "dd_cart_page"
         }
         return classifyPageKind(combined: combined, url: url, inputs: inputs)
     }
