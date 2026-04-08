@@ -16,6 +16,7 @@ struct WebsiteC2ACandidate: Identifiable {
     let label: String
     let url: String
     let kind: String
+    let role: String
     let score: Double
     let matchedTerms: [String]
     let blocked: Bool
@@ -58,6 +59,12 @@ struct WebsiteGuidedStep {
     let detail: String
     let icon: String
     let tone: String
+}
+
+struct WebsiteMirrorFact: Identifiable {
+    let id: String
+    let title: String
+    let value: String
 }
 
 final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate {
@@ -270,10 +277,10 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         let inputs = stringArray(payload["inputs"])
         let buttons = stringArray(payload["buttons"])
         let links = stringArray(payload["links"])
-        let candidates = candidateArray(payload["candidates"], capsule: capsule)
         let combined = ([title, url, textSnippet] + headings + inputs + buttons + links).joined(separator: " ").lowercased()
         let normalizedCombined = normalizedText(combined)
         let pageKind = classifyPageKind(combined: combined, url: url, inputs: inputs)
+        let candidates = candidateArray(payload["candidates"], capsule: capsule, pageKind: pageKind)
         let safeActions = candidateActions(pageKind: pageKind, inputs: inputs, buttons: buttons, links: links, candidates: candidates)
         let residuals = residualsForPage(pageKind: pageKind, combined: normalizedCombined, textSnippet: textSnippet, capsule: capsule)
         let authState = classifyAuthState(pageKind: pageKind, combined: combined)
@@ -518,7 +525,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         }
     }
 
-    private static func candidateArray(_ value: Any?, capsule: ActionCapsule?) -> [WebsiteC2ACandidate] {
+    private static func candidateArray(_ value: Any?, capsule: ActionCapsule?, pageKind: String) -> [WebsiteC2ACandidate] {
         guard let items = value as? [Any] else {
             return []
         }
@@ -537,16 +544,18 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             }
             let candidateText = [label, url, context].joined(separator: " ")
             let ranking = rankCandidate(candidateText, targets: targets)
+            let role = candidateRole(pageKind: pageKind, kind: kind, url: url, label: label, context: context)
             let blockedText = kind == "button" ? label : candidateText
             let blocked = isIrreversibleCandidate(blockedText)
             let tapPolicy = buttonTapPolicy(kind: kind, url: url, label: label, context: context, blocked: blocked)
+            let adjustedScore = ranking.score + roleScoreAdjustment(role: role)
             let reason: String
             if blocked {
                 reason = "Final or irreversible action nearby"
             } else if ranking.matchedTerms.isEmpty {
-                reason = "Visible candidate with no capsule slot match yet"
+                reason = roleReason(role: role)
             } else {
-                reason = "Matched \(ranking.matchedTerms.joined(separator: ", "))"
+                reason = "Matched \(ranking.matchedTerms.joined(separator: ", ")) via \(role.replacingOccurrences(of: "_", with: " "))"
             }
             return WebsiteC2ACandidate(
                 id: "\(kind)-\(index)-\(url)-\(label)",
@@ -554,7 +563,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
                 label: label.isEmpty ? url : label,
                 url: url,
                 kind: kind.isEmpty ? "candidate" : kind,
-                score: ranking.score,
+                role: role,
+                score: adjustedScore,
                 matchedTerms: ranking.matchedTerms,
                 blocked: blocked,
                 tapSafety: tapPolicy.safety,
@@ -571,6 +581,92 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             }
             return left.score > right.score
         }.prefix(12))
+    }
+
+    private static func candidateRole(pageKind: String, kind: String, url: String, label: String, context: String) -> String {
+        let text = normalizedText([label, context, url].joined(separator: " "))
+        let labelText = normalizedText(label)
+        if text.contains("skip to main content") || text.contains("accessibility") {
+            return "accessibility_link"
+        }
+        if text.contains("review") || text.contains("rating") || text.contains("ratings") {
+            return "review_link"
+        }
+        if text.contains("privacy") || text.contains("terms") || text.contains("careers") || text.contains("gift cards") || text.contains("about") || text.contains("help") || text.contains("support") {
+            return "utility_link"
+        }
+        if text.contains("login") || text.contains("sign in") || text.contains("log in") || text.contains("account") {
+            return "auth_link"
+        }
+        if text.contains("checkout") || text.contains("place order") || text.contains("pay now") || text.contains("complete order") {
+            return kind == "button" ? "checkout_button" : "checkout_link"
+        }
+        if text.contains("cart") || text.contains("bag") {
+            return kind == "button" ? "cart_button" : "cart_link"
+        }
+        if pageKind == "menu_or_item" {
+            if ["add", "customize", "choose", "select", "continue", "modifier", "topping"].contains(where: { labelText.contains($0) || text.contains($0) }) {
+                return kind == "button" ? "item_action_button" : "menu_item"
+            }
+            if kind == "link" {
+                return "menu_item"
+            }
+        }
+        if pageKind == "search_results" || pageKind == "web_page" {
+            if kind == "link" {
+                return "store_link"
+            }
+        }
+        if kind == "button" {
+            return "control_button"
+        }
+        return "generic_candidate"
+    }
+
+    private static func roleScoreAdjustment(role: String) -> Double {
+        switch role {
+        case "store_link":
+            return 2.2
+        case "menu_item":
+            return 1.8
+        case "item_action_button":
+            return 1.2
+        case "cart_link", "cart_button":
+            return 1.0
+        case "control_button":
+            return 0.5
+        case "review_link":
+            return -6.0
+        case "accessibility_link":
+            return -8.0
+        case "utility_link", "auth_link":
+            return -4.0
+        case "checkout_link", "checkout_button":
+            return -1.0
+        default:
+            return 0.0
+        }
+    }
+
+    private static func roleReason(role: String) -> String {
+        switch role {
+        case "store_link":
+            return "Visible store/result candidate"
+        case "menu_item":
+            return "Visible menu or item candidate"
+        case "item_action_button":
+            return "Visible item funnel control"
+        case "cart_link", "cart_button":
+            return "Visible cart navigation control"
+        case "review_link":
+            return "Review content is usually not task-relevant"
+        case "accessibility_link":
+            return "Accessibility/navigation helper link"
+        case "utility_link", "auth_link":
+            return "Utility or account navigation"
+        default:
+            return "Visible candidate with no capsule slot match yet"
+        }
     }
 
     private static func candidateTargets(from capsule: ActionCapsule?) -> [(term: String, weight: Double)] {
@@ -1143,7 +1239,7 @@ struct MemlaBrowserView: View {
                 .padding(.top, 2)
 
             HStack(spacing: 8) {
-                Text("Website C2A")
+                Text("Memla's Mirror")
                     .font(.caption.weight(.semibold))
                 Spacer()
                 if !browser.inspectionStatus.isEmpty {
@@ -1173,11 +1269,18 @@ struct MemlaBrowserView: View {
             if let state = browser.websiteState {
                 if isC2AConsoleExpanded {
                     ScrollView {
-                        expandedWebsiteC2AContent(for: state)
+                        VStack(alignment: .leading, spacing: 10) {
+                            mirrorCompactContent(for: state)
+                            Divider()
+                            Text("Raw Website C2A")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            expandedWebsiteC2AContent(for: state)
+                        }
                     }
                     .frame(maxHeight: 360)
                 } else {
-                    compactWebsiteC2AContent(for: state)
+                    mirrorCompactContent(for: state)
                 }
             } else if !browser.inspectionStatus.isEmpty {
                 Text(browser.inspectionStatus)
@@ -1194,24 +1297,53 @@ struct MemlaBrowserView: View {
         .padding(.bottom, 10)
     }
 
-    private func compactWebsiteC2AContent(for state: WebsiteC2AState) -> some View {
+    private func mirrorCompactContent(for state: WebsiteC2AState) -> some View {
+        let step = guidedStep(for: state)
+        let candidates = mirrorCandidates(for: state)
         VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: mirrorIcon(for: state))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(mirrorColor(for: state))
+                    .frame(width: 18)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(mirrorTitle(for: state))
+                        .font(.caption.weight(.semibold))
+                    Text(mirrorSummary(for: state, step: step))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                }
+                Spacer(minLength: 0)
+            }
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
-                    capsuleChip(title: "Page", value: readableRequirement(state.pageKind))
-                    capsuleChip(title: "Auth", value: readableRequirement(state.authState))
-                    capsuleChip(title: "Inputs", value: "\(state.inputs.count)")
-                    capsuleChip(title: "Candidates", value: "\(state.candidates.count)")
-                    if let verification = state.capsuleVerification {
-                        capsuleChip(title: "Matched", value: "\(verification.matched.count)")
-                        capsuleChip(title: "Missing", value: "\(verification.missing.count)")
-                    }
-                    if let best = state.candidates.first(where: { !$0.blocked && !$0.url.isEmpty && $0.score > 0 }) {
-                        capsuleChip(title: "Best", value: best.label)
+                    ForEach(mirrorFacts(for: state)) { fact in
+                        capsuleChip(title: fact.title, value: fact.value)
                     }
                 }
             }
-            guidedStepControls(for: state)
+            if !candidates.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(alignment: .top, spacing: 8) {
+                        ForEach(Array(candidates.prefix(3))) { candidate in
+                            mirrorCandidateCard(candidate)
+                        }
+                    }
+                }
+            }
+            if let verification = state.capsuleVerification, (state.pageKind == "cart" || state.pageKind == "checkout") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Mirror Verification")
+                        .font(.caption.weight(.semibold))
+                    Text(verification.summary)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                }
+                .padding(8)
+                .background(Color.blue.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
         }
     }
 
@@ -1263,6 +1395,119 @@ struct MemlaBrowserView: View {
                         .lineLimit(2)
                 }
         }
+    }
+
+    private func mirrorCandidates(for state: WebsiteC2AState) -> [WebsiteC2ACandidate] {
+        let deprioritizedRoles = Set(["review_link", "accessibility_link", "utility_link", "auth_link"])
+        let preferredRoles = Set(["store_link", "menu_item", "item_action_button", "cart_link", "cart_button", "control_button", "checkout_button"])
+        let visibleCandidates = state.candidates.filter { !deprioritizedRoles.contains($0.role) && !$0.blocked }
+        let preferred = visibleCandidates.filter { candidate in
+            candidate.score > 0 || preferredRoles.contains(candidate.role)
+        }
+        return preferred.isEmpty ? Array(visibleCandidates.prefix(4)) : Array(preferred.prefix(4))
+    }
+
+    private func mirrorFacts(for state: WebsiteC2AState) -> [WebsiteMirrorFact] {
+        var facts: [WebsiteMirrorFact] = [
+            WebsiteMirrorFact(id: "page", title: "Page", value: readableRequirement(state.pageKind)),
+            WebsiteMirrorFact(id: "auth", title: "Auth", value: readableRequirement(state.authState)),
+            WebsiteMirrorFact(id: "actions", title: "Moves", value: "\(state.safeActions.count)")
+        ]
+        if let verification = state.capsuleVerification {
+            facts.append(WebsiteMirrorFact(id: "matched", title: "Matched", value: "\(verification.matched.count)"))
+            if !verification.missing.isEmpty {
+                facts.append(WebsiteMirrorFact(id: "missing", title: "Missing", value: "\(verification.missing.count)"))
+            }
+        }
+        if let best = mirrorCandidates(for: state).first {
+            facts.append(WebsiteMirrorFact(id: "best", title: "Best", value: best.label))
+        }
+        return facts
+    }
+
+    private func mirrorTitle(for state: WebsiteC2AState) -> String {
+        switch state.pageKind {
+        case "login":
+            return "Session needs recovery"
+        case "search_results", "search_form":
+            return "Mirror has a search surface"
+        case "menu_or_item":
+            return "Mirror distilled the item funnel"
+        case "cart":
+            return "Mirror sees a cart checkpoint"
+        case "checkout":
+            return "Mirror reached final review"
+        default:
+            return "Mirror distilled the current page"
+        }
+    }
+
+    private func mirrorSummary(for state: WebsiteC2AState, step: WebsiteGuidedStep) -> String {
+        if let best = mirrorCandidates(for: state).first {
+            return "\(step.detail) Best distilled candidate: \(best.label)."
+        }
+        return step.detail
+    }
+
+    private func mirrorIcon(for state: WebsiteC2AState) -> String {
+        switch state.pageKind {
+        case "login":
+            return "person.badge.key"
+        case "menu_or_item":
+            return "square.grid.2x2"
+        case "cart":
+            return "cart"
+        case "checkout":
+            return "hand.raised.fill"
+        default:
+            return "sparkles.rectangle.stack"
+        }
+    }
+
+    private func mirrorColor(for state: WebsiteC2AState) -> Color {
+        switch state.pageKind {
+        case "login":
+            return .orange
+        case "checkout":
+            return .red
+        case "menu_or_item", "cart":
+            return .green
+        default:
+            return .blue
+        }
+    }
+
+    private func mirrorCandidateCard(_ candidate: WebsiteC2ACandidate) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top) {
+                Text(readableRequirement(candidate.role))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Text(String(format: "%.1f", candidate.score))
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(candidate.score > 0 ? .green : .secondary)
+            }
+            Text(candidate.label)
+                .font(.caption.weight(.semibold))
+                .lineLimit(2)
+            if !candidate.matchedTerms.isEmpty {
+                Text("Matched: \(candidate.matchedTerms.joined(separator: ", "))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            } else {
+                Text(candidate.reason)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            candidateActionButton(candidate)
+        }
+        .frame(width: 205, alignment: .leading)
+        .padding(8)
+        .background(candidate.score > 0 ? Color.green.opacity(0.10) : Color(.tertiarySystemBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private func guidedStepControls(for state: WebsiteC2AState) -> some View {
@@ -1388,7 +1633,7 @@ struct MemlaBrowserView: View {
                         ForEach(Array(state.candidates.prefix(8))) { candidate in
                             VStack(alignment: .leading, spacing: 6) {
                                 HStack {
-                                    Text(candidate.kind.capitalized)
+                                    Text(readableRequirement(candidate.role))
                                         .font(.caption2)
                                         .foregroundStyle(.secondary)
                                     Spacer()
