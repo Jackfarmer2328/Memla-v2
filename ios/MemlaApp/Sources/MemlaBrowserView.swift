@@ -85,6 +85,10 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
 
     private var shouldAutoInspectAfterNavigation = false
     private var autoInspectCapsule: ActionCapsule?
+    private var observationCapsule: ActionCapsule?
+    private var pageObservationTimer: Timer?
+    private var lastObservedFingerprint: String = ""
+    private var isAutoInspectQueued = false
 
     override init() {
         let configuration = WKWebViewConfiguration()
@@ -94,11 +98,34 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         self.webView.navigationDelegate = self
     }
 
+    deinit {
+        pageObservationTimer?.invalidate()
+    }
+
     func load(_ url: URL) {
         if webView.url == nil {
             webView.load(URLRequest(url: url))
         }
         syncState()
+    }
+
+    func startGrounding(capsule: ActionCapsule?) {
+        observationCapsule = capsule
+        guard pageObservationTimer == nil else {
+            return
+        }
+        let timer = Timer(timeInterval: 1.35, repeats: true) { [weak self] _ in
+            self?.pollForPageChange()
+        }
+        pageObservationTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    func stopGrounding() {
+        pageObservationTimer?.invalidate()
+        pageObservationTimer = nil
+        lastObservedFingerprint = ""
+        isAutoInspectQueued = false
     }
 
     func navigate(to url: URL, autoInspect: Bool = false, capsule: ActionCapsule? = nil) {
@@ -108,6 +135,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         buttonActionStatus = ""
         shouldAutoInspectAfterNavigation = autoInspect
         autoInspectCapsule = capsule
+        observationCapsule = capsule
+        lastObservedFingerprint = ""
         webView.load(URLRequest(url: url))
         syncState()
     }
@@ -132,6 +161,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
     }
 
     func inspectPage(capsule: ActionCapsule?) {
+        observationCapsule = capsule
         isInspecting = true
         inspectionStatus = "Inspecting page..."
         syncState()
@@ -228,6 +258,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         inspectionStatus = ""
         searchActionStatus = ""
         buttonActionStatus = ""
+        lastObservedFingerprint = ""
         syncState()
     }
 
@@ -267,6 +298,48 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         isLoading = webView.isLoading
         canGoBack = webView.canGoBack
         canGoForward = webView.canGoForward
+    }
+
+    private func pollForPageChange() {
+        guard !isInspecting, !isLoading, webView.url != nil else {
+            return
+        }
+        webView.evaluateJavaScript(Self.pageGroundingProbeScript) { [weak self] result, error in
+            DispatchQueue.main.async {
+                guard let self = self, error == nil, let payload = result as? [String: Any] else {
+                    return
+                }
+                let fingerprint = Self.stringValue(payload["fingerprint"])
+                guard !fingerprint.isEmpty else {
+                    return
+                }
+                if self.lastObservedFingerprint.isEmpty {
+                    self.lastObservedFingerprint = fingerprint
+                    return
+                }
+                guard fingerprint != self.lastObservedFingerprint else {
+                    return
+                }
+                self.lastObservedFingerprint = fingerprint
+                self.queueAutoInspect(reason: "Mirror detected a page change...")
+            }
+        }
+    }
+
+    private func queueAutoInspect(reason: String) {
+        guard !isAutoInspectQueued, !isInspecting else {
+            return
+        }
+        isAutoInspectQueued = true
+        inspectionStatus = reason
+        let capsule = observationCapsule
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
+            guard let self = self else {
+                return
+            }
+            self.isAutoInspectQueued = false
+            self.inspectPage(capsule: capsule)
+        }
     }
 
     private static func buildWebsiteState(payload: [String: Any], capsule: ActionCapsule?) -> WebsiteC2AState {
@@ -549,6 +622,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             let blocked = isIrreversibleCandidate(blockedText)
             let tapPolicy = buttonTapPolicy(kind: kind, url: url, label: label, context: context, blocked: blocked)
             let adjustedScore = ranking.score + roleScoreAdjustment(role: role)
+            let resolvedLabel = displayLabel(label: label, url: url, context: context, role: role)
             let reason: String
             if blocked {
                 reason = "Final or irreversible action nearby"
@@ -560,7 +634,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             return WebsiteC2ACandidate(
                 id: "\(kind)-\(index)-\(url)-\(label)",
                 domIndex: domIndex,
-                label: label.isEmpty ? url : label,
+                label: resolvedLabel,
                 url: url,
                 kind: kind.isEmpty ? "candidate" : kind,
                 role: role,
@@ -583,11 +657,40 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         }.prefix(12))
     }
 
+    private static func displayLabel(label: String, url: String, context: String, role: String) -> String {
+        let cleanLabel = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        let looksLikeURL = cleanLabel.hasPrefix("http") || cleanLabel.contains("/store/")
+        guard cleanLabel.isEmpty || looksLikeURL else {
+            return cleanLabel
+        }
+        let contextTokens = context
+            .components(separatedBy: CharacterSet(charactersIn: "|•"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        if let useful = contextTokens.first(where: { token in
+            let lower = token.lowercased()
+            return !lower.contains("delivery fee")
+                && !lower.contains("dashpass")
+                && !lower.contains("minutes")
+                && !lower.contains("reviews")
+                && !lower.contains("pickup")
+        }) {
+            let words = useful.split(separator: " ")
+            if !words.isEmpty {
+                return words.prefix(role == "store_link" ? 4 : 6).joined(separator: " ")
+            }
+        }
+        return cleanLabel.isEmpty ? url : cleanLabel
+    }
+
     private static func candidateRole(pageKind: String, kind: String, url: String, label: String, context: String) -> String {
         let text = normalizedText([label, context, url].joined(separator: " "))
         let labelText = normalizedText(label)
         if text.contains("skip to main content") || text.contains("accessibility") {
             return "accessibility_link"
+        }
+        if text.contains("become a dasher") || text.contains("merchant") || text.contains("doordash merchant") || text.contains("gift cards") {
+            return "utility_link"
         }
         if text.contains("review") || text.contains("rating") || text.contains("ratings") {
             return "review_link"
@@ -604,8 +707,17 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         if text.contains("cart") || text.contains("bag") {
             return kind == "button" ? "cart_button" : "cart_link"
         }
+        if pageKind == "menu_or_item" && kind == "link" && (url.contains("#") || text.contains("menu") || text.contains("featured items") || text.contains("specialty pizza") || text.contains("build your own")) && !context.contains("$") {
+            return "nav_link"
+        }
+        if kind == "link" && url.contains("/store/") {
+            return "store_link"
+        }
         if pageKind == "menu_or_item" {
-            if ["add", "customize", "choose", "select", "continue", "modifier", "topping"].contains(where: { labelText.contains($0) || text.contains($0) }) {
+            if kind == "button" && ["add", "customize", "choose", "select", "continue", "modifier", "topping", "size", "crust"].contains(where: { labelText.contains($0) || text.contains($0) }) {
+                return kind == "button" ? "item_action_button" : "menu_item"
+            }
+            if (label.contains("$") || context.contains("$")) && !text.contains("review") {
                 return kind == "button" ? "item_action_button" : "menu_item"
             }
             if kind == "link" {
@@ -637,6 +749,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             return 0.5
         case "review_link":
             return -6.0
+        case "nav_link":
+            return -3.5
         case "accessibility_link":
             return -8.0
         case "utility_link", "auth_link":
@@ -658,6 +772,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             return "Visible item funnel control"
         case "cart_link", "cart_button":
             return "Visible cart navigation control"
+        case "nav_link":
+            return "Category/navigation link inside the page"
         case "review_link":
             return "Review content is usually not task-relevant"
         case "accessibility_link":
@@ -712,25 +828,83 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
 
     private static func rankCandidate(_ candidateText: String, targets: [(term: String, weight: Double)]) -> (score: Double, matchedTerms: [String]) {
         let text = normalizedText(candidateText)
+        let textTokens = Set(text.split(separator: " ").map(String.init))
         var score = 0.0
         var matches: [String] = []
         for target in targets {
-            let term = target.term
-            guard !term.isEmpty else {
-                continue
-            }
-            if text.contains(term) {
+            let variants = targetVariants(for: target.term)
+            guard !variants.isEmpty else { continue }
+            if variants.contains(where: { text.contains($0) }) {
                 score += target.weight
-                matches.append(term)
+                matches.append(target.term)
                 continue
             }
-            let tokens = term.split(separator: " ").map(String.init).filter { $0.count > 2 }
-            if !tokens.isEmpty && tokens.allSatisfy({ text.contains($0) }) {
-                score += target.weight * 0.55
-                matches.append(term)
+            let targetTokens = variants
+                .flatMap { $0.split(separator: " ").map(String.init) }
+                .filter { $0.count > 2 }
+            guard !targetTokens.isEmpty else { continue }
+            let exactTokenMatch = Set(targetTokens).allSatisfy { token in
+                textTokens.contains(token)
+            }
+            if exactTokenMatch {
+                score += target.weight * 0.60
+                matches.append(target.term)
+                continue
+            }
+            let fuzzyTokenMatch = Set(targetTokens).allSatisfy { token in
+                textTokens.contains(where: { candidateToken in
+                    fuzzyTokenEqual(token, candidateToken)
+                })
+            }
+            if fuzzyTokenMatch {
+                score += target.weight * 0.45
+                matches.append(target.term)
             }
         }
         return (score: score, matchedTerms: Array(dictUnique(matches)))
+    }
+
+    private static func targetVariants(for term: String) -> [String] {
+        guard !term.isEmpty else {
+            return []
+        }
+        var variants = [term]
+        let words = term.split(separator: " ").map(String.init)
+        if !words.isEmpty {
+            let strippedWords = words.map { stripTokenNoise($0) }.filter { !$0.isEmpty }
+            if !strippedWords.isEmpty {
+                variants.append(strippedWords.joined(separator: " "))
+            }
+        }
+        return Array(dictUnique(variants.map { normalizedText($0) }.filter { !$0.isEmpty }))
+    }
+
+    private static func stripTokenNoise(_ token: String) -> String {
+        var clean = token
+        if clean.hasSuffix("oes") && clean.count > 5 {
+            clean = String(clean.dropLast(2))
+        }
+        if clean.hasSuffix("s") && clean.count > 4 {
+            clean.removeLast()
+        }
+        return clean
+    }
+
+    private static func fuzzyTokenEqual(_ left: String, _ right: String) -> Bool {
+        if left == right {
+            return true
+        }
+        let normalizedLeft = stripTokenNoise(left)
+        let normalizedRight = stripTokenNoise(right)
+        if normalizedLeft == normalizedRight {
+            return true
+        }
+        let shorter = normalizedLeft.count <= normalizedRight.count ? normalizedLeft : normalizedRight
+        let longer = normalizedLeft.count <= normalizedRight.count ? normalizedRight : normalizedLeft
+        if shorter.count >= 5 && longer.hasPrefix(shorter) && (longer.count - shorter.count) <= 2 {
+            return true
+        }
+        return false
     }
 
     private static func isIrreversibleCandidate(_ candidateText: String) -> Bool {
@@ -1054,6 +1228,30 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
       };
     })();
     """
+
+    private static let pageGroundingProbeScript = """
+    (() => {
+      const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+      const visible = (el) => {
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 1 && rect.height > 1;
+      };
+      const visibleControls = Array.from(document.querySelectorAll('h1,h2,h3,button,a[href],[role="dialog"],[aria-modal="true"]'))
+        .filter(visible)
+        .slice(0, 14)
+        .map((el) => clean(el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title')))
+        .filter(Boolean)
+        .join(' | ')
+        .slice(0, 320);
+      const bodyText = clean(document.body ? document.body.innerText : '').slice(0, 320);
+      return {
+        fingerprint: [location.href, document.title || '', visibleControls, bodyText].join(' || ')
+      };
+    })();
+    """
 }
 
 struct MemlaBrowserWebView: UIViewRepresentable {
@@ -1110,9 +1308,13 @@ struct MemlaBrowserView: View {
                 }
             }
             .onAppear {
+                browser.startGrounding(capsule: route.capsule)
                 if browser.currentURL.isEmpty {
                     browser.navigate(to: route.url, autoInspect: true, capsule: route.capsule)
                 }
+            }
+            .onDisappear {
+                browser.stopGrounding()
             }
         }
     }
@@ -1539,7 +1741,7 @@ struct MemlaBrowserView: View {
     }
 
     private func mirrorCandidates(for state: WebsiteC2AState) -> [WebsiteC2ACandidate] {
-        let deprioritizedRoles = Set(["review_link", "accessibility_link", "utility_link", "auth_link"])
+        let deprioritizedRoles = Set(["review_link", "accessibility_link", "utility_link", "auth_link", "nav_link"])
         let preferredRoles = Set(["store_link", "menu_item", "item_action_button", "cart_link", "cart_button", "control_button", "checkout_button"])
         let visibleCandidates = state.candidates.filter { !deprioritizedRoles.contains($0.role) && !$0.blocked }
         let preferred = visibleCandidates.filter { candidate in
