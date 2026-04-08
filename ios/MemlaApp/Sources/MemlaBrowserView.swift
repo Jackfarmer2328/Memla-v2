@@ -1076,6 +1076,7 @@ struct MemlaBrowserView: View {
     @State private var isCapsuleExpanded = false
     @State private var isC2AConsoleExpanded = false
     @State private var isC2AConsoleClosed = false
+    @State private var isRawPageVisible = false
     @State private var authNotes: [String: String] = [:]
 
     private let commerceChecklist = [
@@ -1092,15 +1093,12 @@ struct MemlaBrowserView: View {
         NavigationStack {
             VStack(spacing: 0) {
                 capsulePanel
-                browserToolbar
-                Divider()
-                ZStack(alignment: .bottom) {
-                    MemlaBrowserWebView(browser: browser)
-                        .ignoresSafeArea(edges: .bottom)
-                    if hasC2AConsole && !isC2AConsoleClosed {
-                        websiteC2AConsole
-                    }
+                if let state = browser.websiteState {
+                    mirrorPrimarySurface(for: state)
+                } else {
+                    mirrorLoadingSurface
                 }
+                rawPageSurface
             }
             .navigationTitle("Memla Browser")
             .navigationBarTitleDisplayMode(.inline)
@@ -1112,13 +1110,84 @@ struct MemlaBrowserView: View {
                 }
             }
             .onAppear {
-                browser.load(route.url)
+                if browser.currentURL.isEmpty {
+                    browser.navigate(to: route.url, autoInspect: true, capsule: route.capsule)
+                }
             }
         }
     }
 
     private var hasC2AConsole: Bool {
         browser.websiteState != nil || !browser.inspectionStatus.isEmpty
+    }
+
+    private var mirrorLoadingSurface: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                mirrorSectionCard(title: "Memla's Mirror", systemImage: "sparkles.rectangle.stack") {
+                    Text(browser.inspectionStatus.isEmpty ? "Memla is loading the page and preparing a distilled task surface." : browser.inspectionStatus)
+                        .font(.subheadline)
+                    Text("The raw website stays underneath as execution substrate, but the goal is for you to mostly interact with Memla's simplified view.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        Button(browser.isInspecting ? "Inspecting..." : "Inspect Page") {
+                            browser.inspectPage(capsule: route.capsule)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(browser.isInspecting || browser.isLoading)
+
+                        Button(isRawPageVisible ? "Hide Raw Page" : "Show Raw Page") {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                isRawPageVisible.toggle()
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+            }
+            .padding(12)
+        }
+        .background(Color(.systemGroupedBackground))
+    }
+
+    private var rawPageSurface: some View {
+        VStack(spacing: 0) {
+            Divider()
+            if isRawPageVisible {
+                browserToolbar
+                Divider()
+                ZStack(alignment: .bottom) {
+                    MemlaBrowserWebView(browser: browser)
+                        .frame(minHeight: 300, idealHeight: 360, maxHeight: 420)
+                    if hasC2AConsole && !isC2AConsoleClosed {
+                        websiteC2AConsole
+                    }
+                }
+            } else {
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Raw Page Hidden")
+                            .font(.caption.weight(.semibold))
+                        Text("Memla is using the website underneath. Open it only if you need recovery or debugging.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                    Spacer()
+                    Button("Show Raw Page") {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            isRawPageVisible = true
+                            isC2AConsoleClosed = false
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .background(Color(.secondarySystemBackground))
+            }
+        }
     }
 
     private var capsulePanel: some View {
@@ -1347,6 +1416,78 @@ struct MemlaBrowserView: View {
         }
     }
 
+    private func mirrorPrimarySurface(for state: WebsiteC2AState) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                mirrorSectionCard(title: "Memla's Mirror", systemImage: mirrorIcon(for: state)) {
+                    mirrorCompactContent(for: state)
+                }
+
+                mirrorSectionCard(title: "Next Move", systemImage: "point.topleft.down.curvedto.point.bottomright.up") {
+                    guidedStepControls(for: state)
+                    HStack(spacing: 8) {
+                        Button(browser.isInspecting ? "Inspecting..." : "Refresh Mirror") {
+                            browser.inspectPage(capsule: route.capsule)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(browser.isInspecting || browser.isLoading)
+
+                        Button(isRawPageVisible ? "Hide Raw Page" : "Show Raw Page") {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                isRawPageVisible.toggle()
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+
+                if state.authState == "login_required" || state.authState == "likely_signed_in" {
+                    mirrorSectionCard(title: "Session", systemImage: "person.badge.key") {
+                        authBridgeControls(for: state)
+                    }
+                }
+
+                if !mirrorItemCandidates(for: state).isEmpty {
+                    mirrorSectionCard(title: mirrorItemSectionTitle(for: state), systemImage: "square.grid.2x2") {
+                        mirrorCandidateScroller(mirrorItemCandidates(for: state))
+                    }
+                }
+
+                if !mirrorControlCandidates(for: state).isEmpty {
+                    mirrorSectionCard(title: "Mirror Controls", systemImage: "slider.horizontal.3") {
+                        mirrorCandidateScroller(mirrorControlCandidates(for: state))
+                    }
+                }
+
+                if let verification = state.capsuleVerification {
+                    mirrorSectionCard(title: state.pageKind == "checkout" ? "Final Review" : "Checkpoint Verification", systemImage: state.pageKind == "checkout" ? "hand.raised.fill" : "checklist") {
+                        capsuleVerificationControls(for: state)
+                        if !verification.missing.isEmpty {
+                            Text("Still missing: \(verification.missing.map { readableRequirement($0) }.joined(separator: ", "))")
+                                .font(.caption2)
+                                .foregroundStyle(.orange)
+                                .lineLimit(3)
+                        }
+                    }
+                }
+
+                if !bridgeSuggestions(for: state).isEmpty {
+                    mirrorSectionCard(title: "Recovery Bridges", systemImage: "arrow.triangle.branch") {
+                        bridgeSuggestionControls(for: state)
+                    }
+                }
+
+                if searchQueryIfAvailable(for: state) != nil {
+                    mirrorSectionCard(title: "Search Primitive", systemImage: "magnifyingglass") {
+                        searchActionControls(for: state)
+                    }
+                }
+            }
+            .padding(12)
+        }
+        .background(Color(.systemGroupedBackground))
+    }
+
     private func expandedWebsiteC2AContent(for state: WebsiteC2AState) -> some View {
         VStack(alignment: .leading, spacing: 8) {
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -1508,6 +1649,52 @@ struct MemlaBrowserView: View {
         .frame(width: 205, alignment: .leading)
         .padding(8)
         .background(candidate.score > 0 ? Color.green.opacity(0.10) : Color(.tertiarySystemBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func mirrorCandidateScroller(_ candidates: [WebsiteC2ACandidate]) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(alignment: .top, spacing: 8) {
+                ForEach(Array(candidates.prefix(6))) { candidate in
+                    mirrorCandidateCard(candidate)
+                }
+            }
+        }
+    }
+
+    private func mirrorItemCandidates(for state: WebsiteC2AState) -> [WebsiteC2ACandidate] {
+        let itemRoles = Set(["store_link", "menu_item"])
+        let filtered = mirrorCandidates(for: state).filter { itemRoles.contains($0.role) }
+        return filtered.isEmpty ? mirrorCandidates(for: state).filter { !$0.url.isEmpty } : filtered
+    }
+
+    private func mirrorControlCandidates(for state: WebsiteC2AState) -> [WebsiteC2ACandidate] {
+        let controlRoles = Set(["item_action_button", "cart_button", "cart_link", "control_button", "checkout_button"])
+        return mirrorCandidates(for: state).filter { controlRoles.contains($0.role) }
+    }
+
+    private func mirrorItemSectionTitle(for state: WebsiteC2AState) -> String {
+        switch state.pageKind {
+        case "search_results", "search_form":
+            return "Relevant Results"
+        case "menu_or_item":
+            return "Relevant Items"
+        case "cart":
+            return "Cart Links"
+        case "checkout":
+            return "Checkout Signals"
+        default:
+            return "Relevant Candidates"
+        }
+    }
+
+    private func mirrorSectionCard<Content: View>(title: String, systemImage: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(title, systemImage: systemImage)
+                .font(.subheadline.weight(.semibold))
+            content()
+        }
+        .padding(12)
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
     private func guidedStepControls(for state: WebsiteC2AState) -> some View {
