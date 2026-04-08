@@ -263,6 +263,35 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         }
     }
 
+    func focusUberRideField(isPickup: Bool, capsule: ActionCapsule?) {
+        isRunningButtonAction = true
+        buttonActionStatus = isPickup ? "Opening pickup field..." : "Opening destination field..."
+        webView.evaluateJavaScript(Self.uberRideFieldFocusScript(isPickup: isPickup)) { [weak self] result, error in
+            DispatchQueue.main.async {
+                guard let self = self else {
+                    return
+                }
+                self.isRunningButtonAction = false
+                if let error = error {
+                    self.buttonActionStatus = error.localizedDescription
+                    return
+                }
+                guard let payload = result as? [String: Any] else {
+                    self.buttonActionStatus = "Field focus returned no page result."
+                    return
+                }
+                let reason = Self.stringValue(payload["reason"]).replacingOccurrences(of: "_", with: " ")
+                let ok = payload["ok"] as? Bool ?? false
+                self.buttonActionStatus = ok ? reason.capitalized : "Field focus blocked: \(reason)"
+                if ok {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
+                        self.inspectPage(capsule: capsule)
+                    }
+                }
+            }
+        }
+    }
+
     func tapButtonCandidate(_ candidate: WebsiteC2ACandidate, allowCaution: Bool = false, capsule: ActionCapsule?) {
         let canTap = candidate.tapSafety == "safe" || (allowCaution && candidate.tapSafety == "caution")
         guard canTap, candidate.kind == "button", candidate.url.isEmpty else {
@@ -1747,6 +1776,43 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           }
           target.dispatchEvent(new Event('change', { bubbles: true }));
           return { ok: true, reason: '\(reason)', query };
+        })();
+        """
+    }
+
+    private static func uberRideFieldFocusScript(isPickup: Bool) -> String {
+        let selector = isPickup
+            ? "input[data-testid=\"dotcom-ui.pickup-destination.input.pickup\"]"
+            : "input[data-testid=\"dotcom-ui.pickup-destination.input.destination.drop0\"]"
+        let wrapperSelector = isPickup
+            ? "div[data-testid=\"dotcom-ui.pickup-destination.placeholder.pickup\"]"
+            : "div[data-testid=\"dotcom-ui.pickup-destination.placeholder.destination.drop0\"]"
+        let reason = isPickup ? "focused_uber_pickup_field" : "focused_uber_destination_field"
+        return """
+        (() => {
+          const target = document.querySelector('\(selector)');
+          const wrapper = document.querySelector('\(wrapperSelector)') || target?.closest('[data-tracking="disabled"]');
+          const activate = (node) => {
+            if (!node) return;
+            try { node.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
+            ['pointerdown', 'mousedown', 'mouseup', 'pointerup', 'click'].forEach((type) => {
+              try {
+                node.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+              } catch (_) {}
+            });
+            if (typeof node.click === 'function') {
+              try { node.click(); } catch (_) {}
+            }
+          };
+          if (!target) {
+            return { ok: false, reason: 'uber_ride_input_not_found' };
+          }
+          activate(wrapper);
+          activate(target);
+          if (typeof target.focus === 'function') {
+            try { target.focus(); } catch (_) {}
+          }
+          return { ok: true, reason: '\(reason)' };
         })();
         """
     }
@@ -4567,6 +4633,14 @@ struct MemlaBrowserView: View {
     }
 
     private func tapCandidate(_ candidate: WebsiteC2ACandidate, allowCaution: Bool = false) {
+        if candidate.role == "ub_pickup_input" {
+            browser.focusUberRideField(isPickup: true, capsule: route.capsule)
+            return
+        }
+        if candidate.role == "ub_dropoff_input" {
+            browser.focusUberRideField(isPickup: false, capsule: route.capsule)
+            return
+        }
         browser.tapButtonCandidate(candidate, allowCaution: allowCaution, capsule: route.capsule)
     }
 
