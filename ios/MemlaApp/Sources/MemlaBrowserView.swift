@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 import UIKit
 import WebKit
+import Combine
 
 struct MemlaBrowserRoute: Identifiable {
     let id = UUID()
@@ -1845,6 +1846,20 @@ struct MemlaBrowserView: View {
     @State private var isC2AConsoleClosed = false
     @State private var isRawPageVisible = false
     @State private var authNotes: [String: String] = [:]
+    @State private var autoDriveEnabled = true
+    @State private var autoDriveStatus = "Memla auto-drive is ready."
+    @State private var lastAutoDriveSignature = ""
+    @State private var pendingDoorDashRole: String = ""
+    @State private var pendingDoorDashLabel: String = ""
+    @State private var addToCartRetryCount = 0
+    @State private var preferCartProgress = false
+
+    private struct MirrorAutoDriveAction {
+        let candidate: WebsiteC2ACandidate
+        let allowCaution: Bool
+        let status: String
+        let pendingRole: String
+    }
 
     private let commerceChecklist = [
         "restaurant_match",
@@ -1877,6 +1892,13 @@ struct MemlaBrowserView: View {
                 }
             }
             .onAppear {
+                autoDriveEnabled = true
+                autoDriveStatus = "Memla auto-drive is ready."
+                lastAutoDriveSignature = ""
+                pendingDoorDashRole = ""
+                pendingDoorDashLabel = ""
+                addToCartRetryCount = 0
+                preferCartProgress = false
                 browser.startGrounding(capsule: route.capsule)
                 if browser.currentURL.isEmpty {
                     browser.navigate(to: route.url, autoInspect: true, capsule: route.capsule)
@@ -1884,6 +1906,9 @@ struct MemlaBrowserView: View {
             }
             .onDisappear {
                 browser.stopGrounding()
+            }
+            .onReceive(browser.$websiteState.compactMap { $0 }) { state in
+                handleAutoDriveUpdate(for: state)
             }
         }
     }
@@ -2164,6 +2189,12 @@ struct MemlaBrowserView: View {
                         .lineLimit(3)
                 }
                 Spacer(minLength: 0)
+            }
+            if state.pageKind.hasPrefix("dd_"), !autoDriveStatus.isEmpty {
+                Label(autoDriveStatus, systemImage: "bolt.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.green)
+                    .lineLimit(2)
             }
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
@@ -3203,6 +3234,171 @@ struct MemlaBrowserView: View {
             add(optionID: "generic_web_search", reason: "Target terms are not visible on this page, so search the open web.")
         }
         return suggestions
+    }
+
+    private func handleAutoDriveUpdate(for state: WebsiteC2AState) {
+        guard autoDriveEnabled, state.pageKind.hasPrefix("dd_") else {
+            return
+        }
+        guard !browser.isLoading, !browser.isInspecting, !browser.isRunningButtonAction else {
+            return
+        }
+
+        let signature = doorDashAutoDriveSignature(for: state)
+        let candidates = mirrorCandidates(for: state)
+
+        if state.pageKind == "dd_payment_sheet" || state.pageKind == "dd_checkout" {
+            pendingDoorDashRole = ""
+            pendingDoorDashLabel = ""
+            addToCartRetryCount = 0
+            autoDriveStatus = "Reached checkout. Waiting for your final confirmation."
+            lastAutoDriveSignature = signature
+            return
+        }
+
+        if state.authState == "login_required" {
+            autoDriveStatus = "Waiting for you to sign in."
+            lastAutoDriveSignature = signature
+            return
+        }
+
+        if pendingDoorDashRole == "dd_add_to_cart" {
+            if state.pageKind == "dd_item_modal",
+               let retryCandidate = candidates.first(where: { $0.role == "dd_add_to_cart" && !$0.blocked }),
+               addToCartRetryCount < 1 {
+                addToCartRetryCount += 1
+                autoDriveStatus = "Retrying Add to cart..."
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+                    performAutoDriveAction(retryCandidate, allowCaution: true)
+                }
+                return
+            }
+            if state.pageKind == "dd_cart_drawer"
+                || state.pageKind == "dd_cart_page"
+                || candidates.contains(where: { $0.role == "dd_continue_cta" || $0.role == "dd_cart_cta" }) {
+                preferCartProgress = true
+            }
+            pendingDoorDashRole = ""
+            pendingDoorDashLabel = ""
+            addToCartRetryCount = 0
+        }
+
+        guard signature != lastAutoDriveSignature else {
+            return
+        }
+
+        guard let action = doorDashAutoAction(for: state, candidates: candidates) else {
+            lastAutoDriveSignature = signature
+            if state.pageKind == "dd_storefront" {
+                autoDriveStatus = "Waiting for DoorDash menu items..."
+            }
+            return
+        }
+
+        lastAutoDriveSignature = signature
+        autoDriveStatus = action.status
+        if action.pendingRole == "dd_add_to_cart" {
+            pendingDoorDashRole = action.pendingRole
+            pendingDoorDashLabel = action.candidate.label
+            addToCartRetryCount = 0
+            preferCartProgress = true
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+            performAutoDriveAction(action.candidate, allowCaution: action.allowCaution)
+        }
+    }
+
+    private func doorDashAutoDriveSignature(for state: WebsiteC2AState) -> String {
+        let candidateSlice = mirrorCandidates(for: state)
+            .prefix(4)
+            .map { "\($0.role):\($0.label)" }
+            .joined(separator: "|")
+        return [state.pageKind, browser.currentURL, candidateSlice].joined(separator: "||")
+    }
+
+    private func doorDashAutoAction(for state: WebsiteC2AState, candidates: [WebsiteC2ACandidate]) -> MirrorAutoDriveAction? {
+        switch state.pageKind {
+        case "dd_search_results":
+            if let store = candidates.first(where: { $0.role == "dd_store_card" && !$0.blocked }) {
+                return MirrorAutoDriveAction(
+                    candidate: store,
+                    allowCaution: false,
+                    status: "Opening \(store.label)...",
+                    pendingRole: ""
+                )
+            }
+        case "dd_storefront":
+            if preferCartProgress,
+               let cart = candidates.first(where: { $0.role == "dd_cart_cta" && !$0.blocked }) {
+                return MirrorAutoDriveAction(
+                    candidate: cart,
+                    allowCaution: cart.tapSafety == "caution",
+                    status: "Opening cart...",
+                    pendingRole: ""
+                )
+            }
+            if let item = candidates.first(where: { $0.role == "dd_item_card" && !$0.blocked }) {
+                return MirrorAutoDriveAction(
+                    candidate: item,
+                    allowCaution: item.tapSafety == "caution",
+                    status: "Opening \(item.label)...",
+                    pendingRole: ""
+                )
+            }
+            if let add = candidates.first(where: { $0.role == "dd_add_to_cart" && !$0.blocked }) {
+                return MirrorAutoDriveAction(
+                    candidate: add,
+                    allowCaution: true,
+                    status: "Adding item to cart...",
+                    pendingRole: "dd_add_to_cart"
+                )
+            }
+        case "dd_item_modal":
+            if let add = candidates.first(where: { $0.role == "dd_add_to_cart" && !$0.blocked }) {
+                return MirrorAutoDriveAction(
+                    candidate: add,
+                    allowCaution: true,
+                    status: "Adding item to cart...",
+                    pendingRole: "dd_add_to_cart"
+                )
+            }
+            if let option = candidates.first(where: { $0.role == "dd_item_card" && !$0.blocked }) {
+                return MirrorAutoDriveAction(
+                    candidate: option,
+                    allowCaution: option.tapSafety == "caution",
+                    status: "Selecting \(option.label)...",
+                    pendingRole: ""
+                )
+            }
+        case "dd_cart_drawer", "dd_cart_page":
+            if let checkout = candidates.first(where: { $0.role == "dd_continue_cta" && !$0.blocked }) {
+                return MirrorAutoDriveAction(
+                    candidate: checkout,
+                    allowCaution: true,
+                    status: "Continuing to checkout...",
+                    pendingRole: ""
+                )
+            }
+            if let cart = candidates.first(where: { $0.role == "dd_cart_cta" && !$0.blocked }) {
+                return MirrorAutoDriveAction(
+                    candidate: cart,
+                    allowCaution: cart.tapSafety == "caution",
+                    status: "Opening cart...",
+                    pendingRole: ""
+                )
+            }
+        default:
+            break
+        }
+        return nil
+    }
+
+    private func performAutoDriveAction(_ candidate: WebsiteC2ACandidate, allowCaution: Bool) {
+        if !candidate.url.isEmpty {
+            openCandidate(candidate)
+        } else {
+            tapCandidate(candidate, allowCaution: allowCaution)
+        }
     }
 
     private func openCandidate(_ candidate: WebsiteC2ACandidate) {
