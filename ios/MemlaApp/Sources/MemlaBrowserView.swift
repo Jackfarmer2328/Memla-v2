@@ -1300,7 +1300,7 @@ struct MemlaBrowserView: View {
     private func mirrorCompactContent(for state: WebsiteC2AState) -> some View {
         let step = guidedStep(for: state)
         let candidates = mirrorCandidates(for: state)
-        VStack(alignment: .leading, spacing: 8) {
+        return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: mirrorIcon(for: state))
                     .font(.caption.weight(.semibold))
