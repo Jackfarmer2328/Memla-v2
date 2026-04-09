@@ -1794,11 +1794,18 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           const target = document.querySelector('\(selector)');
           const wrapper = document.querySelector('\(wrapperSelector)') || target?.closest('[data-tracking="disabled"]');
           const locationButton = \(isPickup ? "document.querySelector('\(locationButtonSelector)')" : "null");
+          const explicitRow = target?.closest('[data-testid="pudo-select-v2"]');
           const findInteractiveRow = (node) => {
             let current = node;
             while (current && current !== document.body) {
               try {
-                if (current.querySelector('\(selector)') && (current.querySelector('[data-testid=\"clear-button\"]') || current.getAttribute('data-tracking') === 'disabled')) {
+                const rect = typeof current.getBoundingClientRect === 'function'
+                  ? current.getBoundingClientRect()
+                  : { width: 0, height: 0 };
+                if (current.getAttribute('data-testid') === 'pudo-select-v2') {
+                  return current;
+                }
+                if (current.querySelector('\(selector)') && rect.width > 200 && rect.height >= 40) {
                   return current;
                 }
               } catch (_) {}
@@ -1806,7 +1813,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             }
             return null;
           };
-          const row = findInteractiveRow(target) || wrapper?.parentElement || wrapper;
+          const row = explicitRow || findInteractiveRow(target) || wrapper?.closest('[data-testid="pudo-select-v2"]') || wrapper?.parentElement || wrapper;
           const activate = (node) => {
             if (!node) return;
             try { node.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
@@ -1869,14 +1876,14 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             return { ok: false, reason: 'uber_ride_input_not_found' };
           }
           activate(row);
-          if (\(isPickup ? "true" : "false") && !String(target.value || '').trim() && locationButton) {
-            activate(locationButton);
-            return { ok: true, reason: 'activated_uber_pickup_location' };
-          }
           activate(wrapper);
           activate(target);
           if (typeof target.focus === 'function') {
             try { target.focus(); } catch (_) {}
+          }
+          if (\(isPickup ? "true" : "false") && !String(target.value || '').trim() && locationButton && target.getAttribute('aria-expanded') !== 'true') {
+            activate(locationButton);
+            return { ok: true, reason: 'activated_uber_pickup_location' };
           }
           return { ok: true, reason: '\(reason)' };
         })();
@@ -3294,12 +3301,12 @@ struct MemlaBrowserView: View {
         switch pageKind {
         case "ub_trip_builder":
             switch role {
-            case "ub_pickup_current_location":
-                return 104
             case "ub_pickup_result":
                 return 100
             case "ub_pickup_input":
-                return 92
+                return 96
+            case "ub_pickup_current_location":
+                return 90
             case "ub_dropoff_result":
                 return 88
             case "ub_dropoff_input":
@@ -4500,14 +4507,6 @@ struct MemlaBrowserView: View {
             let pickupMissing = state.serviceFacts["ub_pickup_missing"] == "true"
             let dropoffMissing = state.serviceFacts["ub_dropoff_missing"] == "true"
             if state.serviceFacts["ub_pickup_missing"] == "true" {
-                if let pickupLocation = candidates.first(where: { $0.role == "ub_pickup_current_location" && !$0.blocked }) {
-                    return MirrorAutoDriveAction(
-                        candidate: pickupLocation,
-                        allowCaution: true,
-                        status: "Using current location...",
-                        pendingRole: ""
-                    )
-                }
                 if let pickupResult = candidates.first(where: { $0.role == "ub_pickup_result" && !$0.blocked }) {
                     return MirrorAutoDriveAction(
                         candidate: pickupResult,
@@ -4521,6 +4520,14 @@ struct MemlaBrowserView: View {
                         candidate: pickupInput,
                         allowCaution: true,
                         status: "Opening pickup field...",
+                        pendingRole: ""
+                    )
+                }
+                if let pickupLocation = candidates.first(where: { $0.role == "ub_pickup_current_location" && !$0.blocked }) {
+                    return MirrorAutoDriveAction(
+                        candidate: pickupLocation,
+                        allowCaution: true,
+                        status: "Using current location...",
                         pendingRole: ""
                     )
                 }
