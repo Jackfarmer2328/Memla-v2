@@ -7844,6 +7844,146 @@ def _judge_web_answer_with_teacher(
     return judged
 
 
+def _rescue_web_answer_with_teacher(
+    *,
+    client: UniversalLLMClient,
+    model: str,
+    prompt: str,
+    query: str,
+    slice_kind: str,
+    current_answer: str,
+    source_title: str,
+    source_url: str,
+    source_count: int,
+    result_cards: list[dict[str, Any]],
+    evidence_items: list[dict[str, Any]],
+    coaching: str = "",
+) -> dict[str, Any]:
+    card_lines: list[str] = []
+    for index, card in enumerate(list(result_cards or [])[:3], start=1):
+        title = str(card.get("title") or "").strip()
+        summary = str(card.get("summary") or "").strip()
+        url = str(card.get("url") or "").strip()
+        card_lines.append(f"{index}. {title} | {summary} | {url}")
+    evidence_lines: list[str] = []
+    for index, item in enumerate(list(evidence_items or [])[:3], start=1):
+        title = str(item.get("title") or "").strip()
+        summary = str(item.get("summary") or "").strip()
+        preview = str(item.get("content_preview") or "").strip()
+        url = str(item.get("url") or "").strip()
+        evidence_lines.append(
+            "\n".join(
+                part
+                for part in [
+                    f"{index}. {title} | {url}",
+                    f"summary: {summary}" if summary else "",
+                    f"preview: {preview}" if preview else "",
+                ]
+                if part
+            )
+        )
+    response = client.chat(
+        model=model,
+        temperature=0.0,
+        messages=[
+            ChatMessage(
+                role="system",
+                content=(
+                    "You are Memla's web-answer teacher. "
+                    "Improve weak consumer-facing answers using only the supplied evidence. "
+                    "Answer like a smart, calm friend. "
+                    "Give the direct answer first. "
+                    "For news, give 1-3 short concrete highlights. "
+                    "For weather, include actual conditions or temperature if present. "
+                    "For factual questions, state the fact plainly in the first sentence. "
+                    "Do not talk about SEO, web pages, or what an article covers. "
+                    "If evidence is weak, say that plainly. "
+                    "Return JSON only with keys answer, why_better, promotion_notes. "
+                    "promotion_notes must be a JSON array of short strings."
+                ),
+            ),
+            ChatMessage(
+                role="user",
+                content=(
+                    f"Prompt: {prompt}\n"
+                    f"Resolved query: {query}\n"
+                    f"Slice: {slice_kind}\n"
+                    f"Current Memla answer: {current_answer}\n"
+                    f"Current best source title: {source_title}\n"
+                    f"Current best source url: {source_url}\n"
+                    f"Current source count: {source_count}\n"
+                    f"Teacher coaching so far: {coaching}\n"
+                    "Top result cards:\n"
+                    + ("\n".join(card_lines) if card_lines else "(none)")
+                    + "\n\nEvidence:\n"
+                    + ("\n\n".join(evidence_lines) if evidence_lines else "(none)")
+                ),
+            ),
+        ],
+    )
+    payload = _extract_first_json_object(response)
+    answer = " ".join(str(payload.get("answer") or "").split()).strip()
+    why_better = str(payload.get("why_better") or "").strip()
+    promotion_notes_raw = payload.get("promotion_notes") or []
+    promotion_notes = [
+        str(item).strip()
+        for item in (promotion_notes_raw if isinstance(promotion_notes_raw, list) else [promotion_notes_raw])
+        if str(item).strip()
+    ]
+    return {
+        "answer": answer,
+        "why_better": why_better,
+        "promotion_notes": promotion_notes,
+        "raw_response": response,
+    }
+
+
+def _web_teacher_overall(judgement: dict[str, Any]) -> int:
+    try:
+        return int(dict(judgement or {}).get("overall") or 0)
+    except Exception:
+        return 0
+
+
+def _should_rescue_web_answer(
+    *,
+    answer: str,
+    slice_kind: str,
+    baseline_judgement: dict[str, Any],
+    rescue_threshold: int,
+) -> bool:
+    if not str(answer or "").strip():
+        return True
+    overall = _web_teacher_overall(baseline_judgement)
+    if overall and overall < max(int(rescue_threshold), 1):
+        return True
+    return _web_answer_needs_model_rescue(slice_kind, answer)
+
+
+def _build_web_teacher_trace_row(row: dict[str, Any]) -> dict[str, Any]:
+    baseline_judgement = dict(row.get("baseline_judgement") or {})
+    rescued_judgement = dict(row.get("rescued_judgement") or {})
+    return {
+        "case_id": str(row.get("case_id") or "").strip(),
+        "prompt": str(row.get("prompt") or "").strip(),
+        "query": str(row.get("query") or "").strip(),
+        "slice": str(row.get("answer_slice") or "").strip(),
+        "baseline_answer": str(row.get("baseline_answer") or "").strip(),
+        "baseline_overall": _web_teacher_overall(baseline_judgement),
+        "rescued_answer": str(row.get("rescued_answer") or "").strip(),
+        "rescued_overall": _web_teacher_overall(rescued_judgement),
+        "promoted_answer": str(row.get("promoted_answer") or "").strip(),
+        "promoted_lane": str(row.get("promoted_lane") or "").strip(),
+        "improvement_delta": float(row.get("improvement_delta") or 0.0),
+        "teacher_coaching": str(baseline_judgement.get("coaching") or "").strip(),
+        "rescue_why_better": str(row.get("rescue_why_better") or "").strip(),
+        "promotion_notes": [str(item).strip() for item in list(row.get("promotion_notes") or []) if str(item).strip()],
+        "source_title": str(row.get("baseline_source_title") or "").strip(),
+        "source_url": str(row.get("baseline_source_url") or "").strip(),
+        "source_count": int(row.get("baseline_source_count") or 0),
+    }
+
+
 def run_web_answer_benchmark(
     *,
     cases_path: str,
@@ -8008,9 +8148,9 @@ def run_web_answer_benchmark(
         "case_ids": [case.case_id for case in cases],
         "limit": limit,
         "memla_model": memla_model,
-        "memla_provider": "" if memla_client is None else memla_client.provider,
+        "memla_provider": "" if memla_client is None else str(getattr(memla_client, "provider", "") or ""),
         "judge_model": judge_model,
-        "judge_provider": "" if judge_client is None else judge_client.provider,
+        "judge_provider": "" if judge_client is None else str(getattr(judge_client, "provider", "") or ""),
         "cases": len(rows),
         "cases_requested": len(cases),
         "failed_case_count": len(failed_cases),
@@ -8025,6 +8165,294 @@ def run_web_answer_benchmark(
         "model_answer_count": model_answer_count,
         "judged_count": judged_count,
         "rows": rows,
+        "failed_cases": failed_cases,
+    }
+
+
+def run_web_teacher_loop(
+    *,
+    cases_path: str,
+    memla_model: str,
+    memla_provider: str = "",
+    memla_base_url: str = "",
+    teacher_model: str = "",
+    teacher_provider: str = "",
+    teacher_base_url: str = "",
+    judge_model: str = "",
+    judge_provider: str = "",
+    judge_base_url: str = "",
+    temperature: float = 0.1,
+    case_ids: list[str] | None = None,
+    limit: int | None = None,
+    heuristic_only: bool = False,
+    rescue_threshold: int = 4,
+) -> dict[str, Any]:
+    cases = load_terminal_benchmark_cases(cases_path)
+    selected_ids = {str(item).strip() for item in list(case_ids or []) if str(item).strip()}
+    if selected_ids:
+        cases = [case for case in cases if case.case_id in selected_ids]
+    if limit is not None:
+        cases = cases[: max(int(limit), 0)]
+
+    memla_client = None if heuristic_only else build_llm_client(provider=memla_provider or None, base_url=memla_base_url or None)
+    teacher_client = build_llm_client(
+        provider=teacher_provider or memla_provider or None,
+        base_url=teacher_base_url or None,
+    ) if teacher_model else None
+    resolved_judge_model = judge_model or teacher_model
+    judge_client = build_llm_client(
+        provider=judge_provider or teacher_provider or memla_provider or None,
+        base_url=judge_base_url or teacher_base_url or None,
+    ) if resolved_judge_model else None
+
+    rows: list[dict[str, Any]] = []
+    trace_rows: list[dict[str, Any]] = []
+    failed_cases: list[dict[str, Any]] = []
+    memla_model_calls = 0
+    memla_heuristic_hits = 0
+    judged_count = 0
+    rescued_count = 0
+    improved_count = 0
+    promoted_rescue_count = 0
+
+    for case in cases:
+        try:
+            plan_started = time.perf_counter()
+            memla_plan = build_terminal_plan(
+                prompt=case.prompt,
+                model=memla_model,
+                client=memla_client,
+                heuristic_only=heuristic_only,
+                temperature=temperature,
+            )
+            plan_latency_ms = round((time.perf_counter() - plan_started) * 1000.0, 2)
+        except Exception as exc:
+            failed_cases.append({"case_id": case.case_id, "error_type": type(exc).__name__, "message": str(exc)})
+            continue
+
+        if memla_plan.source == "model":
+            memla_model_calls += 1
+        if memla_plan.source == "heuristic":
+            memla_heuristic_hits += 1
+
+        web_action = next((action for action in memla_plan.actions if action.kind == "browser_answer_query"), None)
+        if web_action is None:
+            rows.append(
+                {
+                    "case_id": case.case_id,
+                    "prompt": case.prompt,
+                    "plan_source": memla_plan.source,
+                    "plan_actions": [_action_signature(action) for action in memla_plan.actions],
+                    "plan_latency_ms": plan_latency_ms,
+                    "answered": False,
+                    "query": "",
+                    "baseline_answer": "",
+                    "rescued_answer": "",
+                    "promoted_answer": "",
+                    "promoted_lane": "",
+                    "improvement_delta": 0.0,
+                    "baseline_judgement": {},
+                    "rescued_judgement": {},
+                    "promotion_notes": [],
+                }
+            )
+            continue
+
+        note_payload = _decode_action_note(web_action.note)
+        goal = str(note_payload.get("goal") or case.prompt).strip()
+        query = str(note_payload.get("query") or web_action.resolved_target or web_action.target or case.prompt).strip()
+        try:
+            answer_started = time.perf_counter()
+            answer_payload = _resolve_web_answer(
+                prompt=goal or case.prompt,
+                query=query,
+                client=memla_client,
+                model=memla_model,
+            )
+            baseline_answer_latency_ms = round((time.perf_counter() - answer_started) * 1000.0, 2)
+        except Exception as exc:
+            failed_cases.append({"case_id": case.case_id, "error_type": type(exc).__name__, "message": str(exc)})
+            continue
+
+        baseline_answer = str(answer_payload.get("answer") or "").strip()
+        baseline_raw_answer = str(answer_payload.get("raw_answer") or baseline_answer).strip()
+        best_card = dict(answer_payload.get("best_card") or {})
+        best_details = dict(answer_payload.get("best_details") or {})
+        cards = [dict(item) for item in list(answer_payload.get("cards") or []) if isinstance(item, dict)]
+        evidence_items = [dict(item) for item in list(answer_payload.get("evidence_items") or []) if isinstance(item, dict)]
+        answer_style = dict(answer_payload.get("answer_style") or {})
+        source_title = str(best_details.get("title") or best_card.get("title") or "").strip()
+        source_url = str(best_details.get("url") or best_card.get("url") or "").strip()
+        source_count = int(answer_payload.get("source_count") or len(cards) or 0)
+        slice_kind = str(answer_style.get("slice") or _web_question_slice(goal or case.prompt, query)).strip()
+
+        baseline_judgement: dict[str, Any] = {}
+        if judge_client is not None and baseline_answer:
+            try:
+                baseline_judgement = _judge_web_answer_with_teacher(
+                    client=judge_client,
+                    model=resolved_judge_model,
+                    prompt=case.prompt,
+                    query=query,
+                    answer=baseline_answer,
+                    source_title=source_title,
+                    source_url=source_url,
+                    source_count=source_count,
+                    result_cards=cards,
+                )
+                judged_count += 1
+            except Exception as exc:
+                baseline_judgement = {"error_type": type(exc).__name__, "message": str(exc)}
+
+        needs_rescue = teacher_client is not None and _should_rescue_web_answer(
+            answer=baseline_raw_answer,
+            slice_kind=slice_kind,
+            baseline_judgement=baseline_judgement,
+            rescue_threshold=rescue_threshold,
+        )
+
+        rescue_payload: dict[str, Any] = {}
+        rescued_answer = ""
+        rescue_latency_ms = 0.0
+        rescued_judgement: dict[str, Any] = {}
+        rescue_attempted = False
+        if needs_rescue and teacher_client is not None and teacher_model:
+            rescue_attempted = True
+            try:
+                rescue_started = time.perf_counter()
+                rescue_payload = _rescue_web_answer_with_teacher(
+                    client=teacher_client,
+                    model=teacher_model,
+                    prompt=case.prompt,
+                    query=query,
+                    slice_kind=slice_kind,
+                    current_answer=baseline_answer or baseline_raw_answer,
+                    source_title=source_title,
+                    source_url=source_url,
+                    source_count=source_count,
+                    result_cards=cards,
+                    evidence_items=evidence_items,
+                    coaching=str(baseline_judgement.get("coaching") or "").strip(),
+                )
+                rescue_latency_ms = round((time.perf_counter() - rescue_started) * 1000.0, 2)
+                rescued_answer = str(rescue_payload.get("answer") or "").strip()
+                if rescued_answer:
+                    rescued_count += 1
+            except Exception as exc:
+                rescue_payload = {"error_type": type(exc).__name__, "message": str(exc)}
+
+        if judge_client is not None and rescued_answer:
+            try:
+                rescued_judgement = _judge_web_answer_with_teacher(
+                    client=judge_client,
+                    model=resolved_judge_model,
+                    prompt=case.prompt,
+                    query=query,
+                    answer=rescued_answer,
+                    source_title=source_title,
+                    source_url=source_url,
+                    source_count=source_count,
+                    result_cards=cards,
+                )
+                judged_count += 1
+            except Exception as exc:
+                rescued_judgement = {"error_type": type(exc).__name__, "message": str(exc)}
+
+        baseline_overall = _web_teacher_overall(baseline_judgement)
+        rescued_overall = _web_teacher_overall(rescued_judgement)
+        promoted_lane = "baseline"
+        promoted_answer = baseline_answer
+        promoted_overall = baseline_overall
+        if rescued_answer and (not baseline_answer or rescued_overall >= baseline_overall or judge_client is None):
+            promoted_lane = "teacher_rescue"
+            promoted_answer = rescued_answer
+            promoted_overall = rescued_overall or baseline_overall
+        improvement_delta = float(promoted_overall - baseline_overall)
+        if promoted_lane == "teacher_rescue":
+            promoted_rescue_count += 1
+        if improvement_delta > 0:
+            improved_count += 1
+
+        row = {
+            "case_id": case.case_id,
+            "prompt": case.prompt,
+            "plan_source": memla_plan.source,
+            "plan_actions": [_action_signature(action) for action in memla_plan.actions],
+            "plan_latency_ms": plan_latency_ms,
+            "answered": bool(baseline_answer),
+            "query": query,
+            "answer_voice": str(answer_style.get("voice") or "").strip(),
+            "answer_slice": slice_kind,
+            "baseline_answer_latency_ms": baseline_answer_latency_ms,
+            "baseline_answer": baseline_answer,
+            "baseline_raw_answer": baseline_raw_answer,
+            "baseline_generator": str(answer_style.get("generator") or "").strip(),
+            "baseline_source_title": source_title,
+            "baseline_source_url": source_url,
+            "baseline_source_count": source_count,
+            "baseline_judgement": baseline_judgement,
+            "needs_rescue": bool(needs_rescue),
+            "rescue_attempted": rescue_attempted,
+            "rescue_latency_ms": rescue_latency_ms,
+            "rescued_answer": rescued_answer,
+            "rescued_judgement": rescued_judgement,
+            "rescue_why_better": str(rescue_payload.get("why_better") or "").strip(),
+            "promotion_notes": [str(item).strip() for item in list(rescue_payload.get("promotion_notes") or []) if str(item).strip()],
+            "promoted_lane": promoted_lane,
+            "promoted_answer": promoted_answer,
+            "promoted_overall": promoted_overall,
+            "improvement_delta": improvement_delta,
+        }
+        rows.append(row)
+        if promoted_lane == "teacher_rescue":
+            trace_rows.append(_build_web_teacher_trace_row(row))
+
+    count = len(rows) or 1
+    answered_count = sum(1 for row in rows if row.get("answered"))
+    avg_plan_latency_ms = round(sum(float(row.get("plan_latency_ms") or 0.0) for row in rows) / count, 2)
+    avg_answer_latency_ms = round(sum(float(row.get("baseline_answer_latency_ms") or 0.0) for row in rows) / count, 2)
+    avg_rescue_latency_ms = round(sum(float(row.get("rescue_latency_ms") or 0.0) for row in rows) / count, 2)
+    baseline_scores = [
+        float(dict(row.get("baseline_judgement") or {}).get("overall") or 0.0)
+        for row in rows
+        if dict(row.get("baseline_judgement") or {}).get("overall")
+    ]
+    promoted_scores = [float(row.get("promoted_overall") or 0.0) for row in rows if float(row.get("promoted_overall") or 0.0) > 0.0]
+    avg_baseline_overall = round(sum(baseline_scores) / len(baseline_scores), 4) if baseline_scores else 0.0
+    avg_promoted_overall = round(sum(promoted_scores) / len(promoted_scores), 4) if promoted_scores else 0.0
+    avg_improvement = round(sum(float(row.get("improvement_delta") or 0.0) for row in rows) / count, 4)
+
+    return {
+        "generated_ts": int(time.time()),
+        "cases_path": str(Path(cases_path).resolve()),
+        "case_ids": [case.case_id for case in cases],
+        "limit": limit,
+        "memla_model": memla_model,
+        "memla_provider": "" if memla_client is None else str(getattr(memla_client, "provider", "") or ""),
+        "teacher_model": teacher_model,
+        "teacher_provider": "" if teacher_client is None else str(getattr(teacher_client, "provider", "") or ""),
+        "judge_model": resolved_judge_model,
+        "judge_provider": "" if judge_client is None else str(getattr(judge_client, "provider", "") or ""),
+        "cases": len(rows),
+        "cases_requested": len(cases),
+        "failed_case_count": len(failed_cases),
+        "answered_count": answered_count,
+        "avg_plan_latency_ms": avg_plan_latency_ms,
+        "avg_answer_latency_ms": avg_answer_latency_ms,
+        "avg_rescue_latency_ms": avg_rescue_latency_ms,
+        "avg_baseline_overall": avg_baseline_overall,
+        "avg_promoted_overall": avg_promoted_overall,
+        "avg_improvement": avg_improvement,
+        "rescue_threshold": int(rescue_threshold),
+        "rescued_count": rescued_count,
+        "improved_count": improved_count,
+        "promoted_rescue_count": promoted_rescue_count,
+        "trace_row_count": len(trace_rows),
+        "judged_count": judged_count,
+        "memla_model_call_count": memla_model_calls,
+        "memla_heuristic_hit_count": memla_heuristic_hits,
+        "rows": rows,
+        "trace_rows": trace_rows,
         "failed_cases": failed_cases,
     }
 
@@ -8080,6 +8508,66 @@ def render_web_answer_benchmark_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def render_web_teacher_loop_markdown(report: dict[str, Any]) -> str:
+    lines = [
+        "# Web Teacher Loop V1",
+        "",
+        f"- Memla provider: `{report.get('memla_provider', '')}`",
+        f"- Memla model: `{report.get('memla_model', '')}`",
+        f"- Teacher model: `{report.get('teacher_model', '') or 'disabled'}`",
+        f"- Judge model: `{report.get('judge_model', '') or 'disabled'}`",
+        f"- Cases completed: `{report.get('cases', 0)}` / `{report.get('cases_requested', 0)}`",
+        "",
+        "## Summary",
+        "",
+        f"- Avg plan latency: `{report.get('avg_plan_latency_ms', 0.0)} ms`",
+        f"- Avg baseline answer latency: `{report.get('avg_answer_latency_ms', 0.0)} ms`",
+        f"- Avg rescue latency: `{report.get('avg_rescue_latency_ms', 0.0)} ms`",
+        f"- Avg baseline overall: `{report.get('avg_baseline_overall', 0.0)}`",
+        f"- Avg promoted overall: `{report.get('avg_promoted_overall', 0.0)}`",
+        f"- Avg improvement: `{report.get('avg_improvement', 0.0)}`",
+        f"- Rescued answers: `{report.get('rescued_count', 0)}`",
+        f"- Improved answers: `{report.get('improved_count', 0)}`",
+        f"- Promoted rescue rows: `{report.get('promoted_rescue_count', 0)}`",
+        f"- Trace rows ready: `{report.get('trace_row_count', 0)}`",
+    ]
+    if report.get("failed_cases"):
+        lines.extend(["", "## Failed cases", ""])
+        for failure in report["failed_cases"]:
+            lines.append(f"- `{failure.get('case_id', '')}` [{failure.get('error_type', '')}] {failure.get('message', '')}".rstrip())
+    lines.extend(["", "## Case rows", ""])
+    for row in report.get("rows", []):
+        baseline_judgement = dict(row.get("baseline_judgement") or {})
+        rescued_judgement = dict(row.get("rescued_judgement") or {})
+        lines.extend(
+            [
+                f"### {row.get('case_id', '')}",
+                "",
+                f"- Prompt: `{row.get('prompt', '')}`",
+                f"- Query: `{row.get('query', '')}`",
+                f"- Slice: `{row.get('answer_slice', '')}`",
+                f"- Plan source/actions: `{row.get('plan_source', '')}` / `{', '.join(row.get('plan_actions', []))}`",
+                f"- Baseline overall: `{baseline_judgement.get('overall', 0)}`",
+                f"- Baseline answer: {row.get('baseline_answer', '')}",
+                f"- Promoted lane: `{row.get('promoted_lane', '')}`",
+                f"- Promoted answer: {row.get('promoted_answer', '')}",
+            ]
+        )
+        if rescued_judgement or row.get("rescued_answer"):
+            lines.extend(
+                [
+                    f"- Rescue overall: `{rescued_judgement.get('overall', 0)}`",
+                    f"- Rescue why better: {row.get('rescue_why_better', '')}",
+                ]
+            )
+        if baseline_judgement.get("coaching"):
+            lines.append(f"- Teacher coaching: {baseline_judgement.get('coaching', '')}")
+        if row.get("promotion_notes"):
+            lines.append(f"- Promotion notes: {', '.join(row.get('promotion_notes', []))}")
+        lines.append("")
+    return "\n".join(lines).strip() + "\n"
+
+
 __all__ = [
     "BrowserSessionState",
     "TerminalAction",
@@ -8106,9 +8594,11 @@ __all__ = [
     "render_terminal_step_execution_text",
     "render_terminal_step_report_text",
     "render_web_answer_benchmark_markdown",
+    "render_web_teacher_loop_markdown",
     "run_terminal_benchmark",
     "run_terminal_scout",
     "run_web_answer_benchmark",
+    "run_web_teacher_loop",
     "save_browser_session_state",
     "terminal_browser_state_path",
     "terminal_execution_to_dict",

@@ -504,6 +504,38 @@ def test_memla_terminal_benchmark_web_answer_v1_dispatches(monkeypatch):
     assert captured["judge_provider"] == "anthropic"
 
 
+def test_memla_terminal_benchmark_web_teacher_v1_dispatches(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _fake_web_teacher_loop(args):
+        captured["cases"] = args.cases
+        captured["teacher_provider"] = args.teacher_provider
+        captured["judge_provider"] = args.judge_provider
+        captured["rescue_threshold"] = args.rescue_threshold
+        return 0
+
+    monkeypatch.setattr("memory_system.cli._handle_web_teacher_loop", _fake_web_teacher_loop)
+
+    rc = main(
+        [
+            "terminal",
+            "benchmark-web-teacher-v1",
+            "--teacher-provider",
+            "anthropic",
+            "--judge-provider",
+            "anthropic",
+            "--rescue-threshold",
+            "4",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["cases"] == "cases/web_eval_cases_v1.jsonl"
+    assert captured["teacher_provider"] == "anthropic"
+    assert captured["judge_provider"] == "anthropic"
+    assert captured["rescue_threshold"] == 4
+
+
 def test_memla_top_level_scout_command_dispatches(monkeypatch):
     captured: dict[str, object] = {}
 

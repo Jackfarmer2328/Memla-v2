@@ -19,6 +19,7 @@ from memory_system.natural_terminal import (
     _normalize_model_actions,
     _promote_language_rules,
     _fetch_search_result_urls,
+    _rescue_web_answer_with_teacher,
     _resolve_web_answer,
     build_llm_client,
     build_raw_terminal_plan,
@@ -36,6 +37,7 @@ from memory_system.natural_terminal import (
     terminal_language_rule_path,
     run_terminal_benchmark,
     run_web_answer_benchmark,
+    run_web_teacher_loop,
 )
 
 
@@ -1736,6 +1738,167 @@ def test_run_web_answer_benchmark_collects_answer_rows(monkeypatch, tmp_path):
     assert report["rows"][0]["query"] == "ai agents news today"
     assert report["rows"][0]["answer_voice"] == "memla_web_friend_v1"
     assert report["rows"][0]["source_count"] == 2
+
+
+def test_rescue_web_answer_with_teacher_parses_rewrite_payload():
+    class DummyClient:
+        def chat(self, **kwargs):
+            return json.dumps(
+                {
+                    "answer": "Anthropic was co-founded in 2021 by Dario Amodei and Daniela Amodei.",
+                    "why_better": "It states the fact directly instead of describing a page.",
+                    "promotion_notes": ["prefer direct founder statement", "avoid page-description phrasing"],
+                }
+            )
+
+    payload = _rescue_web_answer_with_teacher(
+        client=DummyClient(),
+        model="claude-sonnet-4-20250514",
+        prompt="who founded anthropic?",
+        query="who founded anthropic",
+        slice_kind="fact",
+        current_answer="This page covers Anthropic leadership.",
+        source_title="Anthropic founders",
+        source_url="https://example.com/anthropic-founders",
+        source_count=2,
+        result_cards=[
+            {
+                "title": "Anthropic founders",
+                "summary": "Anthropic was founded by Dario Amodei and Daniela Amodei.",
+                "url": "https://example.com/anthropic-founders",
+            }
+        ],
+        evidence_items=[
+            {
+                "title": "Anthropic founders",
+                "summary": "Anthropic was founded by Dario Amodei and Daniela Amodei.",
+                "content_preview": "Anthropic launched in 2021.",
+                "url": "https://example.com/anthropic-founders",
+            }
+        ],
+        coaching="Answer directly.",
+    )
+
+    assert payload["answer"].startswith("Anthropic was co-founded")
+    assert payload["why_better"] == "It states the fact directly instead of describing a page."
+    assert payload["promotion_notes"] == ["prefer direct founder statement", "avoid page-description phrasing"]
+
+
+def test_run_web_teacher_loop_promotes_rescued_answers(monkeypatch, tmp_path):
+    cases_path = tmp_path / "web_cases.jsonl"
+    cases_path.write_text(
+        json.dumps(
+            {
+                "case_id": "web_fact_founder",
+                "prompt": "who founded anthropic?",
+                "expected_actions": ["browser_answer_query:who founded anthropic"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._fetch_search_result_cards",
+        lambda engine, query, limit=5: [
+            {
+                "index": 1,
+                "title": "Anthropic founders",
+                "url": "https://example.com/anthropic-founders",
+                "summary": "Anthropic leadership and company overview.",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._fetch_page_html",
+        lambda url: """
+        <html>
+          <head>
+            <title>Anthropic founders</title>
+            <meta name="description" content="Anthropic leadership and company overview." />
+          </head>
+          <body>
+            <article>Anthropic was founded in 2021 by Dario Amodei and Daniela Amodei.</article>
+          </body>
+        </html>
+        """,
+    )
+
+    class SequenceClient:
+        def __init__(self, responses):
+            self._responses = list(responses)
+
+        def chat(self, **kwargs):
+            assert self._responses
+            return self._responses.pop(0)
+
+    teacher_client = SequenceClient(
+        [
+            json.dumps(
+                {
+                    "answer": "Anthropic was founded in 2021 by Dario Amodei and Daniela Amodei.",
+                    "why_better": "It answers the question directly.",
+                    "promotion_notes": ["promote direct founder wording"],
+                }
+            )
+        ]
+    )
+    judge_client = SequenceClient(
+        [
+            json.dumps(
+                {
+                    "directness": 2,
+                    "warmth": 3,
+                    "groundedness": 3,
+                    "helpfulness": 2,
+                    "overall": 2,
+                    "verdict": "too vague",
+                    "coaching": "Answer the founder fact directly.",
+                }
+            ),
+            json.dumps(
+                {
+                    "directness": 5,
+                    "warmth": 4,
+                    "groundedness": 5,
+                    "helpfulness": 5,
+                    "overall": 5,
+                    "verdict": "strong",
+                    "coaching": "Keep this direct style.",
+                }
+            ),
+        ]
+    )
+
+    def _fake_build_client(provider=None, base_url=None):
+        if provider == "teacher":
+            return teacher_client
+        if provider == "judge":
+            return judge_client
+        raise AssertionError(f"unexpected provider {provider}")
+
+    monkeypatch.setattr("memory_system.natural_terminal.build_llm_client", _fake_build_client)
+
+    report = run_web_teacher_loop(
+        cases_path=str(cases_path),
+        memla_model="claude-sonnet-4-20250514",
+        teacher_model="claude-sonnet-4-20250514",
+        teacher_provider="teacher",
+        judge_model="claude-sonnet-4-20250514",
+        judge_provider="judge",
+        heuristic_only=True,
+        rescue_threshold=4,
+    )
+
+    assert report["cases"] == 1
+    assert report["rescued_count"] == 1
+    assert report["improved_count"] == 1
+    assert report["promoted_rescue_count"] == 1
+    assert report["trace_row_count"] == 1
+    row = report["rows"][0]
+    assert row["promoted_lane"] == "teacher_rescue"
+    assert row["rescued_answer"].startswith("Anthropic was founded in 2021")
+    assert row["promotion_notes"] == ["promote direct founder wording"]
+    assert report["trace_rows"][0]["promoted_lane"] == "teacher_rescue"
 
 
 def test_terminal_heuristic_plan_opens_second_source_after_web_answer():

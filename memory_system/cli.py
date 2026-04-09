@@ -90,9 +90,11 @@ from .natural_terminal import (
     render_terminal_step_execution_text,
     render_terminal_step_report_text,
     render_web_answer_benchmark_markdown,
+    render_web_teacher_loop_markdown,
     run_terminal_benchmark,
     run_terminal_scout,
     run_web_answer_benchmark,
+    run_web_teacher_loop,
     terminal_execution_to_dict,
     terminal_model_default,
     terminal_plan_to_dict,
@@ -1245,6 +1247,51 @@ def _handle_web_answer_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_web_teacher_loop(args: argparse.Namespace) -> int:
+    memla_model = _resolve_shared_terminal_model(args, "memla_model")
+    teacher_model = args.teacher_model or args.model or memla_model
+    report = run_web_teacher_loop(
+        cases_path=args.cases,
+        memla_model=memla_model,
+        memla_provider=args.memla_provider,
+        memla_base_url=args.memla_base_url,
+        teacher_model=teacher_model,
+        teacher_provider=args.teacher_provider,
+        teacher_base_url=args.teacher_base_url,
+        judge_model=args.judge_model,
+        judge_provider=args.judge_provider,
+        judge_base_url=args.judge_base_url,
+        temperature=args.temperature,
+        case_ids=args.case_id,
+        limit=args.limit,
+        heuristic_only=args.heuristic_only,
+        rescue_threshold=args.rescue_threshold,
+    )
+    markdown = render_web_teacher_loop_markdown(report)
+    out_dir = Path(args.out_dir).resolve() if args.out_dir else _default_report_dir("web_teacher_loop")
+    json_path, md_path = _write_report_bundle(
+        out_dir=out_dir,
+        stem="web_teacher_loop_report",
+        report=report,
+        markdown=markdown,
+    )
+    jsonl_path = out_dir / "web_teacher_trace_bank.jsonl"
+    jsonl_lines = [json.dumps(row, ensure_ascii=True) for row in report.get("trace_rows", [])]
+    jsonl_path.write_text("\n".join(jsonl_lines) + ("\n" if jsonl_lines else ""), encoding="utf-8")
+    print(f"Wrote web teacher loop JSON: {json_path}")
+    print(f"Wrote web teacher loop Markdown: {md_path}")
+    print(f"Wrote web teacher trace bank JSONL: {jsonl_path}")
+    print(
+        "Summary: "
+        f"rescued {report.get('rescued_count', 0)} | "
+        f"improved {report.get('improved_count', 0)} | "
+        f"promoted rescue {report.get('promoted_rescue_count', 0)} | "
+        f"avg baseline {report.get('avg_baseline_overall', 0.0)} | "
+        f"avg promoted {report.get('avg_promoted_overall', 0.0)}"
+    )
+    return 0
+
+
 def _handle_terminal_browser_benchmark(args: argparse.Namespace) -> int:
     raw_model = _resolve_shared_terminal_model(args, "raw_model")
     memla_model = _resolve_shared_terminal_model(args, "memla_model")
@@ -1878,6 +1925,29 @@ def _build_parser() -> argparse.ArgumentParser:
     terminal_web_answer_bench_v1.add_argument("--heuristic-only", action="store_true", help="Force the Memla planner to stay heuristic-only before answering.")
     terminal_web_answer_bench_v1.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
     terminal_web_answer_bench_v1.set_defaults(func=_handle_web_answer_benchmark)
+
+    terminal_web_teacher_v1 = terminal_sub.add_parser(
+        "benchmark-web-teacher-v1",
+        help="Run Memla web answers through a teacher rescue loop and write a reusable web trace bank.",
+    )
+    terminal_web_teacher_v1.add_argument("--cases", default=_web_v1_cases_default(), help="Web V1 benchmark case JSONL path.")
+    terminal_web_teacher_v1.add_argument("--case-id", action="append", default=[], help="Optional case id filter. Repeat to benchmark only specific prompts.")
+    terminal_web_teacher_v1.add_argument("--limit", type=int, default=None, help="Optional max number of benchmark prompts to run after filtering.")
+    terminal_web_teacher_v1.add_argument("--model", default="", help="Shared model default for the Memla and teacher lanes.")
+    terminal_web_teacher_v1.add_argument("--memla-model", default="", help="Memla answer model. Defaults to --model or the small terminal default.")
+    terminal_web_teacher_v1.add_argument("--memla-provider", default="ollama", help="Provider override for the Memla answer lane.")
+    terminal_web_teacher_v1.add_argument("--memla-base-url", default="", help="Optional base URL override for the Memla answer lane.")
+    terminal_web_teacher_v1.add_argument("--teacher-model", default="", help="Teacher rescue model. Defaults to --model or the Memla model.")
+    terminal_web_teacher_v1.add_argument("--teacher-provider", default="", help="Optional provider override for the teacher lane. Defaults to the Memla lane when blank.")
+    terminal_web_teacher_v1.add_argument("--teacher-base-url", default="", help="Optional base URL override for the teacher lane.")
+    terminal_web_teacher_v1.add_argument("--judge-model", default="", help="Optional judge model. Defaults to the teacher model when blank.")
+    terminal_web_teacher_v1.add_argument("--judge-provider", default="", help="Optional provider override for the judge lane.")
+    terminal_web_teacher_v1.add_argument("--judge-base-url", default="", help="Optional base URL override for the judge lane.")
+    terminal_web_teacher_v1.add_argument("--rescue-threshold", type=int, default=4, help="Teacher overall score below this threshold triggers rescue.")
+    terminal_web_teacher_v1.add_argument("--temperature", type=float, default=0.1)
+    terminal_web_teacher_v1.add_argument("--heuristic-only", action="store_true", help="Force the Memla planner to stay heuristic-only before answering.")
+    terminal_web_teacher_v1.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
+    terminal_web_teacher_v1.set_defaults(func=_handle_web_teacher_loop)
 
     terminal_browser_bench = terminal_sub.add_parser(
         "benchmark-browser",
