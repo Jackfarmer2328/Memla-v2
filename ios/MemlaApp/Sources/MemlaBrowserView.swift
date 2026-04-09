@@ -341,6 +341,41 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         }
     }
 
+    func tapDoorDashModifierSave(capsule: ActionCapsule?) {
+        isRunningButtonAction = true
+        buttonActionStatus = "Saving options..."
+        webView.evaluateJavaScript(Self.doorDashModifierSaveScript) { [weak self] result, error in
+            DispatchQueue.main.async {
+                guard let self = self else {
+                    return
+                }
+                self.isRunningButtonAction = false
+                if let error = error {
+                    self.buttonActionStatus = error.localizedDescription
+                    return
+                }
+                guard let payload = result as? [String: Any] else {
+                    self.buttonActionStatus = "Save tap returned no page result."
+                    return
+                }
+                let reason = Self.stringValue(payload["reason"]).replacingOccurrences(of: "_", with: " ")
+                let ok = payload["ok"] as? Bool ?? false
+                self.buttonActionStatus = ok ? reason.capitalized : "Save tap blocked: \(reason)"
+                if ok {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.35) {
+                        self.inspectPage(capsule: capsule)
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.3) {
+                        guard !self.isInspecting, !self.isLoading else {
+                            return
+                        }
+                        self.inspectPage(capsule: capsule)
+                    }
+                }
+            }
+        }
+    }
+
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         websiteState = nil
         inspectionStatus = ""
@@ -501,7 +536,10 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         } else {
             candidateSource = payload["candidates"]
         }
-        let candidates = candidateArray(candidateSource, capsule: capsule, pageKind: pageKind)
+        var candidates = candidateArray(candidateSource, capsule: capsule, pageKind: pageKind)
+        if isDoorDash {
+            candidates = enrichDoorDashCandidates(candidates, pageKind: pageKind, buttons: buttons)
+        }
         let safeActions = candidateActions(pageKind: pageKind, inputs: inputs, buttons: buttons, links: links, candidates: candidates)
         let residuals = residualsForPage(payload: payload, pageKind: pageKind, combined: normalizedCombined, textSnippet: textSnippet, capsule: capsule)
         let authState = classifyAuthState(pageKind: pageKind, combined: combined)
@@ -542,6 +580,47 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
 
     private static func isDoorDashDomain(url: String) -> Bool {
         domainFrom(url: url).contains("doordash.com")
+    }
+
+    private static func enrichDoorDashCandidates(_ candidates: [WebsiteC2ACandidate], pageKind: String, buttons: [String]) -> [WebsiteC2ACandidate] {
+        guard pageKind == "dd_item_modal" else {
+            return candidates
+        }
+        guard !candidates.contains(where: { $0.role == "dd_modifier_save" }) else {
+            return candidates
+        }
+        let normalizedButtons = buttons.map(normalizedText)
+        let saveLabel: String?
+        if normalizedButtons.contains(where: { $0 == "save" }) {
+            saveLabel = "Save"
+        } else if normalizedButtons.contains(where: { $0.contains("save options") }) {
+            saveLabel = "Save Options"
+        } else if normalizedButtons.contains(where: { $0.contains("save") }) {
+            saveLabel = "Save"
+        } else {
+            saveLabel = nil
+        }
+        guard let saveLabel else {
+            return candidates
+        }
+        var enriched = candidates
+        enriched.append(
+            WebsiteC2ACandidate(
+                id: "synthetic-dd-modifier-save",
+                domIndex: -1,
+                label: saveLabel,
+                url: "",
+                kind: "button",
+                role: "dd_modifier_save",
+                score: 5.2,
+                matchedTerms: [],
+                blocked: false,
+                tapSafety: "safe",
+                tapReason: "DoorDash customizer save footer",
+                reason: "DoorDash save-options control"
+            )
+        )
+        return enriched
     }
 
     private static func isUberEatsDomain(url: String) -> Bool {
@@ -2053,6 +2132,40 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         })();
         """
     }
+
+    private static let doorDashModifierSaveScript = """
+    (() => {
+      const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+      const visible = (el) => {
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 1 && rect.height > 1;
+      };
+      const itemModal = Array.from(document.querySelectorAll('[data-testid="ItemModal"], [role="dialog"]'))
+        .filter(visible)[0] || document;
+      const button = Array.from(itemModal.querySelectorAll('button[data-testid="optionFooter"], button, [role="button"]'))
+        .filter(visible)
+        .find((el) => {
+          const text = clean(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
+          return /^save(?: options)?(?:\\s*\\+\\$?\\d[\\d.,]*)?$/i.test(text) || /^save$/i.test(text);
+        });
+      if (!button) {
+        return { ok: false, reason: 'doordash_modifier_save_not_found' };
+      }
+      try { button.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
+      ['mousedown', 'mouseup', 'click'].forEach((type) => {
+        try {
+          button.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+        } catch (_) {}
+      });
+      if (typeof button.click === 'function') {
+        try { button.click(); } catch (_) {}
+      }
+      return { ok: true, reason: 'tapped_doordash_modifier_save', label: clean(button.innerText || button.textContent || '') };
+    })();
+    """
 
     private static let pageInspectionScript = """
     (() => {
@@ -4979,6 +5092,10 @@ struct MemlaBrowserView: View {
         }
         if candidate.role == "ub_dropoff_input" {
             browser.focusUberRideField(isPickup: false, capsule: route.capsule)
+            return
+        }
+        if candidate.role == "dd_modifier_save" {
+            browser.tapDoorDashModifierSave(capsule: route.capsule)
             return
         }
         browser.tapButtonCandidate(candidate, allowCaution: allowCaution, capsule: route.capsule)
