@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 import hashlib
+import json
 import re
 from typing import Any
 from urllib.parse import quote
@@ -41,6 +42,29 @@ class ActionCapsule:
     verifier_requirements: list[str] = field(default_factory=list)
     auto_submit_blockers: list[str] = field(default_factory=list)
     residual_constraints: list[str] = field(default_factory=list)
+
+
+_UBER_DEFAULT_PICKUP_PROFILE: dict[str, Any] = {
+    "addressLine1": "18720 Clear View Ct",
+    "addressLine2": "Minnetonka, MN",
+    "id": "dbd7d11b-a92a-7fbe-84f7-eb24356a3583",
+    "source": "SEARCH",
+    "latitude": 44.893797,
+    "longitude": -93.517025,
+    "provider": "uber_places",
+}
+
+_UBER_KNOWN_DESTINATIONS: dict[str, dict[str, Any]] = {
+    "us bank stadium": {
+        "addressLine1": "U.S. Bank Stadium",
+        "addressLine2": "401 Chicago Ave, Minneapolis, MN",
+        "id": "99b775c2-b2b3-337c-a970-4a6c6fc4b91c",
+        "source": "SEARCH",
+        "latitude": 44.9731726,
+        "longitude": -93.2605274,
+        "provider": "uber_places",
+    },
+}
 
 
 def _capsule_id(action_id: str, prompt: str) -> str:
@@ -126,6 +150,9 @@ def _extract_ride_slots(prompt: str) -> dict[str, str]:
         slots["service"] = "Lyft"
     else:
         slots["service"] = "ride share"
+    pickup = _extract_between(raw, r"\bfrom\b", r"\b(?:to|in|at|around|for)\b")
+    if pickup:
+        slots["pickup_location"] = pickup
     destination = _extract_between(raw, r"\bto\b", r"\b(?:in|at|around|from|for)\b")
     if destination:
         slots["destination"] = destination
@@ -179,6 +206,66 @@ def _service_search_url(service: str, query: str) -> str:
     if clean_query:
         return f"https://www.google.com/search?q={quote(service + ' ' + _clean_text(query), safe='')}"
     return ""
+
+
+def _lookup_uber_destination_profile(destination: str) -> dict[str, Any] | None:
+    normalized = _normalize_text(destination)
+    if not normalized:
+        return None
+    if normalized in _UBER_KNOWN_DESTINATIONS:
+        return dict(_UBER_KNOWN_DESTINATIONS[normalized])
+    for key, profile in _UBER_KNOWN_DESTINATIONS.items():
+        if normalized in key or key in normalized:
+            return dict(profile)
+    return None
+
+
+def _uber_product_selection_url(*, pickup_profile: dict[str, Any], destination_profile: dict[str, Any], vehicle: str = "") -> str:
+    pickup_payload = quote(json.dumps(pickup_profile, separators=(",", ":")), safe="")
+    destination_payload = quote(json.dumps(destination_profile, separators=(",", ":")), safe="")
+    url = f"https://m.uber.com/go/product-selection?pickup={pickup_payload}&drop%5B0%5D={destination_payload}"
+    if vehicle:
+        url += f"&vehicle={quote(vehicle, safe='')}"
+    return url
+
+
+def _ride_bridge_options(service: str, slots: dict[str, str]) -> list[ActionBridgeOption]:
+    if service != "Uber":
+        return _service_bridge_options(service, "")
+    destination = slots.get("destination", "")
+    pickup_profile = dict(_UBER_DEFAULT_PICKUP_PROFILE)
+    destination_profile = _lookup_uber_destination_profile(destination)
+    fallback_url = _service_search_url(service, "")
+    if destination_profile:
+        direct_url = _uber_product_selection_url(
+            pickup_profile=pickup_profile,
+            destination_profile=destination_profile,
+        )
+        return [
+            ActionBridgeOption(
+                option_id="uber_direct_quote",
+                label="Open Uber Quote",
+                kind="in_app_web",
+                url=direct_url,
+                instructions="Open Uber directly at product selection so Memla can skip the fragile pickup builder and stop before the final ride request.",
+            ),
+            ActionBridgeOption(
+                option_id="uber_builder_fallback",
+                label="Open Uber Builder",
+                kind="in_app_web",
+                url=fallback_url,
+                instructions="Fallback to the generic Uber ride builder when the direct quote bridge is unavailable or stale.",
+            ),
+        ]
+    return [
+        ActionBridgeOption(
+            option_id="service_web",
+            label="Open Uber Builder",
+            kind="in_app_web",
+            url=fallback_url,
+            instructions="Open the standard Uber ride builder when no direct destination profile is available yet.",
+        )
+    ]
 
 
 def _generic_web_search_url(service: str, query: str) -> str:
@@ -313,10 +400,9 @@ def _food_capsule(prompt: str, draft: ActionDraftPayload) -> ActionCapsule:
 def _ride_capsule(prompt: str, draft: ActionDraftPayload) -> ActionCapsule:
     slots = _extract_ride_slots(prompt)
     service = slots.get("service", "ride share")
-    bridge_options = _service_bridge_options(service, "")
+    bridge_options = _ride_bridge_options(service, slots)
     bridge_url = bridge_options[0].url if bridge_options else _service_search_url(service, "")
     blockers = [
-        "ride_booking_bridge_not_implemented",
         "pickup_location_not_verified",
         "price_not_verified",
         "driver_eta_not_verified",
@@ -334,8 +420,8 @@ def _ride_capsule(prompt: str, draft: ActionDraftPayload) -> ActionCapsule:
         authorization_level="open_confirmation_screen",
         confirmation_required=True,
         auto_submit_allowed=False,
-        status="service_bridge_required",
-        summary="Ride capsule prepared. Memla can structure the ride intent, but booking must stay user-confirmed until pickup, price, ETA, and service bridge verifiers exist.",
+        status="service_bridge_ready" if bridge_options else "service_bridge_required",
+        summary="Ride capsule prepared. Memla can open a direct ride quote bridge when the service profile is known, but booking still stays user-confirmed until pickup, price, and ETA are verified.",
         slots=slots,
         draft_text=_ride_draft_text(slots),
         bridge_kind="web_or_deeplink_bridge",
