@@ -1551,10 +1551,16 @@ def _synthesize_browser_evidence(
     source_label = source_label_map.get(source_kind, source_kind.replace("_", " ") or "source")
     summary = str(best.get("summary") or best.get("title") or "").strip()
     explanation_goal = goal_text or subject_title or "the current goal"
-    if subject_title:
-        synthesis = f"{source_label} \"{str(best.get('title') or '').strip()}\" best explains {subject_title} for \"{explanation_goal}\". {summary}".strip()
+    best_title = str(best.get("title") or "").strip()
+    if source_kind == "web_page":
+        if summary and best_title and best_title not in summary:
+            synthesis = f"{summary} Source: {best_title}".strip()
+        else:
+            synthesis = summary or best_title
+    elif subject_title:
+        synthesis = f"{source_label} \"{best_title}\" best explains {subject_title} for \"{explanation_goal}\". {summary}".strip()
     else:
-        synthesis = f"{source_label} \"{str(best.get('title') or '').strip()}\" best explains \"{explanation_goal}\". {summary}".strip()
+        synthesis = f"{source_label} \"{best_title}\" best explains \"{explanation_goal}\". {summary}".strip()
     return {
         "goal": explanation_goal,
         "best_source_title": str(best.get("title") or "").strip(),
@@ -4058,6 +4064,15 @@ def _best_web_answer_summary(*, prompt: str, card: dict[str, Any], details: dict
     return answer
 
 
+def _goal_subject_for_web(prompt: str, query: str) -> dict[str, str]:
+    title = str(prompt or "").strip() or str(query or "").strip()
+    return {
+        "title": title,
+        "url": "",
+        "summary": "",
+    }
+
+
 def _resolve_web_answer(
     *,
     prompt: str,
@@ -4068,10 +4083,15 @@ def _resolve_web_answer(
     if not cards:
         urls = _fetch_search_result_urls("web", query, limit=limit)
         cards = _fallback_cards_from_urls(urls[:limit])
-    best_card: dict[str, Any] = dict(cards[0]) if cards else {}
+    ranked_cards = _rank_cards_against_goal(cards, prompt or query) if cards else []
+    top_candidates = [dict(item) for item in ranked_cards[: min(3, len(ranked_cards))]]
+    evidence_items: list[dict[str, Any]] = []
+    enriched_cards: list[dict[str, Any]] = []
+    best_card: dict[str, Any] = dict(top_candidates[0]) if top_candidates else (dict(cards[0]) if cards else {})
     best_details: dict[str, Any] = {}
     answer = ""
-    for card in cards[:3]:
+    fallback_answer = ""
+    for card in top_candidates or cards[:3]:
         url = str(card.get("url") or "").strip()
         if not url:
             continue
@@ -4085,13 +4105,55 @@ def _resolve_web_answer(
                 "title": str(card.get("title") or url).strip(),
                 "summary": str(card.get("summary") or card.get("title") or url).strip(),
             }
-        summary = _best_web_answer_summary(prompt=prompt, card=card, details=details)
-        if not summary:
-            continue
-        best_card = dict(card)
-        best_details = dict(details)
-        answer = summary
-        break
+        merged_card = dict(card)
+        if str(details.get("title") or "").strip():
+            merged_card["title"] = str(details.get("title") or "").strip()
+        if str(details.get("summary") or "").strip():
+            merged_card["summary"] = str(details.get("summary") or "").strip()
+        if str(details.get("url") or "").strip():
+            merged_card["url"] = str(details.get("url") or "").strip()
+        enriched_cards.append(merged_card)
+        evidence_item = _evidence_item_from_details(
+            BrowserSessionState(
+                current_url=url,
+                page_kind=str(details.get("page_kind") or _browser_state_for_url(url).page_kind or "web_page").strip(),
+                search_engine="web",
+                search_query=query,
+                subject_summary=str(details.get("summary") or "").strip(),
+            ),
+            details,
+        )
+        if "score" in card:
+            evidence_item["score"] = float(card.get("score") or 0.0)
+        if "matching_terms" in card:
+            evidence_item["matching_terms"] = list(card.get("matching_terms") or [])
+        evidence_items.append(evidence_item)
+        if not fallback_answer:
+            fallback_answer = _best_web_answer_summary(prompt=prompt, card=merged_card, details=details)
+            best_card = dict(merged_card)
+            best_details = dict(details)
+    synthesis = _synthesize_browser_evidence(evidence_items, prompt or query, _goal_subject_for_web(prompt, query))
+    if synthesis:
+        best_title = str(synthesis.get("best_source_title") or "").strip()
+        best_url = str(synthesis.get("best_source_url") or "").strip()
+        answer = str(synthesis.get("synthesis") or "").strip()
+        for item in evidence_items:
+            if str(item.get("url") or "").strip() == best_url or str(item.get("title") or "").strip() == best_title:
+                best_card = {
+                    "title": str(item.get("title") or best_title).strip(),
+                    "url": str(item.get("url") or best_url).strip(),
+                    "summary": str(item.get("summary") or "").strip(),
+                    "score": float(item.get("score") or 0.0),
+                }
+                best_details = {
+                    "title": str(item.get("title") or best_title).strip(),
+                    "url": str(item.get("url") or best_url).strip(),
+                    "summary": str(item.get("summary") or "").strip(),
+                    "page_kind": str(item.get("source_kind") or item.get("page_kind") or "web_page").strip(),
+                }
+                break
+    else:
+        answer = fallback_answer
     if not answer and best_card:
         best_details = {
             "url": str(best_card.get("url") or "").strip(),
@@ -4102,10 +4164,13 @@ def _resolve_web_answer(
         answer = _best_web_answer_summary(prompt=prompt, card=best_card, details=best_details)
     return {
         "query": query,
-        "cards": cards,
+        "cards": enriched_cards or top_candidates or cards,
+        "source_count": len(evidence_items),
         "answer": answer,
         "best_card": best_card,
         "best_details": best_details,
+        "synthesis": synthesis,
+        "evidence_items": evidence_items,
     }
 
 
@@ -4828,6 +4893,9 @@ def execute_terminal_plan(
             cards = [dict(item) for item in list(answer_payload.get("cards") or []) if isinstance(item, dict)]
             best_card = dict(answer_payload.get("best_card") or {})
             best_details = dict(answer_payload.get("best_details") or {})
+            synthesis = dict(answer_payload.get("synthesis") or {})
+            evidence_items = [dict(item) for item in list(answer_payload.get("evidence_items") or []) if isinstance(item, dict)]
+            source_count = int(answer_payload.get("source_count") or len(evidence_items) or len(cards) or 0)
             best_url = str(best_details.get("url") or best_card.get("url") or "").strip()
             if not answer:
                 residuals.append("browser_web_answer_missing")
@@ -4857,17 +4925,22 @@ def execute_terminal_plan(
                 subject_url=best_url,
                 subject_summary=answer,
                 research_subject_title=goal,
+                research_subject_url=best_url,
+                research_subject_summary=answer,
                 evidence_items=_clone_evidence_items(current_browser_state.evidence_items),
             )
-            current_browser_state = _append_browser_evidence(
-                current_browser_state,
-                _evidence_item_from_details(current_browser_state, best_details or {
-                    "url": best_url,
-                    "title": str(best_card.get("title") or best_url).strip(),
-                    "summary": answer,
-                    "page_kind": str(best_details.get("page_kind") or "web_page").strip(),
-                }),
-            )
+            for evidence_item in evidence_items:
+                current_browser_state = _append_browser_evidence(current_browser_state, evidence_item)
+            if not evidence_items:
+                current_browser_state = _append_browser_evidence(
+                    current_browser_state,
+                    _evidence_item_from_details(current_browser_state, best_details or {
+                        "url": best_url,
+                        "title": str(best_card.get("title") or best_url).strip(),
+                        "summary": answer,
+                        "page_kind": str(best_details.get("page_kind") or "web_page").strip(),
+                    }),
+                )
             records.append(
                 TerminalExecutionRecord(
                     kind=action.kind,
@@ -4879,6 +4952,9 @@ def execute_terminal_plan(
                         "query": query,
                         "best_source_title": str(best_details.get("title") or best_card.get("title") or "").strip(),
                         "best_source_url": best_url,
+                        "best_source_kind": str(best_details.get("page_kind") or synthesis.get("best_source_kind") or "web_page").strip(),
+                        "source_count": source_count,
+                        "synthesis": str(synthesis.get("synthesis") or answer).strip(),
                         "top_results": cards,
                     },
                 )

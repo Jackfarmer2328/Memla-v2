@@ -1512,20 +1512,36 @@ def test_terminal_execute_plan_answers_bounded_web_query(monkeypatch, tmp_path):
                 "title": "AI agents today",
                 "url": "https://example.com/ai-agents",
                 "summary": "AI agents are getting more capable across coding and commerce workflows.",
-            }
+            },
+            {
+                "index": 2,
+                "title": "AI agents funding",
+                "url": "https://example.com/ai-agents-funding",
+                "summary": "Funding and product launches are accelerating in the AI agents space.",
+            },
         ],
     )
-    monkeypatch.setattr(
-        "memory_system.natural_terminal._fetch_page_html",
-        lambda url: """
+
+    def fake_fetch_page_html(url: str) -> str:
+        if "funding" in url:
+            return """
+            <html>
+              <head>
+                <title>AI agents funding</title>
+                <meta name="description" content="Funding and product launches are accelerating in the AI agents space." />
+              </head>
+            </html>
+            """
+        return """
         <html>
           <head>
             <title>AI agents today</title>
             <meta name="description" content="AI agents are getting more capable across coding and commerce workflows." />
           </head>
         </html>
-        """,
-    )
+        """
+
+    monkeypatch.setattr("memory_system.natural_terminal._fetch_page_html", fake_fetch_page_html)
 
     plan = TerminalPlan(
         prompt="what's happening in the news about AI agents today?",
@@ -1552,6 +1568,9 @@ def test_terminal_execute_plan_answers_bounded_web_query(monkeypatch, tmp_path):
     assert "AI agents are getting more capable" in result.records[0].message
     assert result.browser_state["current_url"] == "https://example.com/ai-agents"
     assert result.browser_state["search_query"] == "ai agents news today"
+    assert len(result.browser_state["result_cards"]) == 2
+    assert len(result.browser_state["evidence_items"]) == 2
+    assert result.records[0].details["source_count"] == 2
 
 
 def test_terminal_execute_plan_ranks_and_compares_cards():

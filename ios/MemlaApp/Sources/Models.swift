@@ -347,6 +347,8 @@ struct BrowserState: Codable {
     let searchQuery: String?
     let subjectTitle: String?
     let researchSubjectTitle: String?
+    let subjectSummary: String?
+    let resultCards: [BrowserResultCard]?
 
     enum CodingKeys: String, CodingKey {
         case currentURL = "current_url"
@@ -355,7 +357,19 @@ struct BrowserState: Codable {
         case searchQuery = "search_query"
         case subjectTitle = "subject_title"
         case researchSubjectTitle = "research_subject_title"
+        case subjectSummary = "subject_summary"
+        case resultCards = "result_cards"
     }
+}
+
+struct BrowserResultCard: Codable, Identifiable {
+    var id: String { url.isEmpty ? "\(index)-\(title)" : url }
+
+    let index: Int?
+    let title: String
+    let url: String
+    let summary: String?
+    let score: Double?
 }
 
 struct MemlaScoutEnvelope: Codable {

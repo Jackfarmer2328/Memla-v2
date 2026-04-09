@@ -396,6 +396,12 @@ struct ContentView: View {
                             Text(subject)
                                 .font(.caption.weight(.semibold))
                         }
+                        if let subjectSummary = browserState.subjectSummary, !subjectSummary.isEmpty {
+                            Text(subjectSummary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(3)
+                        }
                         if let currentURL = browserState.currentURL, !currentURL.isEmpty {
                             Text(currentURL)
                                 .font(.caption2)
@@ -405,6 +411,42 @@ struct ContentView: View {
                     }
                     .padding(10)
                     .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                    if let resultCards = browserState.resultCards, !resultCards.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Sources")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            ForEach(Array(resultCards.prefix(3))) { card in
+                                VStack(alignment: .leading, spacing: 3) {
+                                    HStack(alignment: .top) {
+                                        Text(card.title)
+                                            .font(.caption.weight(.semibold))
+                                        Spacer(minLength: 8)
+                                        if let score = card.score {
+                                            Text(String(format: "%.2f", score))
+                                                .font(.caption2.weight(.semibold))
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    if let summary = card.summary, !summary.isEmpty {
+                                        Text(summary)
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(2)
+                                    }
+                                    if !card.url.isEmpty {
+                                        Text(card.url)
+                                            .font(.caption2)
+                                            .foregroundStyle(.blue)
+                                            .lineLimit(1)
+                                    }
+                                }
+                                .padding(10)
+                                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            }
+                        }
+                    }
                 }
 
                 if let execution = result.execution, !execution.records.isEmpty {
