@@ -3059,7 +3059,21 @@ struct MemlaBrowserView: View {
         let allowCaution: Bool
         let status: String
         let pendingRole: String
-        let consumedTerms: [String] = []
+        let consumedTerms: [String]
+
+        init(
+            candidate: WebsiteC2ACandidate,
+            allowCaution: Bool,
+            status: String,
+            pendingRole: String,
+            consumedTerms: [String] = []
+        ) {
+            self.candidate = candidate
+            self.allowCaution = allowCaution
+            self.status = status
+            self.pendingRole = pendingRole
+            self.consumedTerms = consumedTerms
+        }
     }
 
     private let commerceChecklist = [
