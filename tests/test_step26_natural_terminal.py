@@ -134,6 +134,17 @@ def test_terminal_heuristic_plan_builds_bounded_web_answer_for_weather_without_l
     assert plan.actions[0].resolved_target == "weather today"
 
 
+def test_terminal_heuristic_plan_builds_bounded_web_answer_for_contracted_fact_question():
+    plan = build_terminal_plan(
+        prompt="who's the ceo of openai",
+        heuristic_only=True,
+    )
+
+    assert plan.source == "heuristic"
+    assert [action.kind for action in plan.actions] == ["browser_answer_query"]
+    assert plan.actions[0].resolved_target == "who is the ceo of openai"
+
+
 def test_terminal_heuristic_plan_handles_noisy_click_first_video_follow_up():
     browser_state = BrowserSessionState(
         current_url="https://www.youtube.com/results?search_query=nine+vicious",

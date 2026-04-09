@@ -639,6 +639,21 @@ def save_browser_session_state(state: BrowserSessionState, path: str | Path | No
 
 def _normalize_label(value: str) -> str:
     text = str(value or "").strip().lower()
+    for source, target in (
+        ("what's", "what is"),
+        ("whats", "what is"),
+        ("who's", "who is"),
+        ("whos", "who is"),
+        ("where's", "where is"),
+        ("wheres", "where is"),
+        ("when's", "when is"),
+        ("whens", "when is"),
+        ("why's", "why is"),
+        ("whys", "why is"),
+        ("how's", "how is"),
+        ("hows", "how is"),
+    ):
+        text = text.replace(source, target)
     text = re.sub(r"[^a-z0-9]+", " ", text)
     return " ".join(text.split())
 
@@ -680,6 +695,21 @@ def _normalize_goal_text(value: str) -> str:
     text = re.sub(r"\bc\+\+\b", " cpp ", text)
     text = re.sub(r"\bc plus plus\b", " cpp ", text)
     text = re.sub(r"\bcxx\b", " cpp ", text)
+    for source, target in (
+        ("what's", "what is"),
+        ("whats", "what is"),
+        ("who's", "who is"),
+        ("whos", "who is"),
+        ("where's", "where is"),
+        ("wheres", "where is"),
+        ("when's", "when is"),
+        ("whens", "when is"),
+        ("why's", "why is"),
+        ("whys", "why is"),
+        ("how's", "how is"),
+        ("hows", "how is"),
+    ):
+        text = text.replace(source, target)
     text = re.sub(r"[^a-z0-9]+", " ", text)
     for pattern, replacement in LANGUAGE_REWRITE_PATTERNS:
         text = re.sub(pattern, replacement, text)
