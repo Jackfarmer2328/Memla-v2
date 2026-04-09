@@ -2145,16 +2145,20 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
       };
       const itemModal = Array.from(document.querySelectorAll('[data-testid="ItemModal"], [role="dialog"]'))
         .filter(visible)[0] || document;
-      const button = Array.from(itemModal.querySelectorAll('button[data-testid="optionFooter"], button, [role="button"]'))
+      const saveMatcher = (el) => {
+        const text = clean(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
+        return /^save(?: options)?(?:\\s*\\+\\$?\\d[\\d.,]*)?$/i.test(text) || /^save$/i.test(text);
+      };
+      const button = Array.from(document.querySelectorAll('#prism-modal-footer button[data-testid="optionFooter"], button[data-testid="optionFooter"]'))
         .filter(visible)
-        .find((el) => {
-          const text = clean(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
-          return /^save(?: options)?(?:\\s*\\+\\$?\\d[\\d.,]*)?$/i.test(text) || /^save$/i.test(text);
-        });
+        .find(saveMatcher)
+        || Array.from(document.querySelectorAll('button, [role="button"]'))
+          .filter(visible)
+          .find((el) => saveMatcher(el) && (itemModal.contains(el) || el.closest('#prism-modal-footer, .ModalFooter-sc-ibg5mu-5, [data-testid="in-content-modal-footer-container"]')));
       if (!button) {
         return { ok: false, reason: 'doordash_modifier_save_not_found' };
       }
-      const footer = button.closest('[data-testid="in-content-modal-footer-container"], .ModalFooter-sc-ibg5mu-5, section, div');
+      const footer = button.closest('#prism-modal-footer, [data-testid="in-content-modal-footer-container"], .ModalFooter-sc-ibg5mu-5, section, div');
       const activate = (node) => {
         if (!node) return;
         try { node.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
