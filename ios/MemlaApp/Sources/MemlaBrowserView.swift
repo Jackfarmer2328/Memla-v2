@@ -420,7 +420,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             return
         }
         let itemCount = payload["doordash_item_card_count"] as? Int ?? 0
-        guard itemCount == 0 else {
+        guard itemCount < 10 else {
             lastDoorDashStorefrontWarmupURL = currentURL
             doorDashStorefrontWarmupAttempts = 0
             return
@@ -433,7 +433,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             lastDoorDashStorefrontWarmupURL = url
             doorDashStorefrontWarmupAttempts = 0
         }
-        guard doorDashStorefrontWarmupAttempts < 1 else {
+        guard doorDashStorefrontWarmupAttempts < 3 else {
             return
         }
         doorDashStorefrontWarmupAttempts += 1
@@ -1256,6 +1256,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             return 1.8
         case "dd_item_card":
             return 3.4
+        case "dd_modifier_option":
+            return 4.0
         case "ue_item_card":
             return 3.2
         case "item_action_button":
@@ -1337,6 +1339,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             return "Visible menu or item candidate"
         case "dd_item_card":
             return "DoorDash menu item card"
+        case "dd_modifier_option":
+            return "DoorDash modifier option"
         case "ue_item_card":
             return "Uber Eats menu item card"
         case "item_action_button":
@@ -1420,6 +1424,11 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         case "dd_store_card":
             if text.contains("domino") || text.contains("pizza") || text.contains("taco") || text.contains("burger") || text.contains("johns") || text.contains("caesars") {
                 return 0.5
+            }
+            return 0.0
+        case "dd_modifier_option":
+            if text.contains("small") || text.contains("medium") || text.contains("large") || text.contains("meal") || text.contains("drink") || text.contains("fries") || text.contains("size") {
+                return 0.9
             }
             return 0.0
         case "ue_add_to_cart":
@@ -2307,22 +2316,42 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           const modalOptionButtons = Array.from(itemModal.querySelectorAll('button,[role="button"],a[href],input[type="radio"],input[type="checkbox"]'))
             .filter(visible)
             .filter((el) => {
-              const root = closestWithText(el, 18, 260);
+              const root = closestWithText(el, 8, 220);
               const label = firstMeaningfulTextLine(root) || labelForElement(el);
-              const text = clean([label, contextForElement(el, itemModal)].join(' '));
+              const text = clean([label, contextForElement(el, root)].join(' '));
               if (!text || isDoorDashNoise(text) || /close|dismiss|add special instructions|add to cart/i.test(text)) {
                 return false;
               }
-              return text.length <= 420;
+              if (/^your recommended options\\b/i.test(text)) {
+                return false;
+              }
+              if (/required|optional|choose|select|preferences$/i.test(label)) {
+                return false;
+              }
+              return text.length <= 260;
             })
             .slice(0, 24);
           modalOptionButtons.forEach((el) => {
-            doordashItemCardCount += 1;
-            const root = closestWithText(el, 18);
+            const root = closestWithText(el, 8, 220);
             const label = firstMeaningfulTextLine(root) || labelForElement(el);
-            pushUnique(doordashCandidates, candidateFromElement(el, 'dd_item_card', root, label));
+            if (!label) return;
+            doordashItemCardCount += 1;
+            pushUnique(doordashCandidates, candidateFromElement(el, 'dd_modifier_option', root, label));
           });
         } else if (!cartDrawer) {
+          const explicitMenuCards = Array.from(document.querySelectorAll('[data-testid="MenuItem"][data-item-id]'))
+            .filter(visible)
+            .slice(0, 28);
+          explicitMenuCards.forEach((el) => {
+            doordashItemCardCount += 1;
+            const titleNode = el.querySelector('[data-telemetry-id="storeMenuItem.title"]') || el.querySelector('h3,[role="heading"]');
+            const priceNode = el.querySelector('[data-anchor-id="StoreMenuItemPrice"]');
+            const itemLabel = clean(titleNode?.innerText || titleNode?.textContent || firstMeaningfulTextLine(el) || labelForElement(el));
+            const priceLabel = clean(priceNode?.innerText || priceNode?.textContent || "");
+            const displayLabel = priceLabel.isEmpty ? itemLabel : clean([itemLabel, priceLabel].join(' '));
+            pushUnique(doordashCandidates, candidateFromElement(el, 'dd_item_card', el, displayLabel));
+          });
+
           const quickAddButtons = Array.from(document.querySelectorAll('button[data-testid="quick-add-button"]'))
             .filter(visible)
             .slice(0, 8);
@@ -2757,6 +2786,13 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         const rect = el.getBoundingClientRect();
         return rect.width > 1 && rect.height > 1;
       };
+      const menuCards = Array.from(document.querySelectorAll('[data-testid="MenuItem"][data-item-id]'))
+        .filter(visible);
+      const menuTail = menuCards[menuCards.length - 1];
+      if (menuTail && typeof menuTail.scrollIntoView === 'function') {
+        menuTail.scrollIntoView({ block: 'center', inline: 'nearest' });
+        return { ok: true, reason: 'scrolled_to_menu_card_tail' };
+      }
       const candidates = Array.from(document.querySelectorAll('[role="button"][aria-label], button[aria-label], h2, h3, [role="heading"]'))
         .filter(visible);
       const target = candidates.find((el) => {
@@ -3324,7 +3360,7 @@ struct MemlaBrowserView: View {
 
     private func mirrorCandidates(for state: WebsiteC2AState) -> [WebsiteC2ACandidate] {
         let deprioritizedRoles = Set(["review_link", "accessibility_link", "utility_link", "auth_link", "nav_link", "dd_menu_nav"])
-        let preferredRoles = Set(["store_link", "menu_item", "item_action_button", "cart_link", "cart_button", "control_button", "checkout_button", "dd_store_card", "dd_item_card", "dd_add_to_cart", "dd_continue_cta", "dd_cart_cta", "dd_tip_option", "dd_address_cta", "dd_modal_close", "ue_continue_browser", "ue_address_cta", "ue_address_result", "ue_search_entry", "ue_store_card", "ue_item_card", "ue_add_to_cart", "ue_cart_cta", "ue_continue_cta", "ue_modal_close", "ub_pickup_input", "ub_pickup_current_location", "ub_pickup_result", "ub_dropoff_input", "ub_dropoff_result", "ub_see_prices_cta", "ub_vehicle_option"])
+        let preferredRoles = Set(["store_link", "menu_item", "item_action_button", "cart_link", "cart_button", "control_button", "checkout_button", "dd_store_card", "dd_item_card", "dd_modifier_option", "dd_add_to_cart", "dd_continue_cta", "dd_cart_cta", "dd_tip_option", "dd_address_cta", "dd_modal_close", "ue_continue_browser", "ue_address_cta", "ue_address_result", "ue_search_entry", "ue_store_card", "ue_item_card", "ue_add_to_cart", "ue_cart_cta", "ue_continue_cta", "ue_modal_close", "ub_pickup_input", "ub_pickup_current_location", "ub_pickup_result", "ub_dropoff_input", "ub_dropoff_result", "ub_see_prices_cta", "ub_vehicle_option"])
         let visibleCandidates = state.candidates.filter { !deprioritizedRoles.contains($0.role) && !$0.blocked }
         let stateScopedRoles: Set<String>
         switch state.pageKind {
@@ -3347,7 +3383,7 @@ struct MemlaBrowserView: View {
         case "dd_storefront":
             stateScopedRoles = ["dd_item_card", "dd_add_to_cart", "dd_cart_cta"]
         case "dd_item_modal":
-            stateScopedRoles = ["dd_add_to_cart", "dd_item_card", "dd_cart_cta", "dd_modal_close"]
+            stateScopedRoles = ["dd_modifier_option", "dd_add_to_cart", "dd_item_card", "dd_cart_cta", "dd_modal_close"]
         case "dd_cart_drawer", "dd_cart_page":
             stateScopedRoles = ["dd_cart_cta", "dd_continue_cta", "dd_tip_option", "dd_address_cta", "dd_modal_close"]
         case "dd_checkout":
@@ -3491,12 +3527,14 @@ struct MemlaBrowserView: View {
             }
         case "dd_item_modal":
             switch role {
-            case "dd_add_to_cart":
+            case "dd_modifier_option":
                 return 100
-            case "dd_cart_cta":
+            case "dd_add_to_cart":
                 return 85
+            case "dd_cart_cta":
+                return 70
             case "dd_item_card":
-                return 75
+                return 60
             case "dd_modal_close":
                 return 10
             default:
@@ -3715,14 +3753,37 @@ struct MemlaBrowserView: View {
     }
 
     private func mirrorItemCandidates(for state: WebsiteC2AState) -> [WebsiteC2ACandidate] {
-        let itemRoles = Set(["store_link", "menu_item", "dd_store_card", "dd_item_card", "ue_store_card", "ue_item_card", "ub_vehicle_option"])
-        let filtered = mirrorCandidates(for: state).filter { itemRoles.contains($0.role) }
-        return filtered.isEmpty ? mirrorCandidates(for: state).filter { !$0.url.isEmpty } : filtered
+        let itemRoles = Set(["store_link", "menu_item", "dd_store_card", "dd_item_card", "dd_modifier_option", "ue_store_card", "ue_item_card", "ub_vehicle_option"])
+        let filtered = mirrorSectionCandidates(for: state, allowedRoles: itemRoles)
+        return filtered.isEmpty ? mirrorSectionCandidates(for: state) : filtered
     }
 
     private func mirrorControlCandidates(for state: WebsiteC2AState) -> [WebsiteC2ACandidate] {
         let controlRoles = Set(["item_action_button", "cart_button", "cart_link", "control_button", "checkout_button", "dd_add_to_cart", "dd_continue_cta", "dd_cart_cta", "dd_tip_option", "dd_address_cta", "dd_modal_close", "ue_continue_browser", "ue_address_cta", "ue_address_result", "ue_search_entry", "ue_add_to_cart", "ue_cart_cta", "ue_continue_cta", "ue_modal_close", "ub_pickup_input", "ub_pickup_current_location", "ub_pickup_result", "ub_dropoff_input", "ub_dropoff_result", "ub_see_prices_cta"])
-        return mirrorCandidates(for: state).filter { controlRoles.contains($0.role) }
+        return mirrorSectionCandidates(for: state, allowedRoles: controlRoles)
+    }
+
+    private func mirrorSectionCandidates(for state: WebsiteC2AState, allowedRoles: Set<String>? = nil) -> [WebsiteC2ACandidate] {
+        let deprioritizedRoles = Set(["review_link", "accessibility_link", "utility_link", "auth_link", "nav_link", "dd_menu_nav"])
+        let visibleCandidates = state.candidates.filter { !deprioritizedRoles.contains($0.role) && !$0.blocked }
+        let filtered: [WebsiteC2ACandidate]
+        if let allowedRoles {
+            filtered = visibleCandidates.filter { allowedRoles.contains($0.role) }
+        } else {
+            filtered = visibleCandidates
+        }
+        let sorted = filtered.sorted { left, right in
+            let leftPriority = mirrorRolePriority(pageKind: state.pageKind, role: left.role)
+            let rightPriority = mirrorRolePriority(pageKind: state.pageKind, role: right.role)
+            if leftPriority != rightPriority {
+                return leftPriority > rightPriority
+            }
+            if left.score != right.score {
+                return left.score > right.score
+            }
+            return left.label.localizedCaseInsensitiveCompare(right.label) == .orderedAscending
+        }
+        return Array(sorted.prefix(12))
     }
 
     private func mirrorItemSectionTitle(for state: WebsiteC2AState) -> String {
@@ -3748,7 +3809,7 @@ struct MemlaBrowserView: View {
         case "dd_storefront":
             return "Menu Items"
         case "dd_item_modal":
-            return "Customizer Items"
+            return "Customizer Options"
         case "dd_cart_drawer":
             return "Cart Signals"
         case "dd_checkout":
@@ -4017,6 +4078,8 @@ struct MemlaBrowserView: View {
             return "Continue"
         case "dd_add_to_cart":
             return "Add To Cart"
+        case "dd_modifier_option":
+            return "Select Option"
         case "ue_continue_browser":
             return "Continue In Browser"
         case "ue_address_cta":
