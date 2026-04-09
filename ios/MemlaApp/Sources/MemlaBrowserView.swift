@@ -1947,40 +1947,26 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         if isPickup {
             return """
             (() => {
-              const input = document.querySelector('input[data-testid="dotcom-ui.pickup-destination.input.pickup"]');
-              const row = input?.closest('[data-testid="pudo-select-v2"]')
-                || input?.closest('.css-ilwscx')
-                || input?.parentElement?.parentElement?.parentElement;
-              const locationButton = document.querySelector('[data-testid="clear-button"] [role="button"]')
-                || document.querySelector('[data-testid="clear-button"] svg[role="button"]')
-                || document.querySelector('[data-testid="clear-button"]');
+              const input = document.querySelector('input[aria-label="Pickup location needs to be filled in"]')
+                || document.querySelector('input[data-testid="dotcom-ui.pickup-destination.input.pickup"]');
 
-              if (!row && !input) {
-                return { ok: false, reason: 'uber_pickup_row_not_found' };
+              if (!input) {
+                return { ok: false, reason: 'uber_pickup_input_not_found' };
               }
 
-              const clickNode = (node) => {
-                if (!node) return;
-                try { node.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
-                ['mousedown', 'mouseup', 'click'].forEach((type) => {
-                  try {
-                    node.dispatchEvent(new MouseEvent(type, {
-                      bubbles: true,
-                      cancelable: true,
-                      view: window
-                    }));
-                  } catch (_) {}
-                });
-                if (typeof node.click === 'function') {
-                  try { node.click(); } catch (_) {}
+              try { input.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
+              if (typeof input.focus === 'function') {
+                try { input.focus({ preventScroll: true }); } catch (_) {
+                  try { input.focus(); } catch (_) {}
                 }
-              };
-
-              clickNode(row);
-              clickNode(locationButton || input);
-              if (input && typeof input.focus === 'function') {
-                try { input.focus(); } catch (_) {}
               }
+              try { input.click(); } catch (_) {}
+
+              try { input.dispatchEvent(new FocusEvent('focus', { bubbles: true })); } catch (_) {}
+              try { input.dispatchEvent(new FocusEvent('focusin', { bubbles: true })); } catch (_) {}
+              try { input.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window })); } catch (_) {}
+              try { input.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window })); } catch (_) {}
+              try { input.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window })); } catch (_) {}
 
               return { ok: true, reason: 'focused_uber_pickup_field' };
             })();
