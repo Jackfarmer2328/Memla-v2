@@ -2241,7 +2241,13 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
 
         const visibleDialogs = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"]')).filter(visible);
         const paymentSheet = visibleDialogs.find((el) => /select payment method|credit\\/debit card|paypal|venmo|cash app pay|klarna/i.test(clean(el.innerText)));
-        const itemModal = visibleDialogs.find((el) => /add to cart|choose your size|recommended options|build your own pizza|custom pizza/i.test(clean(el.innerText)));
+        const explicitItemModal = Array.from(document.querySelectorAll('[data-testid="ItemModal"]'))
+          .filter(visible)[0];
+        const explicitOptionFooter = Array.from(document.querySelectorAll('button[data-testid="optionFooter"]'))
+          .filter(visible)[0];
+        const itemModal = explicitItemModal
+          || explicitOptionFooter?.closest('[data-testid="ItemModal"],[role="dialog"]')
+          || visibleDialogs.find((el) => /add to cart|choose your size|recommended options|build your own pizza|custom pizza/i.test(clean(el.innerText)));
         const cartDrawer = continueAnchor || cartCloseButton ? sharedAncestor(continueAnchor, cartCloseButton) : null;
         const activeRoot = paymentSheet || cartDrawer || itemModal || null;
         doordashActiveLayer = paymentSheet ? 'payment_sheet' : cartDrawer ? 'cart_drawer' : itemModal ? 'item_modal' : 'page';
@@ -2324,7 +2330,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             .filter(visible)
             .some((el) => /add special instructions/i.test(labelForElement(el)));
 
-          const saveFooterButtons = Array.from(itemModal.querySelectorAll('button[data-testid="optionFooter"]'))
+          const saveFooterButtons = Array.from((explicitItemModal || itemModal || document).querySelectorAll('button[data-testid="optionFooter"]'))
             .filter(visible);
           saveFooterButtons.forEach((button) => {
             const root = sharedAncestor(itemModal, button) || closestWithText(button, 8, 220);
