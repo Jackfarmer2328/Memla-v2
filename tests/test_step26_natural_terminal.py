@@ -4,6 +4,10 @@ import json
 from pathlib import Path
 
 from memory_system.cli import main
+from memory_system.distillation.web_policy_bank import (
+    distill_web_policy_bank,
+    suggest_web_policy_priors,
+)
 from memory_system.memory.ontology import load_memory_ontology
 from memory_system.natural_terminal import (
     BROWSER_STATE_ENV,
@@ -1899,6 +1903,85 @@ def test_run_web_teacher_loop_promotes_rescued_answers(monkeypatch, tmp_path):
     assert row["rescued_answer"].startswith("Anthropic was founded in 2021")
     assert row["promotion_notes"] == ["promote direct founder wording"]
     assert report["trace_rows"][0]["promoted_lane"] == "teacher_rescue"
+
+
+def test_distill_web_policy_bank_extracts_web_behaviors(tmp_path):
+    trace_path = tmp_path / "web_teacher_trace_bank.jsonl"
+    trace_path.write_text(
+        json.dumps(
+            {
+                "prompt": "what's the weather today in minneapolis",
+                "query": "weather today minneapolis",
+                "slice": "weather",
+                "promoted_lane": "teacher_rescue",
+                "improvement_delta": 1.0,
+                "teacher_coaching": "Suggest they visit the weather.com link you found for current conditions.",
+                "rescue_why_better": "Acknowledges the limitation while being more helpful by directing the user to the specific weather.com page.",
+                "promotion_notes": [
+                    "Directs user to found weather source",
+                    "More helpful than just stating limitation",
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    report = distill_web_policy_bank(trace_bank_path=str(trace_path))
+    priors = suggest_web_policy_priors(
+        prompt="what's the weather today in minneapolis",
+        query="weather today minneapolis",
+        slice_kind="weather",
+        bank=report,
+    )
+
+    assert report["rows_used"] == 1
+    assert "direct_to_found_source" in priors["behaviors"]
+    assert "offer_actionable_next_step" in priors["behaviors"]
+
+
+def test_resolve_web_answer_applies_policy_priors_to_limitation(monkeypatch):
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._fetch_search_result_cards",
+        lambda engine, query, limit=5: [
+            {
+                "index": 1,
+                "title": "Weather Forecast and Conditions for Minneapolis, Minnesota 55450 | weather.com",
+                "url": "https://weather.com/weather/today/l/minneapolis",
+                "summary": "Weather.com Minneapolis page",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._fetch_page_html",
+        lambda url: """
+        <html>
+          <head>
+            <title>Weather Forecast and Conditions for Minneapolis, Minnesota 55450 | weather.com</title>
+            <meta name="description" content="Weather.com Minneapolis page" />
+          </head>
+          <body>
+            <nav>today hourly ten day radar</nav>
+          </body>
+        </html>
+        """,
+    )
+    monkeypatch.setattr(
+        "memory_system.natural_terminal.suggest_web_policy_priors",
+        lambda **kwargs: {
+            "matched_tokens": ["minneapolis", "slice:weather"],
+            "behaviors": ["direct_to_found_source", "offer_actionable_next_step", "acknowledge_limits_plainly"],
+            "teacher_notes": ["Direct the user to the found source"],
+        },
+    )
+
+    payload = _resolve_web_answer(
+        prompt="what's the weather today in minneapolis",
+        query="weather today minneapolis",
+    )
+
+    assert "check Weather Forecast and Conditions for Minneapolis, Minnesota 55450 | weather.com directly" in payload["answer"]
+    assert "direct_to_found_source" in payload["answer_style"]["policy_behaviors"]
 
 
 def test_terminal_heuristic_plan_opens_second_source_after_web_answer():

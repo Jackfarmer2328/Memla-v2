@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 from urllib import request as urllib_request
 from urllib.error import URLError
 
+from .distillation.web_policy_bank import suggest_web_policy_priors
 from .memory.ontology import (
     adjudicate_memory_trace,
     promote_memory_rule,
@@ -4296,6 +4297,134 @@ def _render_memla_web_answer(
     }
 
 
+def _looks_like_limitation_answer(answer: str) -> bool:
+    normalized = _normalize_goal_text(answer)
+    if not normalized:
+        return True
+    limitation_cues = (
+        "cannot provide",
+        "can not provide",
+        "cannot determine",
+        "do not have access",
+        "don't have access",
+        "limited information",
+        "only show",
+        "only shows",
+        "without actual",
+        "lack concrete",
+        "not clearly documented",
+        "not included in the evidence",
+    )
+    return any(cue in normalized for cue in limitation_cues)
+
+
+def _extract_concrete_detail_from_evidence(
+    *,
+    prompt: str,
+    query: str,
+    evidence_items: list[dict[str, Any]],
+) -> str:
+    seen: set[str] = set()
+    for item in list(evidence_items or [])[:3]:
+        combined = " ".join(
+            part
+            for part in [
+                str(item.get("summary") or "").strip(),
+                str(item.get("content_preview") or "").strip(),
+                str(item.get("title") or "").strip(),
+            ]
+            if part
+        )
+        snippet = _query_focused_snippet(combined, prompt or query)
+        snippet = _ensure_terminal_sentence(snippet)
+        normalized = _normalize_goal_text(snippet)
+        if not snippet or not normalized or normalized in seen or _looks_like_low_signal_web_text(snippet):
+            continue
+        seen.add(normalized)
+        return snippet
+    return ""
+
+
+def _source_titles_for_guidance(cards: list[dict[str, Any]], *, exclude: str, limit: int = 3) -> list[str]:
+    titles: list[str] = []
+    seen: set[str] = set()
+    exclude_key = _normalize_goal_text(exclude)
+    for card in list(cards or [])[:5]:
+        title = " ".join(str(card.get("title") or "").split()).strip()
+        if not title:
+            continue
+        key = _normalize_goal_text(title)
+        if not key or key in seen or (exclude_key and key == exclude_key):
+            continue
+        seen.add(key)
+        titles.append(title)
+        if len(titles) >= max(int(limit), 0):
+            break
+    return titles
+
+
+def _apply_web_policy_priors(
+    *,
+    prompt: str,
+    query: str,
+    slice_kind: str,
+    answer: str,
+    source_title: str,
+    source_url: str,
+    source_count: int,
+    cards: list[dict[str, Any]],
+    evidence_items: list[dict[str, Any]],
+    priors: dict[str, Any],
+) -> str:
+    behaviors = [str(item).strip() for item in list(priors.get("behaviors") or []) if str(item).strip()]
+    if not behaviors:
+        return answer
+    adjusted = _ensure_terminal_sentence(answer)
+    limited = _looks_like_limitation_answer(adjusted) or _looks_like_low_signal_web_text(adjusted)
+    detail = ""
+    if "extract_concrete_detail" in behaviors:
+        detail = _extract_concrete_detail_from_evidence(prompt=prompt, query=query, evidence_items=evidence_items)
+    if limited and detail:
+        if slice_kind == "news":
+            adjusted = f"I found limited coverage, but one concrete update is {detail}".strip()
+        elif slice_kind == "fact":
+            adjusted = detail
+        elif slice_kind == "general":
+            adjusted = f"I found one concrete detail: {detail}".strip()
+    elif limited and "direct_to_found_source" in behaviors:
+        if slice_kind == "weather":
+            adjusted = "I don't have current weather conditions in the evidence right now."
+        elif slice_kind == "news":
+            adjusted = "I found limited specific coverage in the evidence right now."
+        elif slice_kind == "fact":
+            adjusted = "I found limited direct evidence for that right now."
+        else:
+            adjusted = "I found limited direct detail in the evidence right now."
+    source_sentence = ""
+    if source_title and "direct_to_found_source" in behaviors and _normalize_goal_text(source_title) not in _normalize_goal_text(adjusted):
+        if slice_kind == "weather":
+            source_sentence = f"For today's weather, you can check {source_title} directly."
+        elif slice_kind == "news":
+            source_sentence = f"For the latest details, you can check {source_title} directly."
+        else:
+            source_sentence = f"You can check {source_title} directly for the latest details."
+    next_step_sentence = ""
+    if "offer_actionable_next_step" in behaviors and limited:
+        alternates = _source_titles_for_guidance(cards, exclude=source_title, limit=2)
+        if alternates and slice_kind == "news":
+            next_step_sentence = f"If you want to keep digging, {', '.join(alternates)} look like the best next places to check."
+        elif not source_sentence and source_url:
+            next_step_sentence = "If you want, I can open the source I found next."
+    parts = [adjusted]
+    if source_sentence:
+        parts.append(_ensure_terminal_sentence(source_sentence))
+    if next_step_sentence:
+        parts.append(_ensure_terminal_sentence(next_step_sentence))
+    if "tight_direct_answer" in behaviors and slice_kind == "fact" and len(parts) > 1:
+        parts = parts[:2]
+    return " ".join(part.strip() for part in parts if part.strip()).strip()
+
+
 def _web_answer_needs_model_rescue(slice_kind: str, answer: str) -> bool:
     clean = " ".join(str(answer or "").split()).strip()
     if not clean:
@@ -4396,6 +4525,12 @@ def _resolve_web_answer(
     model: str = "",
 ) -> dict[str, Any]:
     slice_kind = _web_question_slice(prompt, query)
+    policy_priors = suggest_web_policy_priors(
+        prompt=prompt,
+        query=query,
+        slice_kind=slice_kind,
+        repo_root=os.getcwd(),
+    )
     cards = _fetch_search_result_cards("web", query, limit=limit)
     if not cards:
         urls = _fetch_search_result_urls("web", query, limit=limit)
@@ -4511,6 +4646,18 @@ def _resolve_web_answer(
                 model_rendered_answer = ""
     if model_rendered_answer:
         answer = model_rendered_answer
+    answer = _apply_web_policy_priors(
+        prompt=prompt,
+        query=query,
+        slice_kind=slice_kind,
+        answer=answer,
+        source_title=str(best_details.get("title") or best_card.get("title") or "").strip(),
+        source_url=str(best_details.get("url") or best_card.get("url") or "").strip(),
+        source_count=len(evidence_items) or len(enriched_cards or top_candidates or cards),
+        cards=enriched_cards or top_candidates or cards,
+        evidence_items=evidence_items,
+        priors=policy_priors,
+    )
     raw_answer = str(answer or "").strip()
     rendered_answer, answer_style = _render_memla_web_answer(
         prompt=prompt,
@@ -4528,6 +4675,7 @@ def _resolve_web_answer(
         "answer_style": {
             **answer_style,
             "generator": "model" if model_rendered_answer else "heuristic",
+            "policy_behaviors": list(policy_priors.get("behaviors") or []),
         },
         "best_card": best_card,
         "best_details": best_details,

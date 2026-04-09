@@ -536,6 +536,32 @@ def test_memla_terminal_benchmark_web_teacher_v1_dispatches(monkeypatch):
     assert captured["rescue_threshold"] == 4
 
 
+def test_memla_terminal_distill_web_policy_v1_dispatches(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _fake_distill_web_policy(args):
+        captured["trace_bank"] = args.trace_bank
+        captured["min_improvement"] = args.min_improvement
+        return 0
+
+    monkeypatch.setattr("memory_system.cli._handle_distill_web_policy", _fake_distill_web_policy)
+
+    rc = main(
+        [
+            "terminal",
+            "distill-web-policy-v1",
+            "--trace-bank",
+            "web_teacher_trace_bank.jsonl",
+            "--min-improvement",
+            "0.5",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["trace_bank"] == "web_teacher_trace_bank.jsonl"
+    assert captured["min_improvement"] == 0.5
+
+
 def test_memla_top_level_scout_command_dispatches(monkeypatch):
     captured: dict[str, object] = {}
 

@@ -42,6 +42,10 @@ from .distillation.finance_policy_bank import (
     distill_finance_policy_bank,
     render_finance_policy_bank_markdown,
 )
+from .distillation.web_policy_bank import (
+    distill_web_policy_bank,
+    render_web_policy_bank_markdown,
+)
 from .distillation.finance_trace_bank import (
     extract_finance_trace_bank,
     render_finance_trace_bank_markdown,
@@ -1292,6 +1296,37 @@ def _handle_web_teacher_loop(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_distill_web_policy(args: argparse.Namespace) -> int:
+    repo_root = _resolve_repo_root(".")
+    out_path = Path(args.out).resolve() if args.out else (repo_root / ".memla" / "web_policy_bank.json").resolve()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    report = distill_web_policy_bank(
+        trace_bank_path=args.trace_bank,
+        min_improvement=args.min_improvement,
+    )
+    out_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    md_path = out_path.with_suffix(".md")
+    md_path.write_text(render_web_policy_bank_markdown(report), encoding="utf-8")
+    if args.json:
+        _print_json(
+            {
+                "policy_bank": str(out_path),
+                "markdown_summary": str(md_path),
+                "rows_used": report.get("rows_used", 0),
+                "slice_counts": report.get("slice_counts", {}),
+            }
+        )
+    else:
+        print(f"Wrote web policy bank JSON: {out_path}")
+        print(f"Wrote web policy bank Markdown: {md_path}")
+        print(
+            "Summary: "
+            f"rows used {report.get('rows_used', 0)} | "
+            f"slices {report.get('slice_counts', {})}"
+        )
+    return 0
+
+
 def _handle_terminal_browser_benchmark(args: argparse.Namespace) -> int:
     raw_model = _resolve_shared_terminal_model(args, "raw_model")
     memla_model = _resolve_shared_terminal_model(args, "memla_model")
@@ -1948,6 +1983,16 @@ def _build_parser() -> argparse.ArgumentParser:
     terminal_web_teacher_v1.add_argument("--heuristic-only", action="store_true", help="Force the Memla planner to stay heuristic-only before answering.")
     terminal_web_teacher_v1.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
     terminal_web_teacher_v1.set_defaults(func=_handle_web_teacher_loop)
+
+    terminal_web_policy_v1 = terminal_sub.add_parser(
+        "distill-web-policy-v1",
+        help="Distill a reusable web answer policy bank from a web teacher trace bank.",
+    )
+    terminal_web_policy_v1.add_argument("--trace-bank", required=True, help="Path to a web_teacher_trace_bank JSONL or report JSON file.")
+    terminal_web_policy_v1.add_argument("--min-improvement", type=float, default=0.0, help="Only keep rescue rows at or above this improvement delta.")
+    terminal_web_policy_v1.add_argument("--out", default="", help="Optional explicit output JSON path. Defaults to <repo>/.memla/web_policy_bank.json.")
+    terminal_web_policy_v1.add_argument("--json", action="store_true", help="Emit structured JSON instead of readable text.")
+    terminal_web_policy_v1.set_defaults(func=_handle_distill_web_policy)
 
     terminal_browser_bench = terminal_sub.add_parser(
         "benchmark-browser",
