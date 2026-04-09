@@ -19,6 +19,7 @@ from memory_system.natural_terminal import (
     _browser_new_tab_command,
     _compiler_surface_text,
     _extract_google_ai_overview_from_html,
+    _extract_google_weather_answer_from_html,
     _language_rule_plan,
     _hard_check_web_answer,
     _merge_language_actions,
@@ -1998,6 +1999,56 @@ def test_extract_google_ai_overview_from_html_parses_answer_and_sources():
     assert payload["answer_kind"] == "google_ai_overview"
     assert len(payload["source_cards"]) >= 2
     assert payload["source_cards"][0]["url"] == "https://www.energy.gov/articles/history-light-bulb"
+
+
+def test_extract_google_ai_overview_from_html_stops_before_web_results():
+    html = """
+    <html>
+      <body>
+        <div>AI Overview</div>
+        <div>
+          Sam Altman is the CEO of OpenAI.
+          He has held this position since 2019, leading the company through the launch of ChatGPT.
+        </div>
+        <a href="https://en.wikipedia.org/wiki/Sam_Altman">Wikipedia</a>
+        <div>Web results</div>
+        <h3>Sam Altman</h3>
+      </body>
+    </html>
+    """
+
+    payload = _extract_google_ai_overview_from_html(html, query="who is the ceo of openai")
+
+    assert payload["answer"] == "Sam Altman is the CEO of OpenAI. He has held this position since 2019, leading the company through the launch of ChatGPT."
+    assert payload["answer_kind"] == "google_ai_overview"
+    assert payload["source_cards"][0]["url"] == "https://en.wikipedia.org/wiki/Sam_Altman"
+
+
+def test_extract_google_weather_answer_from_html_answers_precipitation_question():
+    html = """
+    <html>
+      <body>
+        <div id="gsr">
+          AI Mode All News Search Results Minneapolis, MN • Choose area Weather Friday, April 10
+          52°/31° Sunny 35° 12 AM
+          Thu 47°/31° Fri 52°/31° Sat 59°/36°
+          Precipitation·0%
+          12 AM – 0% 1 AM – 0%
+        </div>
+        <a href="https://www.mprnews.org/weather">MPR weather</a>
+      </body>
+    </html>
+    """
+
+    payload = _extract_google_weather_answer_from_html(
+        html,
+        query="is it raining tomorrow in minneapolis",
+    )
+
+    assert payload["answer_kind"] == "google_weather"
+    assert payload["answer"].startswith("No, it doesn't look like rain tomorrow in Minneapolis, MN.")
+    assert "0% precipitation chance" in payload["answer"]
+    assert payload["source_cards"][0]["url"] == "https://www.mprnews.org/weather"
 
 
 def test_resolve_web_answer_prefers_google_answer_surface(monkeypatch):
