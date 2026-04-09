@@ -93,6 +93,17 @@ def test_terminal_heuristic_plan_builds_bounded_web_answer_for_news():
     assert plan.actions[0].resolved_target == "ai agents news today"
 
 
+def test_terminal_heuristic_plan_builds_bounded_web_answer_for_top_news():
+    plan = build_terminal_plan(
+        prompt="whats on the news",
+        heuristic_only=True,
+    )
+
+    assert plan.source == "heuristic"
+    assert [action.kind for action in plan.actions] == ["browser_answer_query"]
+    assert plan.actions[0].resolved_target == "top news today"
+
+
 def test_terminal_heuristic_plan_builds_bounded_web_answer_for_weather():
     plan = build_terminal_plan(
         prompt="what's the weather today in minneapolis",
@@ -102,6 +113,17 @@ def test_terminal_heuristic_plan_builds_bounded_web_answer_for_weather():
     assert plan.source == "heuristic"
     assert [action.kind for action in plan.actions] == ["browser_answer_query"]
     assert plan.actions[0].resolved_target == "weather today minneapolis"
+
+
+def test_terminal_heuristic_plan_builds_bounded_web_answer_for_weather_without_location():
+    plan = build_terminal_plan(
+        prompt="whats the weather today",
+        heuristic_only=True,
+    )
+
+    assert plan.source == "heuristic"
+    assert [action.kind for action in plan.actions] == ["browser_answer_query"]
+    assert plan.actions[0].resolved_target == "weather today"
 
 
 def test_terminal_heuristic_plan_handles_noisy_click_first_video_follow_up():

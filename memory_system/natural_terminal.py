@@ -1092,16 +1092,29 @@ def _general_web_query_from_prompt(prompt: str) -> str:
     normalized = " ".join(_normalize_goal_text(prompt).split()).strip(" ?.!")
     if not normalized:
         return ""
-    news_match = re.search(r"\b(?:what(?: s| is)?\s+happening\s+in\s+the\s+news\s+about|news\s+about)\s+(.+?)(?:\s+today)?$", normalized)
+    news_match = re.search(
+        r"\b(?:what(?:s|\s+s|\s+is)?\s+(?:happening|new)\s+in\s+the\s+news\s+about|what(?:s|\s+s|\s+is)?\s+the\s+news\s+on|news\s+about)\s+(.+?)(?:\s+today)?$",
+        normalized,
+    )
     if news_match:
         topic = str(news_match.group(1) or "").strip()
         if topic:
             return f"{topic} news today"
+    if re.search(r"\bwhat(?:s|\s+s|\s+is)?\s+(?:on|in)\s+the\s+news(?:\s+today)?$", normalized) or re.search(
+        r"\b(?:top|latest)\s+news(?:\s+today)?$",
+        normalized,
+    ):
+        return "top news today"
     weather_match = re.search(r"\bweather(?:\s+today)?(?:\s+in\s+|\s+for\s+)(.+)$", normalized)
     if weather_match:
         location = str(weather_match.group(1) or "").strip()
         if location:
             return f"weather today {location}"
+    if re.search(r"\bwhat(?:s|\s+s|\s+is)?\s+the\s+weather(?:\s+today)?$", normalized) or re.search(
+        r"\bweather(?:\s+today)?$",
+        normalized,
+    ):
+        return "weather today"
     return normalized
 
 
