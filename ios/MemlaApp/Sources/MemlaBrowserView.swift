@@ -318,8 +318,23 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
                 let ok = payload["ok"] as? Bool ?? false
                 self.buttonActionStatus = ok ? reason.capitalized : "Button tap blocked: \(reason)"
                 if ok {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+                    let inspectDelay: TimeInterval
+                    switch candidate.role {
+                    case "dd_item_card", "dd_modifier_option", "dd_modifier_save":
+                        inspectDelay = 1.35
+                    default:
+                        inspectDelay = 0.9
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + inspectDelay) {
                         self.inspectPage(capsule: capsule)
+                    }
+                    if candidate.role == "dd_modifier_option" || candidate.role == "dd_modifier_save" {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + inspectDelay + 0.95) {
+                            guard !self.isInspecting, !self.isLoading else {
+                                return
+                            }
+                            self.inspectPage(capsule: capsule)
+                        }
                     }
                 }
             }
@@ -1258,6 +1273,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             return 3.4
         case "dd_modifier_option":
             return 4.0
+        case "dd_modifier_save":
+            return 4.2
         case "ue_item_card":
             return 3.2
         case "item_action_button":
@@ -1341,6 +1358,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             return "DoorDash menu item card"
         case "dd_modifier_option":
             return "DoorDash modifier option"
+        case "dd_modifier_save":
+            return "DoorDash save-options control"
         case "ue_item_card":
             return "Uber Eats menu item card"
         case "item_action_button":
@@ -1429,6 +1448,11 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         case "dd_modifier_option":
             if text.contains("small") || text.contains("medium") || text.contains("large") || text.contains("meal") || text.contains("drink") || text.contains("fries") || text.contains("size") {
                 return 0.9
+            }
+            return 0.0
+        case "dd_modifier_save":
+            if text.contains("save options") || text == "save" || text.contains("save") {
+                return 1.3
             }
             return 0.0
         case "ue_add_to_cart":
@@ -1640,6 +1664,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             "find",
             "go",
             "menu",
+            "save",
             "view",
             "filter",
             "apply",
@@ -1992,6 +2017,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             'find',
             'go',
             'menu',
+            'save',
             'view',
             'filter',
             'apply',
@@ -2289,6 +2315,14 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             .filter(visible)
             .some((el) => /add special instructions/i.test(labelForElement(el)));
 
+          const saveFooterButtons = Array.from(itemModal.querySelectorAll('button[data-testid="optionFooter"]'))
+            .filter(visible);
+          saveFooterButtons.forEach((button) => {
+            const root = sharedAncestor(itemModal, button) || closestWithText(button, 8, 220);
+            const label = clean(labelForElement(button)) || 'Save';
+            pushUnique(doordashCandidates, candidateFromElement(button, 'dd_modifier_save', root, label));
+          });
+
           const customizerGroups = new Map();
           Array.from(itemModal.querySelectorAll('fieldset,section,div'))
             .filter(visible)
@@ -2320,6 +2354,9 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
               const label = firstMeaningfulTextLine(root) || labelForElement(el);
               const text = clean([label, contextForElement(el, root)].join(' '));
               if (!text || isDoorDashNoise(text) || /close|dismiss|add special instructions|add to cart/i.test(text)) {
+                return false;
+              }
+              if (el.matches('button[data-testid="optionFooter"]')) {
                 return false;
               }
               if (/^your recommended options\\b/i.test(text)) {
@@ -3360,7 +3397,7 @@ struct MemlaBrowserView: View {
 
     private func mirrorCandidates(for state: WebsiteC2AState) -> [WebsiteC2ACandidate] {
         let deprioritizedRoles = Set(["review_link", "accessibility_link", "utility_link", "auth_link", "nav_link", "dd_menu_nav"])
-        let preferredRoles = Set(["store_link", "menu_item", "item_action_button", "cart_link", "cart_button", "control_button", "checkout_button", "dd_store_card", "dd_item_card", "dd_modifier_option", "dd_add_to_cart", "dd_continue_cta", "dd_cart_cta", "dd_tip_option", "dd_address_cta", "dd_modal_close", "ue_continue_browser", "ue_address_cta", "ue_address_result", "ue_search_entry", "ue_store_card", "ue_item_card", "ue_add_to_cart", "ue_cart_cta", "ue_continue_cta", "ue_modal_close", "ub_pickup_input", "ub_pickup_current_location", "ub_pickup_result", "ub_dropoff_input", "ub_dropoff_result", "ub_see_prices_cta", "ub_vehicle_option"])
+        let preferredRoles = Set(["store_link", "menu_item", "item_action_button", "cart_link", "cart_button", "control_button", "checkout_button", "dd_store_card", "dd_item_card", "dd_modifier_option", "dd_modifier_save", "dd_add_to_cart", "dd_continue_cta", "dd_cart_cta", "dd_tip_option", "dd_address_cta", "dd_modal_close", "ue_continue_browser", "ue_address_cta", "ue_address_result", "ue_search_entry", "ue_store_card", "ue_item_card", "ue_add_to_cart", "ue_cart_cta", "ue_continue_cta", "ue_modal_close", "ub_pickup_input", "ub_pickup_current_location", "ub_pickup_result", "ub_dropoff_input", "ub_dropoff_result", "ub_see_prices_cta", "ub_vehicle_option"])
         let visibleCandidates = state.candidates.filter { !deprioritizedRoles.contains($0.role) && !$0.blocked }
         let stateScopedRoles: Set<String>
         switch state.pageKind {
@@ -3383,7 +3420,7 @@ struct MemlaBrowserView: View {
         case "dd_storefront":
             stateScopedRoles = ["dd_item_card", "dd_add_to_cart", "dd_cart_cta"]
         case "dd_item_modal":
-            stateScopedRoles = ["dd_modifier_option", "dd_add_to_cart", "dd_item_card", "dd_cart_cta", "dd_modal_close"]
+            stateScopedRoles = ["dd_modifier_option", "dd_modifier_save", "dd_add_to_cart", "dd_item_card", "dd_cart_cta", "dd_modal_close"]
         case "dd_cart_drawer", "dd_cart_page":
             stateScopedRoles = ["dd_cart_cta", "dd_continue_cta", "dd_tip_option", "dd_address_cta", "dd_modal_close"]
         case "dd_checkout":
@@ -3529,6 +3566,8 @@ struct MemlaBrowserView: View {
             switch role {
             case "dd_modifier_option":
                 return 100
+            case "dd_modifier_save":
+                return 92
             case "dd_add_to_cart":
                 return 85
             case "dd_cart_cta":
@@ -3759,7 +3798,7 @@ struct MemlaBrowserView: View {
     }
 
     private func mirrorControlCandidates(for state: WebsiteC2AState) -> [WebsiteC2ACandidate] {
-        let controlRoles = Set(["item_action_button", "cart_button", "cart_link", "control_button", "checkout_button", "dd_add_to_cart", "dd_continue_cta", "dd_cart_cta", "dd_tip_option", "dd_address_cta", "dd_modal_close", "ue_continue_browser", "ue_address_cta", "ue_address_result", "ue_search_entry", "ue_add_to_cart", "ue_cart_cta", "ue_continue_cta", "ue_modal_close", "ub_pickup_input", "ub_pickup_current_location", "ub_pickup_result", "ub_dropoff_input", "ub_dropoff_result", "ub_see_prices_cta"])
+        let controlRoles = Set(["item_action_button", "cart_button", "cart_link", "control_button", "checkout_button", "dd_add_to_cart", "dd_modifier_save", "dd_continue_cta", "dd_cart_cta", "dd_tip_option", "dd_address_cta", "dd_modal_close", "ue_continue_browser", "ue_address_cta", "ue_address_result", "ue_search_entry", "ue_add_to_cart", "ue_cart_cta", "ue_continue_cta", "ue_modal_close", "ub_pickup_input", "ub_pickup_current_location", "ub_pickup_result", "ub_dropoff_input", "ub_dropoff_result", "ub_see_prices_cta"])
         return mirrorSectionCandidates(for: state, allowedRoles: controlRoles)
     }
 
@@ -4080,6 +4119,8 @@ struct MemlaBrowserView: View {
             return "Add To Cart"
         case "dd_modifier_option":
             return "Select Option"
+        case "dd_modifier_save":
+            return candidate.label.localizedCaseInsensitiveContains("save") ? "Save" : "Save Options"
         case "ue_continue_browser":
             return "Continue In Browser"
         case "ue_address_cta":
