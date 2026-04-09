@@ -317,6 +317,12 @@ final class MemlaViewModel: ObservableObject {
     }
 
     func summaryLine(for envelope: MemlaRunEnvelope) -> String {
+        if let browserState = envelope.execution?.browserState {
+            let subjectSummary = browserState.subjectSummary?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !subjectSummary.isEmpty {
+                return subjectSummary
+            }
+        }
         if let records = envelope.execution?.records, !records.isEmpty {
             let messages = records.map { $0.message.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
             if !messages.isEmpty {
