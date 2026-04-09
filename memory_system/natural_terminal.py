@@ -1169,6 +1169,16 @@ def _cached_cards(browser_state: BrowserSessionState) -> list[dict[str, Any]]:
     return _fallback_cards_from_urls(list(browser_state.result_urls or []))
 
 
+def _has_cached_result_context(browser_state: BrowserSessionState) -> bool:
+    return bool(_cached_cards(browser_state))
+
+
+def _has_result_resolution_context(browser_state: BrowserSessionState) -> bool:
+    return _has_cached_result_context(browser_state) or bool(
+        str(browser_state.search_engine or "").strip() and str(browser_state.search_query or "").strip()
+    )
+
+
 def _resolve_card_by_index(browser_state: BrowserSessionState, index: int) -> dict[str, Any]:
     cards = _cached_cards(browser_state)
     if 1 <= index <= len(cards):
@@ -1678,7 +1688,7 @@ def _clause_wants_new_tab(prompt: str) -> bool:
 
 
 def _rank_or_compare_actions_from_clause(clause: str, browser_state: BrowserSessionState) -> list[TerminalAction]:
-    if browser_state.page_kind != "search_results" or not _cached_cards(browser_state):
+    if not _has_cached_result_context(browser_state):
         return []
     normalized = _intent_text(clause)
     compare_hit = "compare" in normalized
@@ -1921,7 +1931,7 @@ def _sequenced_browser_actions(prompt: str, browser_state: BrowserSessionState) 
         return []
     actions: list[TerminalAction] = []
     has_subject = bool(_research_subject_from_browser_state(browser_state) or _subject_from_browser_state(browser_state) or browser_state.page_kind == "repo_page")
-    search_results_available = browser_state.page_kind == "search_results" and bool(_cached_cards(browser_state))
+    search_results_available = _has_cached_result_context(browser_state)
     pending_search_result = False
     opened_subject_result = False
     evidence_available = bool(browser_state.evidence_items)
@@ -2097,7 +2107,7 @@ def _follow_up_browser_actions(prompt: str, browser_state: BrowserSessionState |
     if browser_state.current_url and not related_engine and _wants_browser_read(prompt):
         actions.append(TerminalAction(kind="browser_read_page", target="current_page", resolved_target="current_page"))
         return actions
-    if browser_state.page_kind == "search_results" and _cached_cards(browser_state):
+    if _has_cached_result_context(browser_state):
         compare_hit = "compare" in normalized
         rank_hit = any(
             token in normalized
@@ -2256,7 +2266,7 @@ def _follow_up_browser_actions(prompt: str, browser_state: BrowserSessionState |
     if any(token in normalized for token in {"resume", "continue playing", "play it", "play"}):
         actions.append(TerminalAction(kind="browser_media_play", target="media", resolved_target="media"))
         return actions
-    if browser_state.page_kind != "search_results" or not browser_state.search_engine or not browser_state.search_query:
+    if not _has_result_resolution_context(browser_state):
         return actions
     verb_hit = any(token in normalized for token in {"click", "open", "press", "select", "pick"})
     noun_hit = any(token in normalized for token in {"video", "vid", "repo", "result"})
@@ -2619,7 +2629,7 @@ def _validate_language_actions(
         if action.kind == "browser_answer_query":
             continue
         if action.kind in {"browser_rank_cards", "browser_compare_cards"}:
-            if state.page_kind != "search_results" or not _cached_cards(state):
+            if not _has_result_resolution_context(state):
                 return False, ["browser_state_missing_search_results"]
             has_subject = True
             evidence_available = True
@@ -2644,9 +2654,18 @@ def _validate_language_actions(
             )
             continue
         if action.kind == "open_search_result":
-            if state.page_kind != "search_results":
+            if not _has_result_resolution_context(state):
                 return False, ["browser_state_missing_search_results"]
             engine = state.search_engine
+            subject_url = state.current_url or "https://example.com"
+            if _cached_cards(state):
+                try:
+                    result_index = max(int(action.resolved_target or action.target), 1)
+                except ValueError:
+                    result_index = 1
+                chosen_card = _resolve_card_by_index(state, result_index)
+                if chosen_card:
+                    subject_url = str(chosen_card.get("url") or subject_url).strip() or subject_url
             if engine == "youtube":
                 state = _browser_state_for_url("https://www.youtube.com/watch?v=placeholder")
             elif engine == "github":
@@ -2654,7 +2673,14 @@ def _validate_language_actions(
             elif engine == "reddit":
                 state = _browser_state_for_url("https://www.reddit.com/r/example/comments/post")
             else:
-                state = _browser_state_for_url("https://example.com")
+                state = _browser_state_for_url(subject_url)
+            state = _browser_state_copy(
+                state,
+                search_engine=browser_state.search_engine if browser_state else state.search_engine,
+                search_query=browser_state.search_query if browser_state else state.search_query,
+                result_urls=list(browser_state.result_urls or []) if browser_state else list(state.result_urls or []),
+                result_cards=[dict(item) for item in list(browser_state.result_cards or []) if isinstance(item, dict)] if browser_state else [dict(item) for item in list(state.result_cards or []) if isinstance(item, dict)],
+            )
             evidence_available = evidence_available or state.page_kind in {"repo_page", "video_page", "post_page", "web_page"}
             continue
         if action.kind == "browser_retry_subject_result":
@@ -2668,7 +2694,7 @@ def _validate_language_actions(
             evidence_available = True
             continue
         if action.kind == "browser_extract_cards":
-            if state.page_kind != "search_results":
+            if not _has_result_resolution_context(state):
                 return False, ["browser_state_missing_search_results"]
             continue
         if action.kind == "browser_synthesize_evidence":
@@ -2731,7 +2757,7 @@ def _language_context_profile(browser_state: BrowserSessionState | None) -> dict
     return {
         "page_kind": state.page_kind,
         "search_engine": state.search_engine,
-        "has_search_results": bool(state.page_kind == "search_results" and _cached_cards(state)),
+        "has_search_results": _has_result_resolution_context(state),
         "has_subject": bool(_research_subject_from_browser_state(state) or _subject_from_browser_state(state) or state.page_kind == "repo_page"),
         "has_evidence": bool(state.evidence_items),
     }
@@ -5190,7 +5216,7 @@ def execute_terminal_plan(
             )
             continue
         if action.kind == "open_search_result":
-            if current_browser_state.page_kind != "search_results" or not current_browser_state.search_engine or not current_browser_state.search_query:
+            if not _has_result_resolution_context(current_browser_state):
                 residuals.append("browser_state_missing_search_results")
                 records.append(
                     TerminalExecutionRecord(
@@ -5207,32 +5233,35 @@ def execute_terminal_plan(
                 result_index = 1
             result_urls = list(current_browser_state.result_urls or [])
             result_cards = [dict(item) for item in list(current_browser_state.result_cards or []) if isinstance(item, dict)]
+            if not result_urls and result_cards:
+                result_urls = [str(card.get("url") or "").strip() for card in result_cards if str(card.get("url") or "").strip()]
             if len(result_urls) < result_index:
-                try:
-                    result_cards = _fetch_search_result_cards(
-                        current_browser_state.search_engine,
-                        current_browser_state.search_query,
-                        limit=max(result_index, 5),
-                    )
-                    result_urls = [str(card.get("url") or "").strip() for card in result_cards if str(card.get("url") or "").strip()]
-                    if len(result_urls) < result_index:
-                        result_urls = _fetch_search_result_urls(
+                if current_browser_state.search_engine and current_browser_state.search_query:
+                    try:
+                        result_cards = _fetch_search_result_cards(
                             current_browser_state.search_engine,
                             current_browser_state.search_query,
                             limit=max(result_index, 5),
                         )
-                        result_cards = _fallback_cards_from_urls(result_urls)
-                except Exception as exc:
-                    residuals.append("search_result_fetch_failed")
-                    records.append(
-                        TerminalExecutionRecord(
-                            kind=action.kind,
-                            target=action.target,
-                            status="failed",
-                            message=f"Could not resolve browser search results: {str(exc).strip() or 'unknown error'}.",
+                        result_urls = [str(card.get("url") or "").strip() for card in result_cards if str(card.get("url") or "").strip()]
+                        if len(result_urls) < result_index:
+                            result_urls = _fetch_search_result_urls(
+                                current_browser_state.search_engine,
+                                current_browser_state.search_query,
+                                limit=max(result_index, 5),
+                            )
+                            result_cards = _fallback_cards_from_urls(result_urls)
+                    except Exception as exc:
+                        residuals.append("search_result_fetch_failed")
+                        records.append(
+                            TerminalExecutionRecord(
+                                kind=action.kind,
+                                target=action.target,
+                                status="failed",
+                                message=f"Could not resolve browser search results: {str(exc).strip() or 'unknown error'}.",
+                            )
                         )
-                    )
-                    continue
+                        continue
             if len(result_urls) < result_index:
                 residuals.append("search_result_unavailable")
                 records.append(
@@ -5395,7 +5424,7 @@ def execute_terminal_plan(
             )
             continue
         if action.kind == "browser_extract_cards":
-            if current_browser_state.page_kind != "search_results":
+            if not _has_result_resolution_context(current_browser_state):
                 residuals.append("browser_state_missing_search_results")
                 records.append(
                     TerminalExecutionRecord(
@@ -5433,13 +5462,13 @@ def execute_terminal_plan(
                     kind=action.kind,
                     target=action.target,
                     status="ok",
-                    message=f"Extracted {len(cards)} result cards from the current search page.",
+                    message=f"Extracted {len(cards)} source cards from the current browser context.",
                     details={"cards": cards},
                 )
             )
             continue
         if action.kind == "browser_rank_cards":
-            if current_browser_state.page_kind != "search_results":
+            if not _has_result_resolution_context(current_browser_state):
                 residuals.append("browser_state_missing_search_results")
                 records.append(
                     TerminalExecutionRecord(
@@ -5451,6 +5480,11 @@ def execute_terminal_plan(
                 )
                 continue
             cards = _cached_cards(current_browser_state)
+            if not cards and current_browser_state.search_engine and current_browser_state.search_query:
+                try:
+                    cards = _fetch_search_result_cards(current_browser_state.search_engine, current_browser_state.search_query, limit=5)
+                except Exception:
+                    cards = []
             if not cards:
                 residuals.append("browser_cards_missing")
                 records.append(
@@ -5495,7 +5529,7 @@ def execute_terminal_plan(
             )
             continue
         if action.kind == "browser_compare_cards":
-            if current_browser_state.page_kind != "search_results":
+            if not _has_result_resolution_context(current_browser_state):
                 residuals.append("browser_state_missing_search_results")
                 records.append(
                     TerminalExecutionRecord(
@@ -5507,6 +5541,11 @@ def execute_terminal_plan(
                 )
                 continue
             cards = _cached_cards(current_browser_state)
+            if not cards and current_browser_state.search_engine and current_browser_state.search_query:
+                try:
+                    cards = _fetch_search_result_cards(current_browser_state.search_engine, current_browser_state.search_query, limit=5)
+                except Exception:
+                    cards = []
             if not cards:
                 residuals.append("browser_cards_missing")
                 records.append(
@@ -6203,7 +6242,7 @@ def _terminal_available_transmutations(browser_state: BrowserSessionState) -> li
             actions.append("browser_retry_subject_result")
         if browser_state.evidence_items:
             actions.append("browser_synthesize_evidence")
-    if browser_state.page_kind == "search_results":
+    if _has_result_resolution_context(browser_state):
         actions.extend(
             [
                 "open_search_result",

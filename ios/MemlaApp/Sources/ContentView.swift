@@ -422,7 +422,14 @@ struct ContentView: View {
                                     HStack(alignment: .top) {
                                         Text(card.title)
                                             .font(.caption.weight(.semibold))
+                                            .lineLimit(2)
                                         Spacer(minLength: 8)
+                                        if !card.url.isEmpty {
+                                            Button("Open") {
+                                                openWebResult(card.url)
+                                            }
+                                            .font(.caption2.weight(.semibold))
+                                        }
                                         if let score = card.score {
                                             Text(String(format: "%.2f", score))
                                                 .font(.caption2.weight(.semibold))
@@ -445,6 +452,9 @@ struct ContentView: View {
                                 .padding(10)
                                 .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                             }
+                            Text("Try follow-ups like \"open the second source\" or \"compare the first and second source.\"")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
                         }
                     }
                 }

@@ -1573,6 +1573,114 @@ def test_terminal_execute_plan_answers_bounded_web_query(monkeypatch, tmp_path):
     assert result.records[0].details["source_count"] == 2
 
 
+def test_terminal_heuristic_plan_opens_second_source_after_web_answer():
+    state = BrowserSessionState(
+        current_url="https://example.com/ai-agents",
+        page_kind="web_page",
+        search_engine="web",
+        search_query="ai agents news today",
+        result_cards=[
+            {
+                "index": 1,
+                "title": "AI agents today",
+                "url": "https://example.com/ai-agents",
+                "summary": "AI agents are getting more capable across coding and commerce workflows.",
+            },
+            {
+                "index": 2,
+                "title": "AI agents funding",
+                "url": "https://example.com/ai-agents-funding",
+                "summary": "Funding and launches are accelerating in the AI agents space.",
+            },
+        ],
+    )
+
+    plan = build_terminal_plan(
+        prompt="open the second source",
+        heuristic_only=True,
+        browser_state=state,
+    )
+
+    assert [action.kind for action in plan.actions] == ["open_search_result"]
+    assert plan.actions[0].resolved_target == "2"
+
+
+def test_terminal_heuristic_plan_compares_web_sources_after_answer():
+    state = BrowserSessionState(
+        current_url="https://example.com/ai-agents",
+        page_kind="web_page",
+        search_engine="web",
+        search_query="ai agents news today",
+        result_cards=[
+            {
+                "index": 1,
+                "title": "AI agents today",
+                "url": "https://example.com/ai-agents",
+                "summary": "AI agents are getting more capable across coding and commerce workflows.",
+            },
+            {
+                "index": 2,
+                "title": "AI agents funding",
+                "url": "https://example.com/ai-agents-funding",
+                "summary": "Funding and launches are accelerating in the AI agents space.",
+            },
+        ],
+    )
+
+    plan = build_terminal_plan(
+        prompt="compare the first and second source for which is more complete",
+        heuristic_only=True,
+        browser_state=state,
+    )
+
+    assert [action.kind for action in plan.actions] == ["browser_compare_cards"]
+    assert plan.actions[0].resolved_target == "1,2"
+
+
+def test_terminal_execute_plan_opens_second_source_after_web_answer(monkeypatch):
+    launched: list[list[str]] = []
+
+    class DummyProcess:
+        def __init__(self, command, **kwargs):
+            launched.append(list(command))
+
+    monkeypatch.setattr("memory_system.natural_terminal.subprocess.Popen", DummyProcess)
+
+    state = BrowserSessionState(
+        current_url="https://example.com/ai-agents",
+        page_kind="web_page",
+        search_engine="web",
+        search_query="ai agents news today",
+        result_cards=[
+            {
+                "index": 1,
+                "title": "AI agents today",
+                "url": "https://example.com/ai-agents",
+                "summary": "AI agents are getting more capable across coding and commerce workflows.",
+            },
+            {
+                "index": 2,
+                "title": "AI agents funding",
+                "url": "https://example.com/ai-agents-funding",
+                "summary": "Funding and launches are accelerating in the AI agents space.",
+            },
+        ],
+    )
+    plan = TerminalPlan(
+        prompt="open the second source",
+        source="heuristic",
+        actions=[TerminalAction(kind="open_search_result", target="2", resolved_target="2")],
+    )
+
+    result = execute_terminal_plan(plan, platform_name="linux", browser_state=state)
+
+    assert result.ok is True
+    assert launched == [["xdg-open", "https://example.com/ai-agents-funding"]]
+    assert result.browser_state["current_url"] == "https://example.com/ai-agents-funding"
+    assert result.browser_state["search_query"] == "ai agents news today"
+    assert len(result.browser_state["result_cards"]) == 2
+
+
 def test_terminal_execute_plan_ranks_and_compares_cards():
     state = BrowserSessionState(
         current_url="https://github.com/search?q=local+llm&type=repositories",
