@@ -1794,9 +1794,68 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           const target = document.querySelector('\(selector)');
           const wrapper = document.querySelector('\(wrapperSelector)') || target?.closest('[data-tracking="disabled"]');
           const locationButton = \(isPickup ? "document.querySelector('\(locationButtonSelector)')" : "null");
+          const findInteractiveRow = (node) => {
+            let current = node;
+            while (current && current !== document.body) {
+              try {
+                if (current.querySelector('\(selector)') && (current.querySelector('[data-testid=\"clear-button\"]') || current.getAttribute('data-tracking') === 'disabled')) {
+                  return current;
+                }
+              } catch (_) {}
+              current = current.parentElement;
+            }
+            return null;
+          };
+          const row = findInteractiveRow(target) || wrapper?.parentElement || wrapper;
           const activate = (node) => {
             if (!node) return;
             try { node.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
+            const rect = typeof node.getBoundingClientRect === 'function'
+              ? node.getBoundingClientRect()
+              : { left: 0, top: 0, width: 1, height: 1 };
+            const point = {
+              clientX: rect.left + Math.max(6, rect.width / 2),
+              clientY: rect.top + Math.max(6, rect.height / 2),
+              screenX: rect.left + Math.max(6, rect.width / 2),
+              screenY: rect.top + Math.max(6, rect.height / 2),
+              pageX: window.scrollX + rect.left + Math.max(6, rect.width / 2),
+              pageY: window.scrollY + rect.top + Math.max(6, rect.height / 2)
+            };
+            ['pointerdown', 'pointerup'].forEach((type) => {
+              try {
+                node.dispatchEvent(new PointerEvent(type, {
+                  bubbles: true,
+                  cancelable: true,
+                  pointerId: 1,
+                  pointerType: 'touch',
+                  isPrimary: true,
+                  ...point
+                }));
+              } catch (_) {}
+            });
+            ['touchstart', 'touchend'].forEach((type) => {
+              try {
+                const touch = typeof Touch === 'function'
+                  ? new Touch({
+                      identifier: Date.now(),
+                      target: node,
+                      clientX: point.clientX,
+                      clientY: point.clientY,
+                      screenX: point.screenX,
+                      screenY: point.screenY,
+                      pageX: point.pageX,
+                      pageY: point.pageY
+                    })
+                  : null;
+                node.dispatchEvent(new TouchEvent(type, {
+                  bubbles: true,
+                  cancelable: true,
+                  touches: type === 'touchend' || !touch ? [] : [touch],
+                  targetTouches: type === 'touchend' || !touch ? [] : [touch],
+                  changedTouches: touch ? [touch] : []
+                }));
+              } catch (_) {}
+            });
             ['pointerdown', 'mousedown', 'mouseup', 'pointerup', 'click'].forEach((type) => {
               try {
                 node.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
@@ -1809,6 +1868,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           if (!target) {
             return { ok: false, reason: 'uber_ride_input_not_found' };
           }
+          activate(row);
           if (\(isPickup ? "true" : "false") && !String(target.value || '').trim() && locationButton) {
             activate(locationButton);
             return { ok: true, reason: 'activated_uber_pickup_location' };
