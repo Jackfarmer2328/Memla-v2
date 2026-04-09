@@ -476,6 +476,34 @@ def test_memla_terminal_benchmark_web_v1_dispatches(monkeypatch):
     assert captured["memla_provider"] == "anthropic"
 
 
+def test_memla_terminal_benchmark_web_answer_v1_dispatches(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _fake_web_answer_benchmark(args):
+        captured["cases"] = args.cases
+        captured["memla_provider"] = args.memla_provider
+        captured["judge_provider"] = args.judge_provider
+        return 0
+
+    monkeypatch.setattr("memory_system.cli._handle_web_answer_benchmark", _fake_web_answer_benchmark)
+
+    rc = main(
+        [
+            "terminal",
+            "benchmark-web-answer-v1",
+            "--memla-provider",
+            "anthropic",
+            "--judge-provider",
+            "anthropic",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["cases"] == "cases/web_eval_cases_v1.jsonl"
+    assert captured["memla_provider"] == "anthropic"
+    assert captured["judge_provider"] == "anthropic"
+
+
 def test_memla_top_level_scout_command_dispatches(monkeypatch):
     captured: dict[str, object] = {}
 

@@ -89,8 +89,10 @@ from .natural_terminal import (
     render_terminal_scout_text,
     render_terminal_step_execution_text,
     render_terminal_step_report_text,
+    render_web_answer_benchmark_markdown,
     run_terminal_benchmark,
     run_terminal_scout,
+    run_web_answer_benchmark,
     terminal_execution_to_dict,
     terminal_model_default,
     terminal_plan_to_dict,
@@ -1208,6 +1210,41 @@ def _handle_terminal_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_web_answer_benchmark(args: argparse.Namespace) -> int:
+    memla_model = _resolve_shared_terminal_model(args, "memla_model")
+    report = run_web_answer_benchmark(
+        cases_path=args.cases,
+        memla_model=memla_model,
+        memla_provider=args.memla_provider,
+        memla_base_url=args.memla_base_url,
+        judge_model=args.judge_model,
+        judge_provider=args.judge_provider,
+        judge_base_url=args.judge_base_url,
+        temperature=args.temperature,
+        case_ids=args.case_id,
+        limit=args.limit,
+        heuristic_only=args.heuristic_only,
+    )
+    markdown = render_web_answer_benchmark_markdown(report)
+    out_dir = Path(args.out_dir).resolve() if args.out_dir else _default_report_dir("web_answer_benchmark")
+    json_path, md_path = _write_report_bundle(
+        out_dir=out_dir,
+        stem="web_answer_benchmark_report",
+        report=report,
+        markdown=markdown,
+    )
+    print(f"Wrote web answer benchmark JSON: {json_path}")
+    print(f"Wrote web answer benchmark Markdown: {md_path}")
+    print(
+        "Summary: "
+        f"answered {report.get('answered_count', 0)} / {report.get('cases', 0)} | "
+        f"avg plan {report.get('avg_plan_latency_ms', 0.0)} ms | "
+        f"avg answer {report.get('avg_answer_latency_ms', 0.0)} ms | "
+        f"teacher overall {report.get('avg_teacher_overall', 0.0)}"
+    )
+    return 0
+
+
 def _handle_terminal_browser_benchmark(args: argparse.Namespace) -> int:
     raw_model = _resolve_shared_terminal_model(args, "raw_model")
     memla_model = _resolve_shared_terminal_model(args, "memla_model")
@@ -1822,6 +1859,25 @@ def _build_parser() -> argparse.ArgumentParser:
     terminal_web_bench_v1.add_argument("--heuristic-only", action="store_true", help="Force the Memla lane to stay heuristic-only.")
     terminal_web_bench_v1.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
     terminal_web_bench_v1.set_defaults(func=_handle_terminal_benchmark)
+
+    terminal_web_answer_bench_v1 = terminal_sub.add_parser(
+        "benchmark-web-answer-v1",
+        help="Benchmark Memla's returned web answers, source handoffs, and optional teacher grading on the Web V1 pack.",
+    )
+    terminal_web_answer_bench_v1.add_argument("--cases", default=_web_v1_cases_default(), help="Web V1 benchmark case JSONL path.")
+    terminal_web_answer_bench_v1.add_argument("--case-id", action="append", default=[], help="Optional case id filter. Repeat to benchmark only specific prompts.")
+    terminal_web_answer_bench_v1.add_argument("--limit", type=int, default=None, help="Optional max number of benchmark prompts to run after filtering.")
+    terminal_web_answer_bench_v1.add_argument("--model", default="", help="Shared model default for the Memla answer lane.")
+    terminal_web_answer_bench_v1.add_argument("--memla-model", default="", help="Memla answer model. Defaults to --model or the small terminal default.")
+    terminal_web_answer_bench_v1.add_argument("--memla-provider", default="ollama", help="Provider override for the Memla answer lane.")
+    terminal_web_answer_bench_v1.add_argument("--memla-base-url", default="", help="Optional base URL override for the Memla answer lane.")
+    terminal_web_answer_bench_v1.add_argument("--judge-model", default="", help="Optional teacher/judge model for grading answer quality and voice.")
+    terminal_web_answer_bench_v1.add_argument("--judge-provider", default="", help="Optional provider override for the teacher lane. Defaults to the Memla lane when blank.")
+    terminal_web_answer_bench_v1.add_argument("--judge-base-url", default="", help="Optional base URL override for the teacher lane.")
+    terminal_web_answer_bench_v1.add_argument("--temperature", type=float, default=0.1)
+    terminal_web_answer_bench_v1.add_argument("--heuristic-only", action="store_true", help="Force the Memla planner to stay heuristic-only before answering.")
+    terminal_web_answer_bench_v1.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
+    terminal_web_answer_bench_v1.set_defaults(func=_handle_web_answer_benchmark)
 
     terminal_browser_bench = terminal_sub.add_parser(
         "benchmark-browser",

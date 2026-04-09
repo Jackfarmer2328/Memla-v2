@@ -4095,12 +4095,71 @@ def _best_web_answer_summary(*, prompt: str, card: dict[str, Any], details: dict
         str(card.get("title") or "").strip(),
     ]
     answer = next((item for item in summary_candidates if item), "")
-    source_title = str(details.get("title") or card.get("title") or "").strip()
-    if not answer:
-        return ""
-    if source_title and source_title not in answer:
-        return f"{answer} Source: {source_title}"
     return answer
+
+
+def _web_question_slice(prompt: str, query: str) -> str:
+    text = _normalize_goal_text(prompt or query)
+    if not text:
+        return "general"
+    if "weather" in text or any(token in text for token in {"temperature", "forecast", "rain", "snow", "humidity"}):
+        return "weather"
+    if any(token in text for token in {"news", "latest", "today", "breaking", "headlines", "what changed", "what's happening"}):
+        return "news"
+    if re.search(r"\b(who|what|when|where|why|how)\b", text):
+        return "fact"
+    return "general"
+
+
+def _ensure_terminal_sentence(text: str) -> str:
+    clean = " ".join(str(text or "").split()).strip()
+    if not clean:
+        return ""
+    if clean[-1] not in ".!?":
+        clean += "."
+    return clean
+
+
+def _render_memla_web_answer(
+    *,
+    prompt: str,
+    query: str,
+    answer: str,
+    source_title: str,
+    source_count: int,
+) -> tuple[str, dict[str, Any]]:
+    slice_kind = _web_question_slice(prompt, query)
+    direct = _ensure_terminal_sentence(answer)
+    clean_source = " ".join(str(source_title or "").split()).strip()
+    follow_up = ""
+    direct_lower = direct.lower()
+    source_lower = clean_source.lower()
+    if clean_source and source_lower not in direct_lower:
+        if slice_kind == "news":
+            if source_count > 1:
+                follow_up = f"I checked {source_count} sources and {clean_source} was the clearest one."
+            else:
+                follow_up = f"I pulled that from {clean_source}."
+        elif slice_kind == "weather":
+            follow_up = f"I pulled the latest read from {clean_source}."
+        elif slice_kind == "fact":
+            follow_up = f"I pulled that from {clean_source}."
+        elif source_count > 1:
+            follow_up = f"I checked {source_count} sources and {clean_source} was the strongest one."
+        else:
+            follow_up = f"I pulled that from {clean_source}."
+    elif source_count > 1 and slice_kind in {"news", "general"}:
+        follow_up = f"I checked {source_count} sources to keep it grounded."
+
+    rendered = direct
+    if follow_up:
+        rendered = f"{direct} {follow_up}".strip()
+    return rendered, {
+        "voice": "memla_web_friend_v1",
+        "slice": slice_kind,
+        "source_note": follow_up,
+        "source_count": int(source_count),
+    }
 
 
 def _goal_subject_for_web(prompt: str, query: str) -> dict[str, str]:
@@ -4201,11 +4260,21 @@ def _resolve_web_answer(
             "summary": str(best_card.get("summary") or best_card.get("title") or best_card.get("url") or "").strip(),
         }
         answer = _best_web_answer_summary(prompt=prompt, card=best_card, details=best_details)
+    raw_answer = str(answer or "").strip()
+    rendered_answer, answer_style = _render_memla_web_answer(
+        prompt=prompt,
+        query=query,
+        answer=raw_answer,
+        source_title=str(best_details.get("title") or best_card.get("title") or "").strip(),
+        source_count=len(evidence_items) or len(enriched_cards or top_candidates or cards),
+    )
     return {
         "query": query,
         "cards": enriched_cards or top_candidates or cards,
         "source_count": len(evidence_items),
-        "answer": answer,
+        "answer": rendered_answer or raw_answer,
+        "raw_answer": raw_answer,
+        "answer_style": answer_style,
         "best_card": best_card,
         "best_details": best_details,
         "synthesis": synthesis,
@@ -7427,6 +7496,319 @@ def _demo_request_supported(prompt: str) -> bool:
     return build_terminal_plan(prompt=prompt, heuristic_only=True).actions != []
 
 
+def _extract_first_json_object(text: str) -> dict[str, Any]:
+    raw = str(text or "").strip()
+    if not raw:
+        return {}
+    try:
+        return dict(json.loads(raw))
+    except Exception:
+        pass
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start == -1 or end <= start:
+        return {}
+    try:
+        return dict(json.loads(raw[start : end + 1]))
+    except Exception:
+        return {}
+
+
+def _judge_web_answer_with_teacher(
+    *,
+    client: UniversalLLMClient,
+    model: str,
+    prompt: str,
+    query: str,
+    answer: str,
+    source_title: str,
+    source_url: str,
+    source_count: int,
+    result_cards: list[dict[str, Any]],
+) -> dict[str, Any]:
+    card_lines = []
+    for index, card in enumerate(list(result_cards or [])[:3], start=1):
+        title = str(card.get("title") or "").strip()
+        summary = str(card.get("summary") or "").strip()
+        url = str(card.get("url") or "").strip()
+        card_lines.append(f"{index}. {title} | {summary} | {url}")
+    response = client.chat(
+        model=model,
+        temperature=0.0,
+        messages=[
+            ChatMessage(
+                role="system",
+                content=(
+                    "You grade Memla web answers for consumer assistant quality. "
+                    "Return JSON only with keys directness, warmth, groundedness, helpfulness, overall, verdict, coaching. "
+                    "Scores must be integers from 1 to 5. Coaching must be one short sentence."
+                ),
+            ),
+            ChatMessage(
+                role="user",
+                content=(
+                    f"Prompt: {prompt}\n"
+                    f"Resolved query: {query}\n"
+                    f"Memla answer: {answer}\n"
+                    f"Best source title: {source_title}\n"
+                    f"Best source url: {source_url}\n"
+                    f"Source count: {source_count}\n"
+                    "Top result cards:\n"
+                    + ("\n".join(card_lines) if card_lines else "(none)")
+                ),
+            ),
+        ],
+    )
+    payload = _extract_first_json_object(response)
+    if not payload:
+        return {
+            "directness": 0,
+            "warmth": 0,
+            "groundedness": 0,
+            "helpfulness": 0,
+            "overall": 0,
+            "verdict": "",
+            "coaching": "",
+            "raw_response": response,
+        }
+    judged: dict[str, Any] = {
+        "directness": int(payload.get("directness") or 0),
+        "warmth": int(payload.get("warmth") or 0),
+        "groundedness": int(payload.get("groundedness") or 0),
+        "helpfulness": int(payload.get("helpfulness") or 0),
+        "overall": int(payload.get("overall") or 0),
+        "verdict": str(payload.get("verdict") or "").strip(),
+        "coaching": str(payload.get("coaching") or "").strip(),
+    }
+    return judged
+
+
+def run_web_answer_benchmark(
+    *,
+    cases_path: str,
+    memla_model: str,
+    memla_provider: str = "",
+    memla_base_url: str = "",
+    judge_model: str = "",
+    judge_provider: str = "",
+    judge_base_url: str = "",
+    temperature: float = 0.1,
+    case_ids: list[str] | None = None,
+    limit: int | None = None,
+    heuristic_only: bool = False,
+) -> dict[str, Any]:
+    cases = load_terminal_benchmark_cases(cases_path)
+    selected_ids = {str(item).strip() for item in list(case_ids or []) if str(item).strip()}
+    if selected_ids:
+        cases = [case for case in cases if case.case_id in selected_ids]
+    if limit is not None:
+        cases = cases[: max(int(limit), 0)]
+
+    memla_client = None if heuristic_only else build_llm_client(provider=memla_provider or None, base_url=memla_base_url or None)
+    judge_client = build_llm_client(
+        provider=judge_provider or memla_provider or None,
+        base_url=judge_base_url or None,
+    ) if judge_model else None
+
+    rows: list[dict[str, Any]] = []
+    failed_cases: list[dict[str, Any]] = []
+    memla_model_calls = 0
+    memla_heuristic_hits = 0
+    judged_count = 0
+
+    for case in cases:
+        try:
+            plan_started = time.perf_counter()
+            memla_plan = build_terminal_plan(
+                prompt=case.prompt,
+                model=memla_model,
+                client=memla_client,
+                heuristic_only=heuristic_only,
+                temperature=temperature,
+            )
+            plan_latency_ms = round((time.perf_counter() - plan_started) * 1000.0, 2)
+        except Exception as exc:
+            failed_cases.append({"case_id": case.case_id, "error_type": type(exc).__name__, "message": str(exc)})
+            continue
+
+        if memla_plan.source == "model":
+            memla_model_calls += 1
+        if memla_plan.source == "heuristic":
+            memla_heuristic_hits += 1
+
+        web_action = next((action for action in memla_plan.actions if action.kind == "browser_answer_query"), None)
+        if web_action is None:
+            rows.append(
+                {
+                    "case_id": case.case_id,
+                    "prompt": case.prompt,
+                    "plan_source": memla_plan.source,
+                    "plan_actions": [_action_signature(action) for action in memla_plan.actions],
+                    "plan_latency_ms": plan_latency_ms,
+                    "answer_latency_ms": 0.0,
+                    "answered": False,
+                    "query": "",
+                    "answer": "",
+                    "raw_answer": "",
+                    "answer_voice": "",
+                    "answer_slice": "",
+                    "source_title": "",
+                    "source_url": "",
+                    "source_count": 0,
+                    "teacher_judgement": {},
+                }
+            )
+            continue
+
+        note_payload = _decode_action_note(web_action.note)
+        goal = str(note_payload.get("goal") or case.prompt).strip()
+        query = str(note_payload.get("query") or web_action.resolved_target or web_action.target or case.prompt).strip()
+        try:
+            answer_started = time.perf_counter()
+            answer_payload = _resolve_web_answer(prompt=goal or case.prompt, query=query)
+            answer_latency_ms = round((time.perf_counter() - answer_started) * 1000.0, 2)
+        except Exception as exc:
+            failed_cases.append({"case_id": case.case_id, "error_type": type(exc).__name__, "message": str(exc)})
+            continue
+
+        answer = str(answer_payload.get("answer") or "").strip()
+        raw_answer = str(answer_payload.get("raw_answer") or answer).strip()
+        best_card = dict(answer_payload.get("best_card") or {})
+        best_details = dict(answer_payload.get("best_details") or {})
+        cards = [dict(item) for item in list(answer_payload.get("cards") or []) if isinstance(item, dict)]
+        answer_style = dict(answer_payload.get("answer_style") or {})
+        source_title = str(best_details.get("title") or best_card.get("title") or "").strip()
+        source_url = str(best_details.get("url") or best_card.get("url") or "").strip()
+        source_count = int(answer_payload.get("source_count") or len(cards) or 0)
+
+        teacher_judgement: dict[str, Any] = {}
+        if judge_client is not None and answer:
+            try:
+                teacher_judgement = _judge_web_answer_with_teacher(
+                    client=judge_client,
+                    model=judge_model,
+                    prompt=case.prompt,
+                    query=query,
+                    answer=answer,
+                    source_title=source_title,
+                    source_url=source_url,
+                    source_count=source_count,
+                    result_cards=cards,
+                )
+                judged_count += 1
+            except Exception as exc:
+                teacher_judgement = {"error_type": type(exc).__name__, "message": str(exc)}
+
+        rows.append(
+            {
+                "case_id": case.case_id,
+                "prompt": case.prompt,
+                "plan_source": memla_plan.source,
+                "plan_actions": [_action_signature(action) for action in memla_plan.actions],
+                "plan_latency_ms": plan_latency_ms,
+                "answer_latency_ms": answer_latency_ms,
+                "answered": bool(answer),
+                "query": query,
+                "answer": answer,
+                "raw_answer": raw_answer,
+                "answer_voice": str(answer_style.get("voice") or "").strip(),
+                "answer_slice": str(answer_style.get("slice") or "").strip(),
+                "source_title": source_title,
+                "source_url": source_url,
+                "source_count": source_count,
+                "teacher_judgement": teacher_judgement,
+            }
+        )
+
+    count = len(rows) or 1
+    answered_count = sum(1 for row in rows if row.get("answered"))
+    avg_plan_latency_ms = round(sum(float(row.get("plan_latency_ms") or 0.0) for row in rows) / count, 2)
+    avg_answer_latency_ms = round(sum(float(row.get("answer_latency_ms") or 0.0) for row in rows) / count, 2)
+    avg_source_count = round(sum(float(row.get("source_count") or 0.0) for row in rows) / count, 2)
+    answer_rate = round(answered_count / count, 4)
+    teacher_overall_scores = [
+        float(dict(row.get("teacher_judgement") or {}).get("overall") or 0.0)
+        for row in rows
+        if dict(row.get("teacher_judgement") or {}).get("overall")
+    ]
+    avg_teacher_overall = round(sum(teacher_overall_scores) / len(teacher_overall_scores), 4) if teacher_overall_scores else 0.0
+
+    return {
+        "generated_ts": int(time.time()),
+        "cases_path": str(Path(cases_path).resolve()),
+        "case_ids": [case.case_id for case in cases],
+        "limit": limit,
+        "memla_model": memla_model,
+        "memla_provider": "" if memla_client is None else memla_client.provider,
+        "judge_model": judge_model,
+        "judge_provider": "" if judge_client is None else judge_client.provider,
+        "cases": len(rows),
+        "cases_requested": len(cases),
+        "failed_case_count": len(failed_cases),
+        "answered_count": answered_count,
+        "answer_rate": answer_rate,
+        "avg_plan_latency_ms": avg_plan_latency_ms,
+        "avg_answer_latency_ms": avg_answer_latency_ms,
+        "avg_source_count": avg_source_count,
+        "avg_teacher_overall": avg_teacher_overall,
+        "memla_model_call_count": memla_model_calls,
+        "memla_heuristic_hit_count": memla_heuristic_hits,
+        "judged_count": judged_count,
+        "rows": rows,
+        "failed_cases": failed_cases,
+    }
+
+
+def render_web_answer_benchmark_markdown(report: dict[str, Any]) -> str:
+    lines = [
+        "# Web Answer Benchmark",
+        "",
+        f"- Memla provider: `{report.get('memla_provider', '')}`",
+        f"- Memla model: `{report.get('memla_model', '')}`",
+        f"- Teacher judge: `{report.get('judge_model', '') or 'disabled'}`",
+        f"- Cases completed: `{report.get('cases', 0)}` / `{report.get('cases_requested', 0)}`",
+        "",
+        "## Summary",
+        "",
+        f"- Answer rate: `{report.get('answer_rate', 0.0)}`",
+        f"- Avg plan latency: `{report.get('avg_plan_latency_ms', 0.0)} ms`",
+        f"- Avg answer latency: `{report.get('avg_answer_latency_ms', 0.0)} ms`",
+        f"- Avg source count: `{report.get('avg_source_count', 0.0)}`",
+        f"- Avg teacher overall: `{report.get('avg_teacher_overall', 0.0)}`",
+        f"- Memla model calls: `{report.get('memla_model_call_count', 0)}`",
+        f"- Memla heuristic hits: `{report.get('memla_heuristic_hit_count', 0)}`",
+    ]
+    if report.get("failed_cases"):
+        lines.extend(["", "## Failed cases", ""])
+        for failure in report["failed_cases"]:
+            lines.append(f"- `{failure.get('case_id', '')}` [{failure.get('error_type', '')}] {failure.get('message', '')}".rstrip())
+    lines.extend(["", "## Case rows", ""])
+    for row in report.get("rows", []):
+        teacher = dict(row.get("teacher_judgement") or {})
+        lines.extend(
+            [
+                f"### {row.get('case_id', '')}",
+                "",
+                f"- Prompt: `{row.get('prompt', '')}`",
+                f"- Query: `{row.get('query', '')}`",
+                f"- Answered: `{row.get('answered', False)}`",
+                f"- Voice/slice: `{row.get('answer_voice', '')}` / `{row.get('answer_slice', '')}`",
+                f"- Plan source/actions: `{row.get('plan_source', '')}` / `{', '.join(row.get('plan_actions', []))}`",
+                f"- Source: `{row.get('source_title', '')}`",
+                f"- Answer: {row.get('answer', '')}",
+            ]
+        )
+        if teacher:
+            lines.extend(
+                [
+                    f"- Teacher overall: `{teacher.get('overall', 0)}`",
+                    f"- Teacher coaching: {teacher.get('coaching', '')}",
+                ]
+            )
+        lines.append("")
+    return "\n".join(lines).strip() + "\n"
+
+
 __all__ = [
     "BrowserSessionState",
     "TerminalAction",
@@ -7452,8 +7834,10 @@ __all__ = [
     "render_terminal_scout_text",
     "render_terminal_step_execution_text",
     "render_terminal_step_report_text",
+    "render_web_answer_benchmark_markdown",
     "run_terminal_benchmark",
     "run_terminal_scout",
+    "run_web_answer_benchmark",
     "save_browser_session_state",
     "terminal_browser_state_path",
     "terminal_execution_to_dict",

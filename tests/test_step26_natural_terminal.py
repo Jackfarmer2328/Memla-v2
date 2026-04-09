@@ -19,6 +19,7 @@ from memory_system.natural_terminal import (
     _normalize_model_actions,
     _promote_language_rules,
     _fetch_search_result_urls,
+    _resolve_web_answer,
     build_llm_client,
     build_raw_terminal_plan,
     build_terminal_step_report,
@@ -34,6 +35,7 @@ from memory_system.natural_terminal import (
     terminal_memory_ontology_path,
     terminal_language_rule_path,
     run_terminal_benchmark,
+    run_web_answer_benchmark,
 )
 
 
@@ -1593,6 +1595,104 @@ def test_terminal_execute_plan_answers_bounded_web_query(monkeypatch, tmp_path):
     assert len(result.browser_state["result_cards"]) == 2
     assert len(result.browser_state["evidence_items"]) == 2
     assert result.records[0].details["source_count"] == 2
+
+
+def test_resolve_web_answer_renders_memla_friend_voice(monkeypatch):
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._fetch_search_result_cards",
+        lambda engine, query, limit=5: [
+            {
+                "index": 1,
+                "title": "AI agents today",
+                "url": "https://example.com/ai-agents",
+                "summary": "AI agents are getting more capable across coding and commerce workflows.",
+            },
+            {
+                "index": 2,
+                "title": "AI agents funding",
+                "url": "https://example.com/ai-agents-funding",
+                "summary": "Funding and product launches are accelerating in the AI agents space.",
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._fetch_page_html",
+        lambda url: f"""
+        <html>
+          <head>
+            <title>{'AI agents today' if 'funding' not in url else 'AI agents funding'}</title>
+            <meta name="description" content="{'AI agents are getting more capable across coding and commerce workflows.' if 'funding' not in url else 'Funding and product launches are accelerating in the AI agents space.'}" />
+          </head>
+        </html>
+        """,
+    )
+
+    payload = _resolve_web_answer(
+        prompt="what's happening in the news about AI agents today?",
+        query="ai agents news today",
+    )
+
+    assert payload["raw_answer"].startswith("AI agents are getting more capable")
+    assert payload["answer"].startswith("AI agents are getting more capable")
+    assert "I checked 2 sources" in payload["answer"]
+    assert payload["answer_style"]["voice"] == "memla_web_friend_v1"
+    assert payload["answer_style"]["slice"] == "news"
+
+
+def test_run_web_answer_benchmark_collects_answer_rows(monkeypatch, tmp_path):
+    cases_path = tmp_path / "web_cases.jsonl"
+    cases_path.write_text(
+        json.dumps(
+            {
+                "case_id": "web_news_topic",
+                "prompt": "what's happening in the news about AI agents today?",
+                "expected_actions": ["browser_answer_query:ai agents news today"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._fetch_search_result_cards",
+        lambda engine, query, limit=5: [
+            {
+                "index": 1,
+                "title": "AI agents today",
+                "url": "https://example.com/ai-agents",
+                "summary": "AI agents are getting more capable across coding and commerce workflows.",
+            },
+            {
+                "index": 2,
+                "title": "AI agents funding",
+                "url": "https://example.com/ai-agents-funding",
+                "summary": "Funding and product launches are accelerating in the AI agents space.",
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._fetch_page_html",
+        lambda url: f"""
+        <html>
+          <head>
+            <title>{'AI agents today' if 'funding' not in url else 'AI agents funding'}</title>
+            <meta name="description" content="{'AI agents are getting more capable across coding and commerce workflows.' if 'funding' not in url else 'Funding and product launches are accelerating in the AI agents space.'}" />
+          </head>
+        </html>
+        """,
+    )
+
+    report = run_web_answer_benchmark(
+        cases_path=str(cases_path),
+        memla_model="claude-sonnet-4-20250514",
+        memla_provider="anthropic",
+        heuristic_only=True,
+    )
+
+    assert report["cases"] == 1
+    assert report["answered_count"] == 1
+    assert report["rows"][0]["query"] == "ai agents news today"
+    assert report["rows"][0]["answer_voice"] == "memla_web_friend_v1"
+    assert report["rows"][0]["source_count"] == 2
 
 
 def test_terminal_heuristic_plan_opens_second_source_after_web_answer():
