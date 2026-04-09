@@ -201,7 +201,13 @@ def _build_run_payload(
     execution_seconds = 0.0
     if plan.actions:
         run_started = time.perf_counter()
-        execution = execute_terminal_plan(plan, browser_state=browser_state, state_path=state_path)
+        execution = execute_terminal_plan(
+            plan,
+            browser_state=browser_state,
+            state_path=state_path,
+            client=client,
+            model=model,
+        )
         execution_seconds = round(time.perf_counter() - run_started, 4)
     total_seconds = round(planning_seconds + execution_seconds, 4)
     return {

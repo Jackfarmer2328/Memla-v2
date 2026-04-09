@@ -1639,6 +1639,49 @@ def test_resolve_web_answer_renders_memla_friend_voice(monkeypatch):
     assert payload["answer_style"]["slice"] == "news"
 
 
+def test_resolve_web_answer_uses_model_renderer_when_available(monkeypatch):
+    class DummyClient:
+        def chat(self, **kwargs):
+            return json.dumps({"answer": "Dario Amodei is Anthropic's CEO."})
+
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._fetch_search_result_cards",
+        lambda engine, query, limit=5: [
+            {
+                "index": 1,
+                "title": "Anthropic's CEO Spends 40% of His Time on One Thing—and It's Not ...",
+                "url": "https://example.com/anthropic-ceo",
+                "summary": "Anthropic's",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._fetch_page_html",
+        lambda url: """
+        <html>
+          <head>
+            <title>Anthropic's CEO Spends 40% of His Time on One Thing—and It's Not ...</title>
+            <meta name="description" content="Anthropic's" />
+          </head>
+          <body>
+            <article>Dario Amodei leads Anthropic as chief executive officer.</article>
+          </body>
+        </html>
+        """,
+    )
+
+    payload = _resolve_web_answer(
+        prompt="who is the ceo of anthropic?",
+        query="who is the ceo of anthropic",
+        client=DummyClient(),
+        model="claude-sonnet-4-20250514",
+    )
+
+    assert payload["raw_answer"] == "Dario Amodei is Anthropic's CEO."
+    assert payload["answer_style"]["generator"] == "model"
+    assert payload["answer"].startswith("Dario Amodei is Anthropic's CEO.")
+
+
 def test_run_web_answer_benchmark_collects_answer_rows(monkeypatch, tmp_path):
     cases_path = tmp_path / "web_cases.jsonl"
     cases_path.write_text(

@@ -944,6 +944,134 @@ def _strip_html(text: str) -> str:
     return " ".join(clean.split())
 
 
+def _body_text_from_html(html: str) -> str:
+    clean = str(html or "")
+    body_match = re.search(r"(?is)<body[^>]*>(.*?)</body>", clean)
+    body = body_match.group(1) if body_match else clean
+    body = re.sub(r"(?is)<head.*?>.*?</head>", " ", body)
+    body = re.sub(r"(?is)<script.*?>.*?</script>", " ", body)
+    body = re.sub(r"(?is)<style.*?>.*?</style>", " ", body)
+    body = re.sub(r"(?is)<noscript.*?>.*?</noscript>", " ", body)
+    body = _strip_html(body)
+    return " ".join(body.split())
+
+
+def _first_sentences(text: str, *, max_sentences: int = 2, max_chars: int = 320) -> str:
+    clean = " ".join(str(text or "").split()).strip()
+    if not clean:
+        return ""
+    pieces = re.split(r"(?<=[.!?])\s+", clean)
+    kept: list[str] = []
+    for piece in pieces:
+        sentence = " ".join(piece.split()).strip()
+        if not sentence:
+            continue
+        kept.append(sentence)
+        if len(kept) >= max_sentences:
+            break
+    candidate = " ".join(kept).strip() or clean[:max_chars].strip()
+    if len(candidate) > max_chars:
+        candidate = candidate[: max_chars - 3].rstrip() + "..."
+    return candidate
+
+
+def _looks_like_low_signal_web_text(text: str) -> bool:
+    normalized = _normalize_goal_text(text)
+    if not normalized:
+        return True
+    low_signal_phrases = {
+        "read full articles",
+        "watch videos",
+        "browse thousands of titles",
+        "comprehensive coverage",
+        "stay informed",
+        "latest updates",
+        "latest hourly weather updates",
+        "detailed forecast including",
+        "weather forecast and conditions",
+        "today s and tonight s",
+        "complete list of",
+        "explore the forefront",
+        "keep you ahead",
+        "latest agentic ai news today",
+        "summarized in one timeline",
+        "what the source covers",
+    }
+    return any(phrase in normalized for phrase in low_signal_phrases)
+
+
+def _query_focus_tokens(text: str) -> list[str]:
+    source = _normalize_goal_text(text)
+    if not source:
+        return []
+    stopwords = {
+        "a",
+        "an",
+        "and",
+        "about",
+        "are",
+        "be",
+        "did",
+        "for",
+        "from",
+        "how",
+        "in",
+        "is",
+        "latest",
+        "news",
+        "of",
+        "on",
+        "or",
+        "the",
+        "this",
+        "today",
+        "weather",
+        "what",
+        "when",
+        "where",
+        "who",
+        "why",
+    }
+    tokens = [token for token in re.findall(r"[a-z0-9]+", source) if len(token) >= 3 and token not in stopwords]
+    return list(dict.fromkeys(tokens))
+
+
+def _query_focused_snippet(text: str, focus_text: str) -> str:
+    clean = " ".join(str(text or "").split()).strip()
+    if not clean:
+        return ""
+    tokens = _query_focus_tokens(focus_text)
+    sentences = re.split(r"(?<=[.!?])\s+", clean)
+    scored: list[tuple[int, str]] = []
+    for sentence in sentences:
+        candidate = " ".join(sentence.split()).strip()
+        if len(candidate) < 24:
+            continue
+        normalized = _normalize_goal_text(candidate)
+        if _looks_like_low_signal_web_text(candidate):
+            continue
+        score = sum(1 for token in tokens if token in normalized)
+        if score <= 0 and tokens:
+            continue
+        scored.append((score, candidate))
+    if not scored:
+        fallback = _first_sentences(clean, max_sentences=2)
+        return "" if _looks_like_low_signal_web_text(fallback) else fallback
+    scored.sort(key=lambda item: (-item[0], len(item[1])))
+    return _first_sentences(scored[0][1], max_sentences=2)
+
+
+def _prefer_content_summary(description: str, content_preview: str) -> str:
+    direct_content = _query_focused_snippet(content_preview, content_preview)
+    if description and not _looks_like_low_signal_web_text(description):
+        return description
+    if direct_content:
+        return direct_content
+    if description:
+        return description
+    return _first_sentences(content_preview, max_sentences=2)
+
+
 def _meta_content(html: str, key: str, *, attr: str = "name") -> str:
     pattern = re.compile(
         rf'<meta[^>]+{attr}=["\']{re.escape(key)}["\'][^>]+content=["\']([^"\']+)["\']',
@@ -1444,18 +1572,22 @@ def _evidence_item_from_details(browser_state: BrowserSessionState, details: dic
     title = str(payload.get("title") or payload.get("repo") or browser_state.subject_title or browser_state.current_url).strip()
     url = str(payload.get("url") or browser_state.current_url or browser_state.subject_url).strip()
     summary = str(payload.get("summary") or payload.get("description") or browser_state.subject_summary or title).strip()
+    content_preview = str(payload.get("content_preview") or "").strip()
     meta_parts = [source_kind.replace("_", " ")]
     for key in ("channel", "subreddit", "author", "language", "topics"):
         value = str(payload.get(key) or "").strip()
         if value:
             meta_parts.append(value)
-    return {
+    evidence = {
         "source_kind": source_kind,
         "title": title,
         "url": url,
         "summary": summary,
         "meta": " | ".join(part for part in meta_parts if part),
     }
+    if content_preview:
+        evidence["content_preview"] = content_preview
+    return evidence
 
 
 def _evidence_item_from_subject(
@@ -4023,6 +4155,7 @@ def _github_metric(html: str, owner: str, repo: str, suffix: str) -> str:
 def _extract_page_snapshot(state: BrowserSessionState, html: str) -> dict[str, Any]:
     url = str(state.current_url or "").strip()
     title = _title_from_html(html)
+    content_preview = _body_text_from_html(html)
     description = (
         _meta_content(html, "og:description", attr="property")
         or _meta_content(html, "twitter:description", attr="name")
@@ -4032,7 +4165,8 @@ def _extract_page_snapshot(state: BrowserSessionState, html: str) -> dict[str, A
         "url": url,
         "page_kind": state.page_kind or "web_page",
         "title": title,
-        "summary": description or title,
+        "summary": _prefer_content_summary(description, content_preview) or title,
+        "content_preview": _first_sentences(content_preview, max_sentences=3, max_chars=500),
     }
     if state.page_kind == "repo_page":
         match = re.match(r"^https?://github\.com/([^/\s]+)/([^/\s?#]+)", url, flags=re.IGNORECASE)
@@ -4162,6 +4296,88 @@ def _render_memla_web_answer(
     }
 
 
+def _web_answer_needs_model_rescue(slice_kind: str, answer: str) -> bool:
+    clean = " ".join(str(answer or "").split()).strip()
+    if not clean:
+        return True
+    normalized = _normalize_goal_text(clean)
+    if len(clean) < 32:
+        return True
+    if _looks_like_low_signal_web_text(clean):
+        return True
+    if slice_kind == "weather":
+        return not bool(re.search(r"\b\d{1,3}\b", clean))
+    if slice_kind == "fact":
+        return bool(
+            normalized.startswith(("in the shadow of", "saw a wave of", "anthropic s"))
+            or normalized.endswith(("source", "source today", "source now"))
+        )
+    return False
+
+
+def _render_web_answer_via_model(
+    *,
+    client: UniversalLLMClient,
+    model: str,
+    prompt: str,
+    query: str,
+    slice_kind: str,
+    evidence_items: list[dict[str, Any]],
+) -> str:
+    evidence_lines: list[str] = []
+    for index, item in enumerate(list(evidence_items or [])[:3], start=1):
+        title = str(item.get("title") or "").strip()
+        summary = str(item.get("summary") or "").strip()
+        preview = str(item.get("content_preview") or "").strip()
+        source_kind = str(item.get("source_kind") or "").strip()
+        evidence_lines.append(
+            "\n".join(
+                part
+                for part in [
+                    f"{index}. {title} ({source_kind})",
+                    f"summary: {summary}" if summary else "",
+                    f"preview: {preview}" if preview else "",
+                ]
+                if part
+            )
+        )
+    response = client.chat(
+        model=model,
+        temperature=0.1,
+        messages=[
+            ChatMessage(
+                role="system",
+                content=(
+                    "You are Memla's bounded web answer renderer. "
+                    "Answer like a smart, calm friend. "
+                    "Use only the evidence provided. "
+                    "Give the direct answer first. "
+                    "For news, give 1-3 short concrete highlights. "
+                    "For weather, include actual conditions or temperature if present. "
+                    "For factual questions, state the fact plainly in the first sentence. "
+                    "Do not describe what a source page covers. "
+                    "Do not mention browsing, SEO, or marketing language. "
+                    "If the evidence is weak or incomplete, say that plainly. "
+                    "Return JSON only: {\"answer\":\"...\"}."
+                ),
+            ),
+            ChatMessage(
+                role="user",
+                content=(
+                    f"Prompt: {prompt}\n"
+                    f"Query: {query}\n"
+                    f"Slice: {slice_kind}\n"
+                    "Evidence:\n"
+                    + ("\n\n".join(evidence_lines) if evidence_lines else "(none)")
+                ),
+            ),
+        ],
+    )
+    payload = _extract_first_json_object(response)
+    answer = str(payload.get("answer") or "").strip()
+    return " ".join(answer.split()).strip()
+
+
 def _goal_subject_for_web(prompt: str, query: str) -> dict[str, str]:
     title = str(prompt or "").strip() or str(query or "").strip()
     return {
@@ -4176,7 +4392,10 @@ def _resolve_web_answer(
     prompt: str,
     query: str,
     limit: int = 5,
+    client: UniversalLLMClient | None = None,
+    model: str = "",
 ) -> dict[str, Any]:
+    slice_kind = _web_question_slice(prompt, query)
     cards = _fetch_search_result_cards("web", query, limit=limit)
     if not cards:
         urls = _fetch_search_result_urls("web", query, limit=limit)
@@ -4203,6 +4422,22 @@ def _resolve_web_answer(
                 "title": str(card.get("title") or url).strip(),
                 "summary": str(card.get("summary") or card.get("title") or url).strip(),
             }
+        focused_summary = _query_focused_snippet(
+            " ".join(
+                part
+                for part in [
+                    str(details.get("summary") or "").strip(),
+                    str(details.get("content_preview") or "").strip(),
+                ]
+                if part
+            ),
+            prompt or query,
+        )
+        if focused_summary and (
+            _looks_like_low_signal_web_text(str(details.get("summary") or "").strip())
+            or len(str(details.get("summary") or "").strip()) < 40
+        ):
+            details["summary"] = focused_summary
         merged_card = dict(card)
         if str(details.get("title") or "").strip():
             merged_card["title"] = str(details.get("title") or "").strip()
@@ -4260,6 +4495,22 @@ def _resolve_web_answer(
             "summary": str(best_card.get("summary") or best_card.get("title") or best_card.get("url") or "").strip(),
         }
         answer = _best_web_answer_summary(prompt=prompt, card=best_card, details=best_details)
+    model_rendered_answer = ""
+    if client is not None and model and evidence_items:
+        if slice_kind in {"fact", "news", "weather"} or _web_answer_needs_model_rescue(slice_kind, answer):
+            try:
+                model_rendered_answer = _render_web_answer_via_model(
+                    client=client,
+                    model=model,
+                    prompt=prompt,
+                    query=query,
+                    slice_kind=slice_kind,
+                    evidence_items=evidence_items,
+                )
+            except Exception:
+                model_rendered_answer = ""
+    if model_rendered_answer:
+        answer = model_rendered_answer
     raw_answer = str(answer or "").strip()
     rendered_answer, answer_style = _render_memla_web_answer(
         prompt=prompt,
@@ -4274,7 +4525,10 @@ def _resolve_web_answer(
         "source_count": len(evidence_items),
         "answer": rendered_answer or raw_answer,
         "raw_answer": raw_answer,
-        "answer_style": answer_style,
+        "answer_style": {
+            **answer_style,
+            "generator": "model" if model_rendered_answer else "heuristic",
+        },
         "best_card": best_card,
         "best_details": best_details,
         "synthesis": synthesis,
@@ -4945,6 +5199,8 @@ def execute_terminal_plan(
     platform_name: str | None = None,
     browser_state: BrowserSessionState | None = None,
     state_path: str | Path | None = None,
+    client: UniversalLLMClient | None = None,
+    model: str = "",
 ) -> TerminalExecutionResult:
     platform_key = _platform_key(platform_name or sys.platform)
     records: list[TerminalExecutionRecord] = []
@@ -4985,7 +5241,12 @@ def execute_terminal_plan(
             goal = str(note_payload.get("goal") or plan.prompt or "").strip()
             query = str(note_payload.get("query") or action.resolved_target or action.target or goal).strip()
             try:
-                answer_payload = _resolve_web_answer(prompt=goal or plan.prompt, query=query)
+                answer_payload = _resolve_web_answer(
+                    prompt=goal or plan.prompt,
+                    query=query,
+                    client=client,
+                    model=model,
+                )
             except Exception as exc:
                 residuals.append("browser_web_answer_failed")
                 records.append(
@@ -7615,6 +7876,7 @@ def run_web_answer_benchmark(
     memla_model_calls = 0
     memla_heuristic_hits = 0
     judged_count = 0
+    model_answer_count = 0
 
     for case in cases:
         try:
@@ -7665,7 +7927,12 @@ def run_web_answer_benchmark(
         query = str(note_payload.get("query") or web_action.resolved_target or web_action.target or case.prompt).strip()
         try:
             answer_started = time.perf_counter()
-            answer_payload = _resolve_web_answer(prompt=goal or case.prompt, query=query)
+            answer_payload = _resolve_web_answer(
+                prompt=goal or case.prompt,
+                query=query,
+                client=memla_client,
+                model=memla_model,
+            )
             answer_latency_ms = round((time.perf_counter() - answer_started) * 1000.0, 2)
         except Exception as exc:
             failed_cases.append({"case_id": case.case_id, "error_type": type(exc).__name__, "message": str(exc)})
@@ -7719,6 +7986,8 @@ def run_web_answer_benchmark(
                 "teacher_judgement": teacher_judgement,
             }
         )
+        if str(answer_style.get("generator") or "").strip() == "model":
+            model_answer_count += 1
 
     count = len(rows) or 1
     answered_count = sum(1 for row in rows if row.get("answered"))
@@ -7753,6 +8022,7 @@ def run_web_answer_benchmark(
         "avg_teacher_overall": avg_teacher_overall,
         "memla_model_call_count": memla_model_calls,
         "memla_heuristic_hit_count": memla_heuristic_hits,
+        "model_answer_count": model_answer_count,
         "judged_count": judged_count,
         "rows": rows,
         "failed_cases": failed_cases,
@@ -7777,6 +8047,7 @@ def render_web_answer_benchmark_markdown(report: dict[str, Any]) -> str:
         f"- Avg teacher overall: `{report.get('avg_teacher_overall', 0.0)}`",
         f"- Memla model calls: `{report.get('memla_model_call_count', 0)}`",
         f"- Memla heuristic hits: `{report.get('memla_heuristic_hit_count', 0)}`",
+        f"- Model-rendered answers: `{report.get('model_answer_count', 0)}`",
     ]
     if report.get("failed_cases"):
         lines.extend(["", "## Failed cases", ""])
