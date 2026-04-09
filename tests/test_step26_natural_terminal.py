@@ -18,6 +18,7 @@ from memory_system.natural_terminal import (
     TerminalAction,
     _browser_new_tab_command,
     _compiler_surface_text,
+    _extract_google_ai_overview_from_html,
     _language_rule_plan,
     _hard_check_web_answer,
     _merge_language_actions,
@@ -1973,6 +1974,66 @@ def test_hard_check_web_answer_passes_age_at_event_with_computed_age():
     assert result["applicable"] is True
     assert result["passed"] is True
     assert result["score"] >= 0.8
+
+
+def test_extract_google_ai_overview_from_html_parses_answer_and_sources():
+    html = """
+    <html>
+      <body>
+        <div>AI Overview</div>
+        <div>
+          Thomas Edison patented the first practical incandescent light bulb in 1879-1880.
+          Born on February 11, 1847, Edison was 32 years old when his team at Menlo Park developed a long-lasting bulb.
+        </div>
+        <a href="https://www.energy.gov/articles/history-light-bulb">Department of Energy</a>
+        <a href="https://www.britannica.com/technology/light-bulb">Britannica</a>
+        <h3>Department of Energy (.gov)</h3>
+      </body>
+    </html>
+    """
+
+    payload = _extract_google_ai_overview_from_html(html)
+
+    assert "Thomas Edison patented the first practical incandescent light bulb" in payload["answer"]
+    assert payload["answer_kind"] == "google_ai_overview"
+    assert len(payload["source_cards"]) >= 2
+    assert payload["source_cards"][0]["url"] == "https://www.energy.gov/articles/history-light-bulb"
+
+
+def test_resolve_web_answer_prefers_google_answer_surface(monkeypatch):
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._fetch_google_answer_surface",
+        lambda query: {
+            "answer": "Thomas Edison patented the first practical incandescent light bulb in 1879 and was 32 years old then.",
+            "answer_kind": "google_ai_overview",
+            "search_url": "https://www.google.com/search?q=who+invented+the+light+bulb+and+how+old+were+they",
+            "source_cards": [
+                {
+                    "title": "Department of Energy",
+                    "url": "https://www.energy.gov/articles/history-light-bulb",
+                    "summary": "",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._fetch_search_result_cards",
+        lambda engine, query, limit=5: [],
+    )
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._fetch_search_result_urls",
+        lambda engine, query, limit=5: [],
+    )
+
+    payload = _resolve_web_answer(
+        prompt="who invented the light bulb and how old were they when they did it",
+        query="who invented the light bulb and how old were they when they did it",
+    )
+
+    assert payload["raw_answer"] == "Thomas Edison patented the first practical incandescent light bulb in 1879 and was 32 years old then."
+    assert payload["answer_style"]["source_kind"] == "google_ai_overview"
+    assert payload["answer"] == "Thomas Edison patented the first practical incandescent light bulb in 1879 and was 32 years old then."
+    assert payload["source_count"] == 1
 
 
 def test_run_web_teacher_loop_promotes_rescued_answers(monkeypatch, tmp_path):
