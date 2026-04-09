@@ -145,6 +145,36 @@ def test_terminal_heuristic_plan_builds_bounded_web_answer_for_contracted_fact_q
     assert plan.actions[0].resolved_target == "who is the ceo of openai"
 
 
+def test_terminal_heuristic_plan_prefers_standalone_web_question_over_browser_context():
+    browser_state = BrowserSessionState(
+        current_url="https://github.com/ggerganov/llama.cpp",
+        page_kind="repo_page",
+        search_engine="github",
+        search_query="local llm repos",
+        subject_title="ggerganov/llama.cpp",
+        subject_url="https://github.com/ggerganov/llama.cpp",
+        subject_summary="Local LLM inference in C/C++.",
+        result_cards=[
+            {
+                "index": 1,
+                "title": "ggerganov/llama.cpp",
+                "url": "https://github.com/ggerganov/llama.cpp",
+                "summary": "Local LLM inference in C/C++.",
+            }
+        ],
+    )
+
+    plan = build_terminal_plan(
+        prompt="who is the ceo of openai",
+        heuristic_only=True,
+        browser_state=browser_state,
+    )
+
+    assert plan.source == "heuristic"
+    assert [action.kind for action in plan.actions] == ["browser_answer_query"]
+    assert plan.actions[0].resolved_target == "who is the ceo of openai"
+
+
 def test_terminal_heuristic_plan_handles_noisy_click_first_video_follow_up():
     browser_state = BrowserSessionState(
         current_url="https://www.youtube.com/results?search_query=nine+vicious",

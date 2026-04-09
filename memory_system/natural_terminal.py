@@ -1334,6 +1334,42 @@ def _general_web_answer_action(prompt: str) -> TerminalAction | None:
     )
 
 
+def _looks_like_contextual_browser_followup(prompt: str) -> bool:
+    normalized = _intent_text(prompt)
+    if not normalized:
+        return False
+    contextual_cues = {
+        "this",
+        "that",
+        "it",
+        "these",
+        "those",
+        "current page",
+        "current result",
+        "first source",
+        "second source",
+        "third source",
+        "first result",
+        "second result",
+        "third result",
+        "winner",
+        "that source",
+        "this source",
+        "open the second source",
+        "compare the first and second source",
+        "which repo",
+        "best repo",
+        "which result",
+        "best result",
+        "rank these",
+        "compare the first",
+        "compare the second",
+        "matches a beginner",
+        "fits best",
+    }
+    return any(cue in normalized for cue in contextual_cues)
+
+
 def _cached_cards(browser_state: BrowserSessionState) -> list[dict[str, Any]]:
     cards = [dict(item) for item in list(browser_state.result_cards or []) if isinstance(item, dict)]
     if cards:
@@ -2504,6 +2540,9 @@ def _heuristic_plan(prompt: str, *, browser_state: BrowserSessionState | None = 
             clarification="This V1 terminal only supports safe launch/open/status tasks.",
             residual_constraints=["unsupported_risky_action"],
         )
+    standalone_web_answer = _general_web_answer_action(prompt)
+    if standalone_web_answer is not None and not _looks_like_contextual_browser_followup(prompt):
+        return TerminalPlan(prompt=prompt, source="heuristic", actions=[standalone_web_answer])
     follow_up_actions = _follow_up_browser_actions(prompt, browser_state)
     if follow_up_actions:
         return TerminalPlan(prompt=prompt, source="heuristic", actions=follow_up_actions)
@@ -2555,9 +2594,8 @@ def _heuristic_plan(prompt: str, *, browser_state: BrowserSessionState | None = 
                 actions.append(TerminalAction(kind="system_info", target=topic, resolved_target=topic))
                 break
     if not actions:
-        web_answer = _general_web_answer_action(prompt)
-        if web_answer is not None:
-            actions.append(web_answer)
+        if standalone_web_answer is not None:
+            actions.append(standalone_web_answer)
 
     if not actions:
         return None
