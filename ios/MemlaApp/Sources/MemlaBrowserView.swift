@@ -2273,7 +2273,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
 
           const recommendedPresetButtons = Array.from(itemModal.querySelectorAll('button,[role="button"]'))
             .filter(visible)
-            .filter((el) => /^#\d+/.test(clean(labelForElement(el))));
+            .filter((el) => /^#\\d+/.test(clean(labelForElement(el))));
           doordashCustomizerRecommendedPresetCount = recommendedPresetButtons.length;
 
           doordashCustomizerHasSpecialInstructions = Array.from(itemModal.querySelectorAll('button,[role="button"],a[href]'))
@@ -2286,17 +2286,17 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             .forEach((el) => {
               const text = clean(el.innerText || '');
               if (!text || text.length < 12 || text.length > 900) return;
-              if (/^your recommended options\b/i.test(text)) return;
-              if (!/(required|optional).*(select|choose)|preferences\s*\(optional\)/i.test(text)) return;
-              const headerMatch = text.match(/^(.{1,120}?)(?:\s+(?:Required|\(Optional\)|Optional)\b)/i);
-              const header = clean(headerMatch ? headerMatch[1] : (/^preferences\b/i.test(text) ? 'Preferences' : ''));
+              if (/^your recommended options\\b/i.test(text)) return;
+              if (!/(required|optional).*(select|choose)|preferences\\s*\\(optional\\)/i.test(text)) return;
+              const headerMatch = text.match(/^(.{1,120}?)(?:\\s+(?:Required|\\(Optional\\)|Optional)\\b)/i);
+              const header = clean(headerMatch ? headerMatch[1] : (/^preferences\\b/i.test(text) ? 'Preferences' : ''));
               if (!header || /^required$/i.test(header) || /^optional$/i.test(header)) return;
               const key = header.toLowerCase();
               const existing = customizerGroups.get(key);
               if (!existing || text.length > existing.text.length) {
                 customizerGroups.set(key, {
                   header,
-                  required: /\brequired\b/i.test(text),
+                  required: /\\brequired\\b/i.test(text),
                   text
                 });
               }
