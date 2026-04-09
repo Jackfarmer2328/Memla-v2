@@ -2304,17 +2304,18 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           doordashCustomizerGroupCount = customizerGroups.size;
           doordashCustomizerRequiredGroupCount = Array.from(customizerGroups.values()).filter((group) => group.required).length;
 
-          const modalOptionButtons = Array.from(itemModal.querySelectorAll('button,[role="button"],a[href]'))
+          const modalOptionButtons = Array.from(itemModal.querySelectorAll('button,[role="button"],a[href],input[type="radio"],input[type="checkbox"]'))
             .filter(visible)
             .filter((el) => {
-              const label = labelForElement(el);
+              const root = closestWithText(el, 18, 260);
+              const label = firstMeaningfulTextLine(root) || labelForElement(el);
               const text = clean([label, contextForElement(el, itemModal)].join(' '));
               if (!text || isDoorDashNoise(text) || /close|dismiss|add special instructions|add to cart/i.test(text)) {
                 return false;
               }
-              return /ordered recently|small|medium|large|hand tossed|crust|seasoning|pizza|\\$\\d|recommended/i.test(text);
+              return text.length <= 420;
             })
-            .slice(0, 14);
+            .slice(0, 24);
           modalOptionButtons.forEach((el) => {
             doordashItemCardCount += 1;
             const root = closestWithText(el, 18);
@@ -2818,8 +2819,8 @@ struct MemlaBrowserView: View {
     @State private var isC2AConsoleClosed = false
     @State private var isRawPageVisible = false
     @State private var authNotes: [String: String] = [:]
-    @State private var autoDriveEnabled = true
-    @State private var autoDriveStatus = "Memla auto-drive is ready."
+    @State private var autoDriveEnabled = false
+    @State private var autoDriveStatus = "Manual Mirror mode. Tap the distilled controls yourself."
     @State private var lastAutoDriveSignature = ""
     @State private var pendingDoorDashRole: String = ""
     @State private var pendingDoorDashLabel: String = ""
@@ -2864,8 +2865,8 @@ struct MemlaBrowserView: View {
                 }
             }
             .onAppear {
-                autoDriveEnabled = true
-                autoDriveStatus = "Memla auto-drive is ready."
+                autoDriveEnabled = false
+                autoDriveStatus = "Manual Mirror mode. Tap the distilled controls yourself."
                 lastAutoDriveSignature = ""
                 pendingDoorDashRole = ""
                 pendingDoorDashLabel = ""
@@ -3162,10 +3163,10 @@ struct MemlaBrowserView: View {
                 }
                 Spacer(minLength: 0)
             }
-            if (state.pageKind.hasPrefix("dd_") || state.pageKind.hasPrefix("ue_")), !autoDriveStatus.isEmpty {
-                Label(autoDriveStatus, systemImage: "bolt.fill")
+            if (state.pageKind.hasPrefix("dd_") || state.pageKind.hasPrefix("ue_") || state.pageKind.hasPrefix("ub_")), !autoDriveStatus.isEmpty {
+                Label(autoDriveStatus, systemImage: autoDriveEnabled ? "bolt.fill" : "hand.tap.fill")
                     .font(.caption2)
-                    .foregroundStyle(.green)
+                    .foregroundStyle(autoDriveEnabled ? .green : .orange)
                     .lineLimit(2)
             }
             ScrollView(.horizontal, showsIndicators: false) {
@@ -3375,7 +3376,16 @@ struct MemlaBrowserView: View {
             }
             return left.label.localizedCaseInsensitiveCompare(right.label) == .orderedAscending
         }
-        return Array(sorted.prefix(4))
+        let limit: Int
+        switch state.pageKind {
+        case "dd_storefront", "dd_item_modal", "ue_storefront", "ue_item_modal":
+            limit = 12
+        case "dd_search_results", "ue_search_results":
+            limit = 8
+        default:
+            limit = 4
+        }
+        return Array(sorted.prefix(limit))
     }
 
     private func mirrorRolePriority(pageKind: String, role: String) -> Int {
@@ -3697,7 +3707,7 @@ struct MemlaBrowserView: View {
     private func mirrorCandidateScroller(_ candidates: [WebsiteC2ACandidate]) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(alignment: .top, spacing: 8) {
-                ForEach(Array(candidates.prefix(6))) { candidate in
+                ForEach(Array(candidates.prefix(12))) { candidate in
                     mirrorCandidateCard(candidate)
                 }
             }
