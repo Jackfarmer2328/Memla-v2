@@ -24,6 +24,7 @@ final class MemlaViewModel: ObservableObject {
         }
     }
     @Published var scoutPrompt: String = "find the top 10 github repos for local llms and tell me which best fits weak hardware"
+    @Published var webPrompt: String = "what's happening in the news about AI agents today?"
     @Published var followupPrompt: String = "find a youtube video about it then open the first one and summarize it"
     @Published var actionPrompt: String = "ask my sister what she wants from DoorDash"
     @Published var missionPrompt: String = "get pizza from Tony's with pepperoni and give the dasher a $6 tip on DoorDash"
@@ -37,6 +38,7 @@ final class MemlaViewModel: ObservableObject {
     @Published var actionDraft: ActionDraft?
     @Published var actionCapsule: ActionCapsule?
     @Published var scoutResult: ScoutResult?
+    @Published var webResult: MemlaRunEnvelope?
     @Published var followupResult: MemlaRunEnvelope?
     @Published var chatItems: [MemlaChatMessage] = []
     @Published var activityItems: [MemlaActivityItem] = []
@@ -154,6 +156,7 @@ final class MemlaViewModel: ObservableObject {
             self.appendChat(speaker: "You", title: "Scout", detail: self.scoutPrompt, isUser: true)
             let envelope = try await MemlaClient.shared.scout(prompt: self.scoutPrompt, baseURL: self.baseURL)
             self.scoutResult = envelope.result
+            self.webResult = nil
             self.followupResult = nil
             try await self.refreshRuntimeSnapshots()
             self.appendChat(
@@ -163,6 +166,18 @@ final class MemlaViewModel: ObservableObject {
                 isUser: false
             )
             self.appendActivity(title: "Scout", detail: envelope.result.summary)
+        }
+    }
+
+    func runWeb() async {
+        await runTask { [self] in
+            self.appendChat(speaker: "You", title: "Web", detail: self.webPrompt, isUser: true)
+            let envelope = try await MemlaClient.shared.run(prompt: self.webPrompt, baseURL: self.baseURL, heuristicOnly: false)
+            self.webResult = envelope
+            try await self.refreshRuntimeSnapshots()
+            let detail = self.summaryLine(for: envelope)
+            self.appendChat(speaker: "Memla", title: "Web Answer", detail: detail, isUser: false)
+            self.appendActivity(title: "Web", detail: detail)
         }
     }
 
@@ -226,6 +241,10 @@ final class MemlaViewModel: ObservableObject {
 
     func applyScoutPreset(_ prompt: String) {
         scoutPrompt = prompt
+    }
+
+    func applyWebPreset(_ prompt: String) {
+        webPrompt = prompt
     }
 
     func applyFollowupPreset(_ prompt: String) {
@@ -297,7 +316,7 @@ final class MemlaViewModel: ObservableObject {
         return "the winning repo"
     }
 
-    private func summaryLine(for envelope: MemlaRunEnvelope) -> String {
+    func summaryLine(for envelope: MemlaRunEnvelope) -> String {
         if let records = envelope.execution?.records, !records.isEmpty {
             let messages = records.map { $0.message.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
             if !messages.isEmpty {

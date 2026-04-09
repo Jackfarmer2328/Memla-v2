@@ -10,6 +10,11 @@ struct ContentView: View {
         "find the top 10 github repos for browser agents and tell me which looks strongest",
         "find the top 10 github repos for local coding agents and tell me which is most active",
     ]
+    private let webPresets = [
+        "what's happening in the news about AI agents today?",
+        "who built the Saturn V rocket engines?",
+        "what changed in the latest OpenAI API release?",
+    ]
     private let followupPresets = [
         "find a youtube video about it then open the first one and summarize it",
         "find a reddit post about it then open the first one and explain it",
@@ -24,6 +29,7 @@ struct ContentView: View {
                     missionControlCard
                     missionQueueCard
                     chatCard
+                    webCard
                     scoutCard
                     stateCard
                     memoryCard
@@ -329,6 +335,90 @@ struct ContentView: View {
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .padding()
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var webCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Memla's Web")
+                        .font(.headline)
+                    Text("Ask a web question and let Memla search, read, and bring back the answer.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if let result = viewModel.webResult?.execution?.browserState?.currentURL,
+                   !result.isEmpty {
+                    Button("Open Result") {
+                        openWebResult(result)
+                    }
+                    .font(.caption)
+                }
+            }
+
+            TextField("What should Memla look up?", text: $viewModel.webPrompt, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(2...5)
+
+            presetChips(items: webPresets) { preset in
+                viewModel.applyWebPreset(preset)
+            }
+
+            Button(viewModel.isLoading ? "Searching..." : "Ask The Web") {
+                Task { await viewModel.runWeb() }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(viewModel.isLoading)
+
+            if let result = viewModel.webResult {
+                Text(viewModel.summaryLine(for: result))
+                    .font(.subheadline)
+
+                HStack(spacing: 8) {
+                    chip(text: "plan \(result.plan.source)")
+                    if let pageKind = result.execution?.browserState?.pageKind, !pageKind.isEmpty {
+                        chip(text: pageKind.replacingOccurrences(of: "_", with: " "))
+                    }
+                }
+
+                if let browserState = result.execution?.browserState {
+                    VStack(alignment: .leading, spacing: 4) {
+                        if let subject = browserState.subjectTitle ?? browserState.researchSubjectTitle, !subject.isEmpty {
+                            Text(subject)
+                                .font(.caption.weight(.semibold))
+                        }
+                        if let currentURL = browserState.currentURL, !currentURL.isEmpty {
+                            Text(currentURL)
+                                .font(.caption2)
+                                .foregroundStyle(.blue)
+                                .lineLimit(2)
+                        }
+                    }
+                    .padding(10)
+                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+
+                if let execution = result.execution, !execution.records.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Web Trace")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        ForEach(execution.records.prefix(6)) { record in
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(record.kind)
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                Text(record.message)
+                                    .font(.caption)
                             }
                         }
                     }
@@ -797,6 +887,13 @@ struct ContentView: View {
             return
         }
         UIApplication.shared.open(url)
+    }
+
+    private func openWebResult(_ value: String) {
+        guard let url = URL(string: value) else {
+            return
+        }
+        browserRoute = MemlaBrowserRoute(url: url, capsule: nil, option: nil)
     }
 }
 
