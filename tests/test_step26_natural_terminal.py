@@ -41,6 +41,7 @@ from memory_system.natural_terminal import (
     terminal_language_rule_path,
     run_terminal_benchmark,
     run_web_answer_benchmark,
+    run_web_overnight_loop,
     run_web_teacher_loop,
 )
 
@@ -2103,6 +2104,131 @@ def test_distill_web_policy_bank_extracts_web_behaviors(tmp_path):
     assert "direct_to_found_source" in priors["behaviors"]
     assert "offer_actionable_next_step" in priors["behaviors"]
     assert "extract_weather_fact" in priors["behaviors"]
+
+
+def test_run_web_overnight_loop_stops_after_target_and_writes_policy(monkeypatch, tmp_path):
+    cases_path = tmp_path / "seed_cases.jsonl"
+    cases_path.write_text(
+        json.dumps(
+            {
+                "case_id": "seed_case",
+                "prompt": "who is the ceo of anthropic",
+                "expected_actions": ["browser_answer_query:who is the ceo of anthropic"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._compose_web_training_case_rows",
+        lambda **kwargs: [
+            {
+                "case_id": "seed_case",
+                "prompt": "who is the ceo of anthropic",
+                "expected_actions": ["browser_answer_query:who is the ceo of anthropic"],
+                "category": "seed",
+                "source": "seed",
+            },
+            {
+                "case_id": "generated_case",
+                "prompt": "is it raining tomorrow in minneapolis",
+                "expected_actions": [],
+                "category": "weather",
+                "source": "teacher_generated",
+            },
+        ],
+    )
+
+    benchmark_calls = {"count": 0}
+
+    def fake_benchmark(**kwargs):
+        benchmark_calls["count"] += 1
+        if benchmark_calls["count"] == 1:
+            return {
+                "avg_teacher_overall": 3.2,
+                "avg_answer_latency_ms": 22000.0,
+                "answer_rate": 1.0,
+            }
+        return {
+            "avg_teacher_overall": 4.4,
+            "avg_answer_latency_ms": 16000.0,
+            "answer_rate": 1.0,
+        }
+
+    monkeypatch.setattr("memory_system.natural_terminal.run_web_answer_benchmark", fake_benchmark)
+    monkeypatch.setattr(
+        "memory_system.natural_terminal.run_web_teacher_loop",
+        lambda **kwargs: {
+            "avg_promoted_overall": 4.5,
+            "avg_baseline_overall": 3.5,
+            "promoted_rescue_count": 0,
+            "trace_row_count": 1,
+            "trace_rows": [
+                {
+                    "case_id": "generated_case",
+                    "prompt": "is it raining tomorrow in minneapolis",
+                    "query": "is it raining tomorrow in minneapolis",
+                    "slice": "weather",
+                    "question_type": "weather_precipitation",
+                    "needed_fields": ["target_place", "target_period", "precipitation_chance", "rain_condition"],
+                    "baseline_answer": "Get accurate hourly forecasts...",
+                    "baseline_overall": 2,
+                    "baseline_relevant_chunk_ids": [],
+                    "baseline_extracted_facts": [],
+                    "rescued_answer": "Yes, light rain is expected tomorrow in Minneapolis.",
+                    "rescued_overall": 5,
+                    "rescued_relevant_chunk_ids": ["s1c2"],
+                    "rescued_extracted_facts": ["light rain expected"],
+                    "promoted_answer": "Yes, light rain is expected tomorrow in Minneapolis.",
+                    "promoted_lane": "teacher_rescue",
+                    "improvement_delta": 3.0,
+                    "teacher_coaching": "Use the forecast chunk directly.",
+                    "rescue_why_better": "It answers the user's actual question.",
+                    "promotion_notes": ["prefer direct forecast facts"],
+                    "source_title": "Weather Forecast and Conditions for Minneapolis",
+                    "source_url": "https://example.com/weather",
+                    "source_count": 1,
+                    "evidence_chunk_count": 2,
+                }
+            ],
+        },
+    )
+
+    monkeypatch.setattr(
+        "memory_system.natural_terminal.distill_web_policy_bank",
+        lambda trace_bank_path, min_improvement=0.0: {
+            "rows_used": 1,
+            "slice_counts": {"weather": 1},
+            "token_counts": {"minneapolis": 1},
+            "token_behavior_weights": {"minneapolis": {"extract_weather_fact": 1.0}},
+            "token_note_weights": {},
+            "behavior_examples": {"extract_weather_fact": ["Use the forecast chunk directly."]},
+        },
+    )
+
+    report = run_web_overnight_loop(
+        out_dir=str(tmp_path / "overnight"),
+        seed_cases_path=str(cases_path),
+        question_count=2,
+        memla_model="claude-sonnet-4-20250514",
+        memla_provider="anthropic",
+        teacher_model="claude-sonnet-4-20250514",
+        teacher_provider="anthropic",
+        judge_model="claude-sonnet-4-20250514",
+        judge_provider="anthropic",
+        max_rounds=3,
+        target_overall=4.25,
+        allowed_rescues=0,
+        repo_root=str(tmp_path / "repo"),
+    )
+
+    assert report["stop_reason"] == "target_reached"
+    assert report["question_count_actual"] == 2
+    assert report["best_score"] == 4.4
+    assert Path(report["cases_path"]).exists()
+    assert Path(report["combined_trace_bank"]).exists()
+    assert Path(report["policy_bank_path"]).exists()
 
 
 def test_resolve_web_answer_applies_policy_priors_to_limitation(monkeypatch):

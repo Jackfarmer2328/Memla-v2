@@ -15,7 +15,11 @@ from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 from urllib import request as urllib_request
 from urllib.error import URLError
 
-from .distillation.web_policy_bank import suggest_web_policy_priors
+from .distillation.web_policy_bank import (
+    distill_web_policy_bank,
+    render_web_policy_bank_markdown,
+    suggest_web_policy_priors,
+)
 from .memory.ontology import (
     adjudicate_memory_trace,
     promote_memory_rule,
@@ -9091,6 +9095,425 @@ def render_web_teacher_loop_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def _fallback_web_training_rows() -> list[dict[str, Any]]:
+    prompts = [
+        ("weather", "whats the weather today"),
+        ("weather", "what's the weather today in minneapolis"),
+        ("weather", "is it raining tomorrow in minneapolis"),
+        ("weather", "do i need an umbrella tomorrow in chicago"),
+        ("weather", "what will the high be tomorrow in seattle"),
+        ("news", "whats on the news"),
+        ("news", "what's happening in the news about AI agents today?"),
+        ("news", "what happened in the news today about OpenAI"),
+        ("news", "what changed today in the tech world"),
+        ("news", "what's the latest on electric cars today"),
+        ("fact", "who is the ceo of openai"),
+        ("fact", "who is the ceo of anthropic"),
+        ("fact", "who created the iphone"),
+        ("fact", "who invented the light bulb"),
+        ("fact", "who built the saturn v rocket engines"),
+        ("fact", "who founded apple"),
+        ("fact", "who founded anthropic"),
+        ("fact", "who created wikipedia"),
+        ("fact", "when did wikipedia launch"),
+        ("fact", "when was the iphone released"),
+        ("fact", "why did humane ai pin fail"),
+        ("fact", "what does stagflation mean"),
+        ("fact", "what is agentic ai"),
+        ("fact", "what is the difference between lcd and oled"),
+        ("derived", "who created the iphone and how old were they"),
+        ("derived", "who invented the light bulb and how old were they when they did it"),
+        ("derived", "who founded apple and how old was steve jobs then"),
+        ("derived", "who built the saturn v rocket engines and when was that"),
+        ("compare", "which weather site is best for tomorrow's rain forecast"),
+        ("compare", "what source best explains why humane ai pin failed"),
+        ("compare", "which source best explains ai agents today"),
+    ]
+    rows: list[dict[str, Any]] = []
+    for index, (category, prompt) in enumerate(prompts, start=1):
+        rows.append(
+            {
+                "case_id": f"web_{category}_{index:03d}",
+                "prompt": prompt,
+                "expected_actions": [],
+                "category": category,
+                "source": "fallback",
+            }
+        )
+    return rows
+
+
+def _normalize_web_prompt_key(prompt: str) -> str:
+    return " ".join(_normalize_goal_text(prompt).split())
+
+
+def _safe_case_slug(text: str, *, limit: int = 36) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", _normalize_goal_text(text or "")).strip("_")
+    return slug[:limit] or "web_case"
+
+
+def _generate_web_questions_with_teacher(
+    *,
+    client: UniversalLLMClient,
+    model: str,
+    target_count: int,
+    existing_prompts: list[str],
+) -> list[dict[str, Any]]:
+    generated: list[dict[str, Any]] = []
+    seen = {_normalize_web_prompt_key(prompt) for prompt in existing_prompts if str(prompt).strip()}
+    attempts = 0
+    while len(generated) < max(int(target_count), 0) and attempts < 6:
+        attempts += 1
+        batch_size = min(24, max(int(target_count), 0) - len(generated))
+        response = client.chat(
+            model=model,
+            temperature=0.6,
+            messages=[
+                ChatMessage(
+                    role="system",
+                    content=(
+                        "You are generating everyday web questions for Memla's overnight web teacher loop. "
+                        "These should sound like normal questions a person might ask Siri or a chat assistant on their phone. "
+                        "Focus on bounded web-answer questions only. "
+                        "Categories to cover: weather, news, people/companies, history/science, explainers, comparisons, and derived facts. "
+                        "Avoid coding tasks, unsafe topics, medical diagnosis, legal advice, or requests that need app actions. "
+                        "Return JSON only with key questions, where questions is an array of objects with keys prompt and category."
+                    ),
+                ),
+                ChatMessage(
+                    role="user",
+                    content=(
+                        f"Generate {batch_size} varied everyday web questions.\n"
+                        "Avoid duplicates and avoid these prompts:\n"
+                        + "\n".join(f"- {prompt}" for prompt in existing_prompts[:80])
+                    ),
+                ),
+            ],
+        )
+        payload = _extract_first_json_object(response)
+        items = payload.get("questions") or []
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            prompt = " ".join(str(item.get("prompt") or "").split()).strip()
+            if not prompt:
+                continue
+            key = _normalize_web_prompt_key(prompt)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            generated.append(
+                {
+                    "prompt": prompt,
+                    "category": " ".join(str(item.get("category") or "everyday").split()).strip().lower() or "everyday",
+                    "source": "teacher_generated",
+                }
+            )
+            if len(generated) >= max(int(target_count), 0):
+                break
+    return generated
+
+
+def _compose_web_training_case_rows(
+    *,
+    seed_cases_path: str,
+    question_count: int,
+    teacher_client: UniversalLLMClient | None = None,
+    teacher_model: str = "",
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    try:
+        seed_cases = load_terminal_benchmark_cases(seed_cases_path)
+    except Exception:
+        seed_cases = []
+    for case in seed_cases:
+        key = _normalize_web_prompt_key(case.prompt)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        rows.append(
+            {
+                "case_id": case.case_id,
+                "prompt": case.prompt,
+                "expected_actions": list(case.expected_actions),
+                "category": "seed",
+                "source": "seed",
+            }
+        )
+    if teacher_client is not None and teacher_model and len(rows) < question_count:
+        generated = _generate_web_questions_with_teacher(
+            client=teacher_client,
+            model=teacher_model,
+            target_count=max(int(question_count), 0) - len(rows),
+            existing_prompts=[str(row.get("prompt") or "").strip() for row in rows],
+        )
+        for item in generated:
+            prompt = str(item.get("prompt") or "").strip()
+            key = _normalize_web_prompt_key(prompt)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            rows.append(
+                {
+                    "case_id": f"web_teacher_{len(rows)+1:03d}_{_safe_case_slug(prompt)}",
+                    "prompt": prompt,
+                    "expected_actions": [],
+                    "category": str(item.get("category") or "everyday").strip(),
+                    "source": "teacher_generated",
+                }
+            )
+    fallback_rows = _fallback_web_training_rows()
+    for item in fallback_rows:
+        if len(rows) >= max(int(question_count), 0):
+            break
+        prompt = str(item.get("prompt") or "").strip()
+        key = _normalize_web_prompt_key(prompt)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        rows.append(dict(item))
+    return rows[: max(int(question_count), 0)]
+
+
+def _write_web_training_cases(path: str, rows: list[dict[str, Any]]) -> None:
+    target = Path(path).resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for row in rows:
+        payload = {
+            "case_id": str(row.get("case_id") or "").strip(),
+            "prompt": str(row.get("prompt") or "").strip(),
+            "expected_actions": [str(item).strip() for item in list(row.get("expected_actions") or []) if str(item).strip()],
+            "category": str(row.get("category") or "").strip(),
+            "source": str(row.get("source") or "").strip(),
+        }
+        lines.append(json.dumps(payload, ensure_ascii=True))
+    target.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+
+
+def run_web_overnight_loop(
+    *,
+    out_dir: str,
+    seed_cases_path: str,
+    question_count: int,
+    memla_model: str,
+    memla_provider: str = "",
+    memla_base_url: str = "",
+    teacher_model: str = "",
+    teacher_provider: str = "",
+    teacher_base_url: str = "",
+    judge_model: str = "",
+    judge_provider: str = "",
+    judge_base_url: str = "",
+    temperature: float = 0.1,
+    heuristic_only: bool = False,
+    max_rounds: int = 4,
+    benchmark_every: int = 1,
+    target_overall: float = 4.25,
+    allowed_rescues: int = 2,
+    patience: int = 2,
+    min_delta: float = 0.05,
+    rescue_threshold: int = 4,
+    repo_root: str = "",
+) -> dict[str, Any]:
+    root = Path(repo_root or os.getcwd()).resolve()
+    output_root = Path(out_dir).resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    teacher_client = build_llm_client(
+        provider=teacher_provider or memla_provider or None,
+        base_url=teacher_base_url or memla_base_url or None,
+    ) if teacher_model else None
+    case_rows = _compose_web_training_case_rows(
+        seed_cases_path=seed_cases_path,
+        question_count=question_count,
+        teacher_client=teacher_client,
+        teacher_model=teacher_model,
+    )
+    cases_path = output_root / "web_everyday_cases.jsonl"
+    _write_web_training_cases(str(cases_path), case_rows)
+
+    initial_benchmark = run_web_answer_benchmark(
+        cases_path=str(cases_path),
+        memla_model=memla_model,
+        memla_provider=memla_provider,
+        memla_base_url=memla_base_url,
+        judge_model=judge_model,
+        judge_provider=judge_provider,
+        judge_base_url=judge_base_url,
+        temperature=temperature,
+        heuristic_only=heuristic_only,
+    )
+
+    best_score = float(initial_benchmark.get("avg_teacher_overall") or 0.0)
+    best_round = 0
+    stale_rounds = 0
+    stop_reason = "max_rounds"
+    all_trace_rows: list[dict[str, Any]] = []
+    rounds: list[dict[str, Any]] = []
+    combined_trace_path = output_root / "web_teacher_trace_bank.jsonl"
+    policy_bank_path = (root / ".memla" / "web_policy_bank.json").resolve()
+    policy_bank_md_path = policy_bank_path.with_suffix(".md")
+    latest_benchmark = initial_benchmark
+
+    for round_index in range(1, max(int(max_rounds), 0) + 1):
+        teacher_report = run_web_teacher_loop(
+            cases_path=str(cases_path),
+            memla_model=memla_model,
+            memla_provider=memla_provider,
+            memla_base_url=memla_base_url,
+            teacher_model=teacher_model,
+            teacher_provider=teacher_provider,
+            teacher_base_url=teacher_base_url,
+            judge_model=judge_model,
+            judge_provider=judge_provider,
+            judge_base_url=judge_base_url,
+            temperature=temperature,
+            heuristic_only=heuristic_only,
+            rescue_threshold=rescue_threshold,
+        )
+        round_dir = output_root / f"round_{round_index:02d}"
+        round_dir.mkdir(parents=True, exist_ok=True)
+        (round_dir / "web_teacher_loop_report.json").write_text(json.dumps(teacher_report, indent=2), encoding="utf-8")
+        (round_dir / "web_teacher_loop_report.md").write_text(render_web_teacher_loop_markdown(teacher_report), encoding="utf-8")
+        trace_rows = [dict(row) for row in list(teacher_report.get("trace_rows") or []) if isinstance(row, dict)]
+        if trace_rows:
+            all_trace_rows.extend(trace_rows)
+        combined_trace_path.write_text(
+            "\n".join(json.dumps(row, ensure_ascii=True) for row in all_trace_rows) + ("\n" if all_trace_rows else ""),
+            encoding="utf-8",
+        )
+
+        policy_rows_used = 0
+        if all_trace_rows:
+            policy_report = distill_web_policy_bank(trace_bank_path=str(combined_trace_path), min_improvement=0.0)
+            policy_bank_path.parent.mkdir(parents=True, exist_ok=True)
+            policy_bank_path.write_text(json.dumps(policy_report, indent=2), encoding="utf-8")
+            policy_bank_md_path.write_text(render_web_policy_bank_markdown(policy_report), encoding="utf-8")
+            policy_rows_used = int(policy_report.get("rows_used") or 0)
+
+        benchmark_report: dict[str, Any] = {}
+        if max(int(benchmark_every), 1) == 1 or round_index % max(int(benchmark_every), 1) == 0:
+            benchmark_report = run_web_answer_benchmark(
+                cases_path=str(cases_path),
+                memla_model=memla_model,
+                memla_provider=memla_provider,
+                memla_base_url=memla_base_url,
+                judge_model=judge_model,
+                judge_provider=judge_provider,
+                judge_base_url=judge_base_url,
+                temperature=temperature,
+                heuristic_only=heuristic_only,
+            )
+            latest_benchmark = benchmark_report
+        current_score = float((benchmark_report or latest_benchmark).get("avg_teacher_overall") or 0.0)
+        if current_score > best_score + float(min_delta):
+            best_score = current_score
+            best_round = round_index
+            stale_rounds = 0
+        else:
+            stale_rounds += 1
+
+        round_summary = {
+            "round": round_index,
+            "teacher_avg_promoted": float(teacher_report.get("avg_promoted_overall") or 0.0),
+            "teacher_avg_baseline": float(teacher_report.get("avg_baseline_overall") or 0.0),
+            "promoted_rescue_count": int(teacher_report.get("promoted_rescue_count") or 0),
+            "trace_row_count": int(teacher_report.get("trace_row_count") or 0),
+            "policy_rows_used": policy_rows_used,
+            "benchmark_avg_teacher_overall": current_score,
+            "benchmark_answer_rate": float((benchmark_report or latest_benchmark).get("answer_rate") or 0.0),
+            "benchmark_avg_answer_latency_ms": float((benchmark_report or latest_benchmark).get("avg_answer_latency_ms") or 0.0),
+        }
+        rounds.append(round_summary)
+
+        if current_score >= float(target_overall) and int(teacher_report.get("promoted_rescue_count") or 0) <= int(allowed_rescues):
+            stop_reason = "target_reached"
+            break
+        if int(teacher_report.get("trace_row_count") or 0) == 0 and current_score >= float(target_overall):
+            stop_reason = "no_rescue_needed"
+            break
+        if stale_rounds >= max(int(patience), 1):
+            stop_reason = "plateau"
+            break
+
+    return {
+        "generated_ts": int(time.time()),
+        "seed_cases_path": str(Path(seed_cases_path).resolve()),
+        "cases_path": str(cases_path),
+        "question_count_requested": int(question_count),
+        "question_count_actual": len(case_rows),
+        "memla_model": memla_model,
+        "memla_provider": memla_provider,
+        "teacher_model": teacher_model,
+        "teacher_provider": teacher_provider or memla_provider,
+        "judge_model": judge_model,
+        "judge_provider": judge_provider or teacher_provider or memla_provider,
+        "target_overall": float(target_overall),
+        "allowed_rescues": int(allowed_rescues),
+        "max_rounds": int(max_rounds),
+        "benchmark_every": int(benchmark_every),
+        "rescue_threshold": int(rescue_threshold),
+        "initial_benchmark": initial_benchmark,
+        "latest_benchmark": latest_benchmark,
+        "best_score": best_score,
+        "best_round": best_round,
+        "stop_reason": stop_reason,
+        "rounds": rounds,
+        "combined_trace_bank": str(combined_trace_path),
+        "policy_bank_path": str(policy_bank_path),
+        "policy_bank_markdown_path": str(policy_bank_md_path),
+    }
+
+
+def render_web_overnight_loop_markdown(report: dict[str, Any]) -> str:
+    initial = dict(report.get("initial_benchmark") or {})
+    latest = dict(report.get("latest_benchmark") or {})
+    lines = [
+        "# Web Overnight Loop V1",
+        "",
+        f"- Cases path: `{report.get('cases_path', '')}`",
+        f"- Questions requested/actual: `{report.get('question_count_requested', 0)}` / `{report.get('question_count_actual', 0)}`",
+        f"- Memla model: `{report.get('memla_model', '')}`",
+        f"- Teacher model: `{report.get('teacher_model', '')}`",
+        f"- Judge model: `{report.get('judge_model', '')}`",
+        f"- Stop reason: `{report.get('stop_reason', '')}`",
+        f"- Best score: `{report.get('best_score', 0.0)}` at round `{report.get('best_round', 0)}`",
+        "",
+        "## Initial benchmark",
+        "",
+        f"- Avg teacher overall: `{initial.get('avg_teacher_overall', 0.0)}`",
+        f"- Avg answer latency: `{initial.get('avg_answer_latency_ms', 0.0)} ms`",
+        f"- Answer rate: `{initial.get('answer_rate', 0.0)}`",
+        "",
+        "## Latest benchmark",
+        "",
+        f"- Avg teacher overall: `{latest.get('avg_teacher_overall', 0.0)}`",
+        f"- Avg answer latency: `{latest.get('avg_answer_latency_ms', 0.0)} ms`",
+        f"- Answer rate: `{latest.get('answer_rate', 0.0)}`",
+        "",
+        "## Rounds",
+        "",
+    ]
+    for round_summary in list(report.get("rounds") or []):
+        lines.extend(
+            [
+                f"### Round {round_summary.get('round', 0)}",
+                "",
+                f"- Teacher promoted overall: `{round_summary.get('teacher_avg_promoted', 0.0)}`",
+                f"- Teacher rescue count: `{round_summary.get('promoted_rescue_count', 0)}`",
+                f"- Trace rows: `{round_summary.get('trace_row_count', 0)}`",
+                f"- Policy rows used: `{round_summary.get('policy_rows_used', 0)}`",
+                f"- Benchmark overall: `{round_summary.get('benchmark_avg_teacher_overall', 0.0)}`",
+                f"- Benchmark answer latency: `{round_summary.get('benchmark_avg_answer_latency_ms', 0.0)} ms`",
+                "",
+            ]
+        )
+    return "\n".join(lines).strip() + "\n"
+
+
 __all__ = [
     "BrowserSessionState",
     "TerminalAction",
@@ -9117,10 +9540,12 @@ __all__ = [
     "render_terminal_step_execution_text",
     "render_terminal_step_report_text",
     "render_web_answer_benchmark_markdown",
+    "render_web_overnight_loop_markdown",
     "render_web_teacher_loop_markdown",
     "run_terminal_benchmark",
     "run_terminal_scout",
     "run_web_answer_benchmark",
+    "run_web_overnight_loop",
     "run_web_teacher_loop",
     "save_browser_session_state",
     "terminal_browser_state_path",

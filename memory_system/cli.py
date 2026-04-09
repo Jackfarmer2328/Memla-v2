@@ -94,10 +94,12 @@ from .natural_terminal import (
     render_terminal_step_execution_text,
     render_terminal_step_report_text,
     render_web_answer_benchmark_markdown,
+    render_web_overnight_loop_markdown,
     render_web_teacher_loop_markdown,
     run_terminal_benchmark,
     run_terminal_scout,
     run_web_answer_benchmark,
+    run_web_overnight_loop,
     run_web_teacher_loop,
     terminal_execution_to_dict,
     terminal_model_default,
@@ -1327,6 +1329,54 @@ def _handle_distill_web_policy(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_web_overnight_loop(args: argparse.Namespace) -> int:
+    memla_model = _resolve_shared_terminal_model(args, "memla_model")
+    teacher_model = args.teacher_model or args.model or memla_model
+    judge_model = args.judge_model or teacher_model
+    out_dir = Path(args.out_dir).resolve() if args.out_dir else _default_report_dir("web_overnight_loop")
+    report = run_web_overnight_loop(
+        out_dir=str(out_dir),
+        seed_cases_path=args.seed_cases,
+        question_count=args.question_count,
+        memla_model=memla_model,
+        memla_provider=args.memla_provider,
+        memla_base_url=args.memla_base_url,
+        teacher_model=teacher_model,
+        teacher_provider=args.teacher_provider,
+        teacher_base_url=args.teacher_base_url,
+        judge_model=judge_model,
+        judge_provider=args.judge_provider,
+        judge_base_url=args.judge_base_url,
+        temperature=args.temperature,
+        heuristic_only=args.heuristic_only,
+        max_rounds=args.max_rounds,
+        benchmark_every=args.benchmark_every,
+        target_overall=args.target_overall,
+        allowed_rescues=args.allowed_rescues,
+        patience=args.patience,
+        min_delta=args.min_delta,
+        rescue_threshold=args.rescue_threshold,
+        repo_root=args.repo_root,
+    )
+    markdown = render_web_overnight_loop_markdown(report)
+    json_path, md_path = _write_report_bundle(
+        out_dir=out_dir,
+        stem="web_overnight_loop_report",
+        report=report,
+        markdown=markdown,
+    )
+    print(f"Wrote web overnight loop JSON: {json_path}")
+    print(f"Wrote web overnight loop Markdown: {md_path}")
+    print(
+        "Summary: "
+        f"questions {report.get('question_count_actual', 0)} | "
+        f"initial overall {dict(report.get('initial_benchmark') or {}).get('avg_teacher_overall', 0.0)} | "
+        f"best overall {report.get('best_score', 0.0)} | "
+        f"stop {report.get('stop_reason', '')}"
+    )
+    return 0
+
+
 def _handle_terminal_browser_benchmark(args: argparse.Namespace) -> int:
     raw_model = _resolve_shared_terminal_model(args, "raw_model")
     memla_model = _resolve_shared_terminal_model(args, "memla_model")
@@ -1993,6 +2043,35 @@ def _build_parser() -> argparse.ArgumentParser:
     terminal_web_policy_v1.add_argument("--out", default="", help="Optional explicit output JSON path. Defaults to <repo>/.memla/web_policy_bank.json.")
     terminal_web_policy_v1.add_argument("--json", action="store_true", help="Emit structured JSON instead of readable text.")
     terminal_web_policy_v1.set_defaults(func=_handle_distill_web_policy)
+
+    terminal_web_overnight_v1 = terminal_sub.add_parser(
+        "train-web-overnight-v1",
+        help="Generate an everyday web-question pack, run teacher-rescue rounds, distill policy, and benchmark until the score target or plateau.",
+    )
+    terminal_web_overnight_v1.add_argument("--seed-cases", default=_web_v1_cases_default(), help="Seed Web benchmark case JSONL path.")
+    terminal_web_overnight_v1.add_argument("--question-count", type=int, default=60, help="Total everyday web questions to train against.")
+    terminal_web_overnight_v1.add_argument("--model", default="", help="Shared model default for the Memla and teacher lanes.")
+    terminal_web_overnight_v1.add_argument("--memla-model", default="", help="Memla answer model. Defaults to --model or the small terminal default.")
+    terminal_web_overnight_v1.add_argument("--memla-provider", default="ollama", help="Provider override for the Memla answer lane.")
+    terminal_web_overnight_v1.add_argument("--memla-base-url", default="", help="Optional base URL override for the Memla answer lane.")
+    terminal_web_overnight_v1.add_argument("--teacher-model", default="", help="Teacher rescue/generation model. Defaults to --model or the Memla model.")
+    terminal_web_overnight_v1.add_argument("--teacher-provider", default="", help="Optional provider override for the teacher lane. Defaults to the Memla lane when blank.")
+    terminal_web_overnight_v1.add_argument("--teacher-base-url", default="", help="Optional base URL override for the teacher lane.")
+    terminal_web_overnight_v1.add_argument("--judge-model", default="", help="Optional judge model. Defaults to the teacher model when blank.")
+    terminal_web_overnight_v1.add_argument("--judge-provider", default="", help="Optional provider override for the judge lane.")
+    terminal_web_overnight_v1.add_argument("--judge-base-url", default="", help="Optional base URL override for the judge lane.")
+    terminal_web_overnight_v1.add_argument("--max-rounds", type=int, default=4, help="Maximum teacher/distillation rounds to run.")
+    terminal_web_overnight_v1.add_argument("--benchmark-every", type=int, default=1, help="Run the answer benchmark every N rounds.")
+    terminal_web_overnight_v1.add_argument("--target-overall", type=float, default=4.25, help="Stop once the Claude-judged average overall score reaches this target.")
+    terminal_web_overnight_v1.add_argument("--allowed-rescues", type=int, default=2, help="Allow at most this many promoted teacher rescues on the final successful round.")
+    terminal_web_overnight_v1.add_argument("--patience", type=int, default=2, help="Stop after this many rounds without meaningful improvement.")
+    terminal_web_overnight_v1.add_argument("--min-delta", type=float, default=0.05, help="Minimum benchmark improvement that counts as progress.")
+    terminal_web_overnight_v1.add_argument("--rescue-threshold", type=int, default=4, help="Teacher overall score below this threshold triggers rescue.")
+    terminal_web_overnight_v1.add_argument("--temperature", type=float, default=0.1)
+    terminal_web_overnight_v1.add_argument("--heuristic-only", action="store_true", help="Force the Memla planner to stay heuristic-only before answering.")
+    terminal_web_overnight_v1.add_argument("--repo-root", default=".", help="Repo root used for writing .memla/web_policy_bank.json.")
+    terminal_web_overnight_v1.add_argument("--out-dir", default="", help="Directory for overnight-loop artifacts. Defaults to ./memla_reports/<timestamp>.")
+    terminal_web_overnight_v1.set_defaults(func=_handle_web_overnight_loop)
 
     terminal_browser_bench = terminal_sub.add_parser(
         "benchmark-browser",

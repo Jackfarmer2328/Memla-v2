@@ -562,6 +562,38 @@ def test_memla_terminal_distill_web_policy_v1_dispatches(monkeypatch):
     assert captured["min_improvement"] == 0.5
 
 
+def test_memla_terminal_train_web_overnight_v1_dispatches(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _fake_web_overnight_loop(args):
+        captured["seed_cases"] = args.seed_cases
+        captured["question_count"] = args.question_count
+        captured["teacher_provider"] = args.teacher_provider
+        captured["target_overall"] = args.target_overall
+        return 0
+
+    monkeypatch.setattr("memory_system.cli._handle_web_overnight_loop", _fake_web_overnight_loop)
+
+    rc = main(
+        [
+            "terminal",
+            "train-web-overnight-v1",
+            "--teacher-provider",
+            "anthropic",
+            "--question-count",
+            "48",
+            "--target-overall",
+            "4.4",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["seed_cases"] == "cases/web_eval_cases_v1.jsonl"
+    assert captured["question_count"] == 48
+    assert captured["teacher_provider"] == "anthropic"
+    assert captured["target_overall"] == 4.4
+
+
 def test_memla_top_level_scout_command_dispatches(monkeypatch):
     captured: dict[str, object] = {}
 
