@@ -448,6 +448,34 @@ def test_memla_terminal_serve_alias_dispatches_to_api_server(monkeypatch):
     assert captured["default_base_url"] == "http://127.0.0.1:11435"
 
 
+def test_memla_terminal_benchmark_web_v1_dispatches(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _fake_terminal_benchmark(args):
+        captured["cases"] = args.cases
+        captured["raw_provider"] = args.raw_provider
+        captured["memla_provider"] = args.memla_provider
+        return 0
+
+    monkeypatch.setattr("memory_system.cli._handle_terminal_benchmark", _fake_terminal_benchmark)
+
+    rc = main(
+        [
+            "terminal",
+            "benchmark-web-v1",
+            "--raw-provider",
+            "anthropic",
+            "--memla-provider",
+            "anthropic",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["cases"] == "cases/web_eval_cases_v1.jsonl"
+    assert captured["raw_provider"] == "anthropic"
+    assert captured["memla_provider"] == "anthropic"
+
+
 def test_memla_top_level_scout_command_dispatches(monkeypatch):
     captured: dict[str, object] = {}
 

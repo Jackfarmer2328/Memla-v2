@@ -78,7 +78,7 @@ actor MemlaClient {
         )
     }
 
-    func run(prompt: String, baseURL: String, model: String = "", provider: String = "ollama", heuristicOnly: Bool = false) async throws -> MemlaRunEnvelope {
+    func run(prompt: String, baseURL: String, model: String = "", provider: String = "", heuristicOnly: Bool = false) async throws -> MemlaRunEnvelope {
         try await post(
             path: "/run",
             baseURL: baseURL,
@@ -92,7 +92,7 @@ actor MemlaClient {
         )
     }
 
-    func followup(prompt: String, baseURL: String, model: String = "", provider: String = "ollama", heuristicOnly: Bool = false) async throws -> MemlaRunEnvelope {
+    func followup(prompt: String, baseURL: String, model: String = "", provider: String = "", heuristicOnly: Bool = false) async throws -> MemlaRunEnvelope {
         try await post(
             path: "/followup",
             baseURL: baseURL,

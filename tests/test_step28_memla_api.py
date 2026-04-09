@@ -218,6 +218,7 @@ def test_memla_api_run_returns_plan_and_execution(monkeypatch, tmp_path):
     def _fake_build_plan(**kwargs):
         assert kwargs["prompt"] == "open github and search llama.cpp"
         assert kwargs["heuristic_only"] is True
+        assert kwargs["model"] == "phi3:mini"
         return TerminalPlan(
             prompt=kwargs["prompt"],
             source="heuristic",
@@ -267,6 +268,62 @@ def test_memla_api_run_returns_plan_and_execution(monkeypatch, tmp_path):
     assert payload["plan"]["source"] == "heuristic"
     assert payload["execution"]["records"][0]["status"] == "ok"
     assert payload["runtime_defaults"]["model"] == "phi3:mini"
+
+
+def test_memla_api_run_inherits_default_provider_when_request_provider_blank(monkeypatch, tmp_path):
+    state_path = tmp_path / "terminal_browser_state.json"
+    captured: dict[str, object] = {}
+
+    class DummyClient:
+        provider = "anthropic"
+
+    def _fake_build_plan(**kwargs):
+        assert kwargs["model"] == "claude-sonnet-4-20250514"
+        return TerminalPlan(
+            prompt=kwargs["prompt"],
+            source="heuristic",
+            actions=[TerminalAction(kind="browser_answer_query", target="top news today")],
+        )
+
+    def _fake_execute(plan: TerminalPlan, **kwargs):
+        return TerminalExecutionResult(
+            prompt=plan.prompt,
+            plan_source=plan.source,
+            ok=True,
+            records=[
+                TerminalExecutionRecord(
+                    kind="browser_answer_query",
+                    target="top news today",
+                    status="ok",
+                    message="Top news today...",
+                )
+            ],
+            browser_state=asdict(BrowserSessionState(current_url="https://example.com", page_kind="web_page")),
+        )
+
+    def _fake_build_client(*, provider=None, base_url=None, api_key=None):
+        captured["provider"] = provider
+        captured["base_url"] = base_url
+        return DummyClient()
+
+    monkeypatch.setattr("memory_system.server_api.build_llm_client", _fake_build_client)
+    monkeypatch.setattr("memory_system.server_api.build_terminal_plan", _fake_build_plan)
+    monkeypatch.setattr("memory_system.server_api.execute_terminal_plan", _fake_execute)
+    app = create_memla_app(
+        state_path=state_path,
+        default_model="claude-sonnet-4-20250514",
+        default_provider="anthropic",
+        default_heuristic_only=False,
+    )
+    client = TestClient(app)
+
+    response = client.post("/run", json={"prompt": "whats on the news"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert captured["provider"] == "anthropic"
+    assert payload["runtime_defaults"]["provider"] == "anthropic"
 
 
 def test_memla_api_followup_returns_plan_when_no_actions(monkeypatch, tmp_path):

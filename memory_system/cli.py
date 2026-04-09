@@ -171,6 +171,10 @@ def _memory_v1_cases_default() -> str:
     return "cases/memory_eval_cases_v1.jsonl"
 
 
+def _web_v1_cases_default() -> str:
+    return "cases/web_eval_cases_v1.jsonl"
+
+
 def _user_id_default() -> str:
     return os.environ.get("USER_ID", "default")
 
@@ -1799,6 +1803,25 @@ def _build_parser() -> argparse.ArgumentParser:
     terminal_bench.add_argument("--heuristic-only", action="store_true", help="Force the Memla lane to stay heuristic-only.")
     terminal_bench.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
     terminal_bench.set_defaults(func=_handle_terminal_benchmark)
+
+    terminal_web_bench_v1 = terminal_sub.add_parser(
+        "benchmark-web-v1",
+        help="Benchmark raw-vs-Memla bounded web-question planning on the Web V1 prompt pack.",
+    )
+    terminal_web_bench_v1.add_argument("--cases", default=_web_v1_cases_default(), help="Web V1 benchmark case JSONL path.")
+    terminal_web_bench_v1.add_argument("--case-id", action="append", default=[], help="Optional case id filter. Repeat to benchmark only specific prompts.")
+    terminal_web_bench_v1.add_argument("--limit", type=int, default=None, help="Optional max number of benchmark prompts to run after filtering.")
+    terminal_web_bench_v1.add_argument("--model", default="", help="Shared model for both lanes.")
+    terminal_web_bench_v1.add_argument("--raw-model", default="", help="Raw baseline model. Defaults to --model or the small terminal default.")
+    terminal_web_bench_v1.add_argument("--memla-model", default="", help="Memla model. Defaults to --model or the small terminal default.")
+    terminal_web_bench_v1.add_argument("--raw-provider", default="ollama", help="Provider override for the raw lane.")
+    terminal_web_bench_v1.add_argument("--raw-base-url", default="", help="Optional base URL override for the raw lane.")
+    terminal_web_bench_v1.add_argument("--memla-provider", default="ollama", help="Provider override for the Memla lane.")
+    terminal_web_bench_v1.add_argument("--memla-base-url", default="", help="Optional base URL override for the Memla lane.")
+    terminal_web_bench_v1.add_argument("--temperature", type=float, default=0.1)
+    terminal_web_bench_v1.add_argument("--heuristic-only", action="store_true", help="Force the Memla lane to stay heuristic-only.")
+    terminal_web_bench_v1.add_argument("--out-dir", default="", help="Directory for report artifacts. Defaults to ./memla_reports/<timestamp>.")
+    terminal_web_bench_v1.set_defaults(func=_handle_terminal_benchmark)
 
     terminal_browser_bench = terminal_sub.add_parser(
         "benchmark-browser",

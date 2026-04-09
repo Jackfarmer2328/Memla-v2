@@ -35,7 +35,7 @@ from .natural_terminal import (
 class MemlaRunRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
     model: str = ""
-    provider: str = "ollama"
+    provider: str = ""
     base_url: str = ""
     temperature: float = 0.1
     heuristic_only: bool = False
