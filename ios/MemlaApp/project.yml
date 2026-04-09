@@ -16,6 +16,7 @@ settings:
     INFOPLIST_KEY_UIRequiresFullScreen: NO
     INFOPLIST_KEY_NSLocalNetworkUsageDescription: Memla connects to your Mac on the local network to run private local scouting.
     INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsLocalNetworking: YES
+    INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoads: YES
     INFOPLIST_KEY_CFBundleDisplayName: Memla
     INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
 targets:

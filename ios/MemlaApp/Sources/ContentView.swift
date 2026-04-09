@@ -61,6 +61,9 @@ struct ContentView: View {
                 .textInputAutocapitalization(.never)
                 .disableAutocorrection(true)
                 .textFieldStyle(.roundedBorder)
+            Text("On iPhone, use your PC's local Wi-Fi IP like http://192.168.1.23:8080. Don't use 0.0.0.0; that's only for starting the server on your PC.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             HStack {
                 Text("Status: \(viewModel.healthStatus)")
                     .foregroundStyle(.secondary)

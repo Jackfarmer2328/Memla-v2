@@ -2,12 +2,15 @@ import Foundation
 
 enum MemlaClientError: Error, LocalizedError {
     case invalidBaseURL
+    case invalidServerHost(String)
     case badResponse
 
     var errorDescription: String? {
         switch self {
         case .invalidBaseURL:
             return "Memla base URL is invalid."
+        case .invalidServerHost(let detail):
+            return detail
         case .badResponse:
             return "Memla returned an unexpected response."
         }
@@ -129,6 +132,12 @@ actor MemlaClient {
 
     private func endpoint(path: String, baseURL: String) throws -> URL {
         let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let base = URL(string: trimmed), let host = base.host?.lowercased() else {
+            throw MemlaClientError.invalidBaseURL
+        }
+        if host == "0.0.0.0" {
+            throw MemlaClientError.invalidServerHost("0.0.0.0 is only the server bind address. In Memla on iPhone, use your PC's Wi-Fi IP instead, like http://192.168.1.23:8080.")
+        }
         guard let url = URL(string: trimmed + path) else {
             throw MemlaClientError.invalidBaseURL
         }
