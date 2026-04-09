@@ -1352,6 +1352,7 @@ def _handle_web_overnight_loop(args: argparse.Namespace) -> int:
         max_rounds=args.max_rounds,
         benchmark_every=args.benchmark_every,
         target_overall=args.target_overall,
+        target_hard_pass_rate=args.target_hard_pass_rate,
         allowed_rescues=args.allowed_rescues,
         patience=args.patience,
         min_delta=args.min_delta,
@@ -1372,6 +1373,7 @@ def _handle_web_overnight_loop(args: argparse.Namespace) -> int:
         f"questions {report.get('question_count_actual', 0)} | "
         f"initial overall {dict(report.get('initial_benchmark') or {}).get('avg_teacher_overall', 0.0)} | "
         f"best overall {report.get('best_score', 0.0)} | "
+        f"hard pass {dict(report.get('latest_benchmark') or {}).get('hard_pass_rate', 0.0)} | "
         f"stop {report.get('stop_reason', '')}"
     )
     return 0
@@ -2063,6 +2065,7 @@ def _build_parser() -> argparse.ArgumentParser:
     terminal_web_overnight_v1.add_argument("--max-rounds", type=int, default=4, help="Maximum teacher/distillation rounds to run.")
     terminal_web_overnight_v1.add_argument("--benchmark-every", type=int, default=1, help="Run the answer benchmark every N rounds.")
     terminal_web_overnight_v1.add_argument("--target-overall", type=float, default=4.25, help="Stop once the Claude-judged average overall score reaches this target.")
+    terminal_web_overnight_v1.add_argument("--target-hard-pass-rate", type=float, default=0.0, help="Optional hard factual pass-rate target for narrow slices like creator/age questions.")
     terminal_web_overnight_v1.add_argument("--allowed-rescues", type=int, default=2, help="Allow at most this many promoted teacher rescues on the final successful round.")
     terminal_web_overnight_v1.add_argument("--patience", type=int, default=2, help="Stop after this many rounds without meaningful improvement.")
     terminal_web_overnight_v1.add_argument("--min-delta", type=float, default=0.05, help="Minimum benchmark improvement that counts as progress.")

@@ -1134,6 +1134,115 @@ def _web_answer_requirements(prompt: str, query: str, slice_kind: str) -> dict[s
     }
 
 
+def _looks_like_web_caption_or_headline(text: str) -> bool:
+    clean = " ".join(str(text or "").split()).strip()
+    normalized = _normalize_goal_text(clean)
+    if not normalized:
+        return True
+    if clean.endswith("..."):
+        return True
+    if _looks_like_low_signal_web_text(clean):
+        return True
+    caption_patterns = (
+        r"^meet the\b",
+        r"^who (?:created|invented|founded|built|made|designed)\b",
+        r"\bhistory\b.*\bkey dates\b.*\bfacts\b",
+        r"\blargely forgotten pioneers\b",
+        r"\bstarted creating\b",
+        r"\bin a world forever revolutionized\b",
+        r"\bwhat the source covers\b",
+    )
+    return any(re.search(pattern, normalized) for pattern in caption_patterns)
+
+
+def _has_name_like_fact_signal(answer: str, extracted_facts: list[str]) -> bool:
+    text = " ".join([str(answer or "").strip()] + [str(item).strip() for item in list(extracted_facts or []) if str(item).strip()]).strip()
+    if not text:
+        return False
+    if re.search(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3}\b", text):
+        return True
+    normalized = _normalize_goal_text(text)
+    org_tokens = ("apple", "openai", "anthropic", "microsoft", "wikipedia", "rocketdyne", "tesla", "amazon")
+    return any(token in normalized for token in org_tokens)
+
+
+def _hard_check_web_answer(
+    *,
+    prompt: str,
+    question_type: str,
+    answer: str,
+    extracted_facts: list[str],
+    missing_fields: list[str],
+) -> dict[str, Any]:
+    normalized_question_type = str(question_type or "").strip().lower()
+    clean_answer = " ".join(str(answer or "").split()).strip()
+    extracted = [str(item).strip() for item in list(extracted_facts or []) if str(item).strip()]
+    missing = {str(item).strip() for item in list(missing_fields or []) if str(item).strip()}
+    applicable = normalized_question_type in {"creator_identity", "derived_age_at_event"}
+    if not applicable:
+        return {
+            "applicable": False,
+            "passed": False,
+            "score": 0.0,
+            "reasons": [],
+        }
+
+    reasons: list[str] = []
+    checks: list[bool] = []
+    not_low_signal = bool(clean_answer) and not _looks_like_low_signal_web_text(clean_answer)
+    checks.append(not_low_signal)
+    if not not_low_signal:
+        reasons.append("answer_looks_like_page_junk")
+
+    not_caption = not _looks_like_web_caption_or_headline(clean_answer)
+    checks.append(not_caption)
+    if not not_caption:
+        reasons.append("answer_looks_like_caption_or_headline")
+
+    has_name_signal = _has_name_like_fact_signal(clean_answer, extracted)
+    checks.append(has_name_signal)
+    if not has_name_signal:
+        reasons.append("missing_named_entity")
+
+    if normalized_question_type == "creator_identity":
+        has_identity_fact = bool(extracted) or bool(
+            re.search(
+                r"\b(created|invented|founded|built|made|designed|developed|credited|co-founded|cofounded)\b",
+                _normalize_goal_text(clean_answer),
+            )
+        )
+        checks.append(has_identity_fact)
+        if not has_identity_fact:
+            reasons.append("missing_creator_fact")
+        missing_creator = "creator_name" in missing
+        checks.append(not missing_creator)
+        if missing_creator:
+            reasons.append("missing_creator_name")
+    elif normalized_question_type == "derived_age_at_event":
+        has_age = bool(re.search(r"\b(?:about|around|roughly|age)\s*\d{1,3}\b|\b\d{1,3}\s+years?\s+old\b", clean_answer, flags=re.IGNORECASE))
+        checks.append(has_age)
+        if not has_age:
+            reasons.append("missing_computed_age")
+        combined_fact_text = " ".join(extracted + [clean_answer])
+        has_timing = bool(re.search(r"\b(?:18|19|20)\d{2}\b", combined_fact_text))
+        checks.append(has_timing)
+        if not has_timing:
+            reasons.append("missing_event_timing")
+        missing_critical = bool({"computed_age", "birth_year_or_date", "event_year_or_date"} & missing)
+        checks.append(not missing_critical)
+        if missing_critical:
+            reasons.append("missing_required_age_fields")
+
+    passed = all(checks)
+    score = round(sum(1.0 for check in checks if check) / max(len(checks), 1), 4)
+    return {
+        "applicable": True,
+        "passed": passed,
+        "score": score,
+        "reasons": reasons,
+    }
+
+
 def _split_text_into_web_chunks(text: str, *, max_chars: int = 420) -> list[str]:
     clean = " ".join(str(text or "").split()).strip()
     if not clean:
@@ -4645,7 +4754,7 @@ def _apply_web_policy_priors(
         else:
             adjusted = "I found limited direct detail in the evidence right now."
     source_sentence = ""
-    if source_title and "direct_to_found_source" in behaviors and _normalize_goal_text(source_title) not in _normalize_goal_text(adjusted):
+    if limited and source_title and "direct_to_found_source" in behaviors and _normalize_goal_text(source_title) not in _normalize_goal_text(adjusted):
         if slice_kind == "weather":
             source_sentence = f"For today's weather, you can check {source_title} directly."
         elif slice_kind == "news":
@@ -8463,6 +8572,8 @@ def _should_rescue_web_answer(
 def _build_web_teacher_trace_row(row: dict[str, Any]) -> dict[str, Any]:
     baseline_judgement = dict(row.get("baseline_judgement") or {})
     rescued_judgement = dict(row.get("rescued_judgement") or {})
+    baseline_hard_check = dict(row.get("baseline_hard_check") or {})
+    promoted_hard_check = dict(row.get("promoted_hard_check") or {})
     return {
         "case_id": str(row.get("case_id") or "").strip(),
         "prompt": str(row.get("prompt") or "").strip(),
@@ -8474,12 +8585,16 @@ def _build_web_teacher_trace_row(row: dict[str, Any]) -> dict[str, Any]:
         "baseline_overall": _web_teacher_overall(baseline_judgement),
         "baseline_relevant_chunk_ids": [str(item).strip() for item in list(row.get("baseline_relevant_chunk_ids") or []) if str(item).strip()],
         "baseline_extracted_facts": [str(item).strip() for item in list(row.get("baseline_extracted_facts") or []) if str(item).strip()],
+        "baseline_hard_passed": bool(baseline_hard_check.get("passed")),
+        "baseline_hard_reasons": [str(item).strip() for item in list(baseline_hard_check.get("reasons") or []) if str(item).strip()],
         "rescued_answer": str(row.get("rescued_answer") or "").strip(),
         "rescued_overall": _web_teacher_overall(rescued_judgement),
         "rescued_relevant_chunk_ids": [str(item).strip() for item in list(row.get("rescued_relevant_chunk_ids") or []) if str(item).strip()],
         "rescued_extracted_facts": [str(item).strip() for item in list(row.get("rescued_extracted_facts") or []) if str(item).strip()],
         "promoted_answer": str(row.get("promoted_answer") or "").strip(),
         "promoted_lane": str(row.get("promoted_lane") or "").strip(),
+        "promoted_hard_passed": bool(promoted_hard_check.get("passed")),
+        "promoted_hard_reasons": [str(item).strip() for item in list(promoted_hard_check.get("reasons") or []) if str(item).strip()],
         "improvement_delta": float(row.get("improvement_delta") or 0.0),
         "teacher_coaching": str(baseline_judgement.get("coaching") or "").strip(),
         "rescue_why_better": str(row.get("rescue_why_better") or "").strip(),
@@ -8595,6 +8710,13 @@ def run_web_answer_benchmark(
         source_title = str(best_details.get("title") or best_card.get("title") or "").strip()
         source_url = str(best_details.get("url") or best_card.get("url") or "").strip()
         source_count = int(answer_payload.get("source_count") or len(cards) or 0)
+        hard_check = _hard_check_web_answer(
+            prompt=case.prompt,
+            question_type=str(answer_payload.get("question_type") or "").strip(),
+            answer=answer,
+            extracted_facts=[str(item).strip() for item in list(answer_payload.get("extracted_facts") or []) if str(item).strip()],
+            missing_fields=[str(item).strip() for item in list(answer_payload.get("missing_fields") or []) if str(item).strip()],
+        )
 
         teacher_judgement: dict[str, Any] = {}
         if judge_client is not None and answer:
@@ -8636,6 +8758,7 @@ def run_web_answer_benchmark(
                 "source_url": source_url,
                 "source_count": source_count,
                 "evidence_chunk_count": len(evidence_chunks),
+                "hard_check": hard_check,
                 "teacher_judgement": teacher_judgement,
             }
         )
@@ -8654,6 +8777,9 @@ def run_web_answer_benchmark(
         if dict(row.get("teacher_judgement") or {}).get("overall")
     ]
     avg_teacher_overall = round(sum(teacher_overall_scores) / len(teacher_overall_scores), 4) if teacher_overall_scores else 0.0
+    hard_applicable_rows = [row for row in rows if bool(dict(row.get("hard_check") or {}).get("applicable"))]
+    hard_passed_count = sum(1 for row in hard_applicable_rows if bool(dict(row.get("hard_check") or {}).get("passed")))
+    hard_pass_rate = round(hard_passed_count / len(hard_applicable_rows), 4) if hard_applicable_rows else 0.0
 
     return {
         "generated_ts": int(time.time()),
@@ -8673,6 +8799,9 @@ def run_web_answer_benchmark(
         "avg_answer_latency_ms": avg_answer_latency_ms,
         "avg_source_count": avg_source_count,
         "avg_teacher_overall": avg_teacher_overall,
+        "hard_applicable_count": len(hard_applicable_rows),
+        "hard_passed_count": hard_passed_count,
+        "hard_pass_rate": hard_pass_rate,
         "memla_model_call_count": memla_model_calls,
         "memla_heuristic_hit_count": memla_heuristic_hits,
         "model_answer_count": model_answer_count,
@@ -8803,6 +8932,14 @@ def run_web_teacher_loop(
         needed_fields = [str(item).strip() for item in list(answer_payload.get("needed_fields") or []) if str(item).strip()]
         baseline_relevant_chunk_ids = [str(item).strip() for item in list(answer_payload.get("relevant_chunk_ids") or []) if str(item).strip()]
         baseline_extracted_facts = [str(item).strip() for item in list(answer_payload.get("extracted_facts") or []) if str(item).strip()]
+        baseline_missing_fields = [str(item).strip() for item in list(answer_payload.get("missing_fields") or []) if str(item).strip()]
+        baseline_hard_check = _hard_check_web_answer(
+            prompt=case.prompt,
+            question_type=question_type,
+            answer=baseline_answer,
+            extracted_facts=baseline_extracted_facts,
+            missing_fields=baseline_missing_fields,
+        )
 
         baseline_judgement: dict[str, Any] = {}
         if judge_client is not None and baseline_answer:
@@ -8833,6 +8970,7 @@ def run_web_teacher_loop(
         rescued_answer = ""
         rescue_latency_ms = 0.0
         rescued_judgement: dict[str, Any] = {}
+        rescued_hard_check: dict[str, Any] = {"applicable": False, "passed": False, "score": 0.0, "reasons": []}
         rescue_attempted = False
         if needs_rescue and teacher_client is not None and teacher_model:
             rescue_attempted = True
@@ -8857,6 +8995,13 @@ def run_web_teacher_loop(
                 rescued_answer = str(rescue_payload.get("answer") or "").strip()
                 if rescued_answer:
                     rescued_count += 1
+                    rescued_hard_check = _hard_check_web_answer(
+                        prompt=case.prompt,
+                        question_type=str(rescue_payload.get("question_type") or question_type).strip(),
+                        answer=rescued_answer,
+                        extracted_facts=[str(item).strip() for item in list(rescue_payload.get("extracted_facts") or []) if str(item).strip()],
+                        missing_fields=[str(item).strip() for item in list(rescue_payload.get("missing_fields") or []) if str(item).strip()],
+                    )
             except Exception as exc:
                 rescue_payload = {"error_type": type(exc).__name__, "message": str(exc)}
 
@@ -8882,13 +9027,20 @@ def run_web_teacher_loop(
         promoted_lane = "baseline"
         promoted_answer = baseline_answer
         promoted_overall = baseline_overall
-        if rescued_answer and (not baseline_answer or rescued_overall >= baseline_overall or judge_client is None):
+        baseline_hard_pass = bool(baseline_hard_check.get("passed"))
+        rescued_hard_pass = bool(rescued_hard_check.get("passed"))
+        if rescued_answer and rescued_hard_pass and not baseline_hard_pass:
+            promoted_lane = "teacher_rescue"
+            promoted_answer = rescued_answer
+            promoted_overall = rescued_overall or baseline_overall
+        elif rescued_answer and (not baseline_answer or rescued_overall >= baseline_overall or judge_client is None):
             promoted_lane = "teacher_rescue"
             promoted_answer = rescued_answer
             promoted_overall = rescued_overall or baseline_overall
         improvement_delta = float(promoted_overall - baseline_overall)
         if promoted_lane == "teacher_rescue":
             promoted_rescue_count += 1
+        promoted_hard_check = rescued_hard_check if promoted_lane == "teacher_rescue" else baseline_hard_check
         if improvement_delta > 0:
             improved_count += 1
 
@@ -8913,6 +9065,8 @@ def run_web_teacher_loop(
             "baseline_source_count": source_count,
             "baseline_relevant_chunk_ids": baseline_relevant_chunk_ids,
             "baseline_extracted_facts": baseline_extracted_facts,
+            "baseline_missing_fields": baseline_missing_fields,
+            "baseline_hard_check": baseline_hard_check,
             "evidence_chunk_count": len(evidence_chunks),
             "baseline_judgement": baseline_judgement,
             "needs_rescue": bool(needs_rescue),
@@ -8925,9 +9079,11 @@ def run_web_teacher_loop(
             "rescued_relevant_chunk_ids": [str(item).strip() for item in list(rescue_payload.get("relevant_chunk_ids") or []) if str(item).strip()],
             "rescued_extracted_facts": [str(item).strip() for item in list(rescue_payload.get("extracted_facts") or []) if str(item).strip()],
             "missing_fields": [str(item).strip() for item in list(rescue_payload.get("missing_fields") or []) if str(item).strip()],
+            "rescued_hard_check": rescued_hard_check,
             "promoted_lane": promoted_lane,
             "promoted_answer": promoted_answer,
             "promoted_overall": promoted_overall,
+            "promoted_hard_check": promoted_hard_check,
             "improvement_delta": improvement_delta,
         }
         rows.append(row)
@@ -8948,6 +9104,10 @@ def run_web_teacher_loop(
     avg_baseline_overall = round(sum(baseline_scores) / len(baseline_scores), 4) if baseline_scores else 0.0
     avg_promoted_overall = round(sum(promoted_scores) / len(promoted_scores), 4) if promoted_scores else 0.0
     avg_improvement = round(sum(float(row.get("improvement_delta") or 0.0) for row in rows) / count, 4)
+    hard_applicable_rows = [row for row in rows if bool(dict(row.get("promoted_hard_check") or {}).get("applicable"))]
+    baseline_hard_pass_count = sum(1 for row in rows if bool(dict(row.get("baseline_hard_check") or {}).get("passed")))
+    promoted_hard_pass_count = sum(1 for row in rows if bool(dict(row.get("promoted_hard_check") or {}).get("passed")))
+    hard_pass_rate = round(promoted_hard_pass_count / len(hard_applicable_rows), 4) if hard_applicable_rows else 0.0
 
     return {
         "generated_ts": int(time.time()),
@@ -8970,6 +9130,10 @@ def run_web_teacher_loop(
         "avg_baseline_overall": avg_baseline_overall,
         "avg_promoted_overall": avg_promoted_overall,
         "avg_improvement": avg_improvement,
+        "hard_applicable_count": len(hard_applicable_rows),
+        "baseline_hard_pass_count": baseline_hard_pass_count,
+        "promoted_hard_pass_count": promoted_hard_pass_count,
+        "hard_pass_rate": hard_pass_rate,
         "rescue_threshold": int(rescue_threshold),
         "rescued_count": rescued_count,
         "improved_count": improved_count,
@@ -9000,6 +9164,7 @@ def render_web_answer_benchmark_markdown(report: dict[str, Any]) -> str:
         f"- Avg answer latency: `{report.get('avg_answer_latency_ms', 0.0)} ms`",
         f"- Avg source count: `{report.get('avg_source_count', 0.0)}`",
         f"- Avg teacher overall: `{report.get('avg_teacher_overall', 0.0)}`",
+        f"- Hard pass rate: `{report.get('hard_pass_rate', 0.0)}` ({report.get('hard_passed_count', 0)}/{report.get('hard_applicable_count', 0)})",
         f"- Memla model calls: `{report.get('memla_model_call_count', 0)}`",
         f"- Memla heuristic hits: `{report.get('memla_heuristic_hit_count', 0)}`",
         f"- Model-rendered answers: `{report.get('model_answer_count', 0)}`",
@@ -9051,11 +9216,12 @@ def render_web_teacher_loop_markdown(report: dict[str, Any]) -> str:
         f"- Avg baseline answer latency: `{report.get('avg_answer_latency_ms', 0.0)} ms`",
         f"- Avg rescue latency: `{report.get('avg_rescue_latency_ms', 0.0)} ms`",
         f"- Avg baseline overall: `{report.get('avg_baseline_overall', 0.0)}`",
-        f"- Avg promoted overall: `{report.get('avg_promoted_overall', 0.0)}`",
-        f"- Avg improvement: `{report.get('avg_improvement', 0.0)}`",
-        f"- Rescued answers: `{report.get('rescued_count', 0)}`",
-        f"- Improved answers: `{report.get('improved_count', 0)}`",
-        f"- Promoted rescue rows: `{report.get('promoted_rescue_count', 0)}`",
+                f"- Avg promoted overall: `{report.get('avg_promoted_overall', 0.0)}`",
+                f"- Avg improvement: `{report.get('avg_improvement', 0.0)}`",
+                f"- Hard pass rate: `{report.get('hard_pass_rate', 0.0)}` ({report.get('promoted_hard_pass_count', 0)}/{report.get('hard_applicable_count', 0)})",
+                f"- Rescued answers: `{report.get('rescued_count', 0)}`",
+                f"- Improved answers: `{report.get('improved_count', 0)}`",
+                f"- Promoted rescue rows: `{report.get('promoted_rescue_count', 0)}`",
         f"- Trace rows ready: `{report.get('trace_row_count', 0)}`",
     ]
     if report.get("failed_cases"):
@@ -9073,6 +9239,7 @@ def render_web_teacher_loop_markdown(report: dict[str, Any]) -> str:
                 f"- Prompt: `{row.get('prompt', '')}`",
                 f"- Query: `{row.get('query', '')}`",
                 f"- Slice: `{row.get('answer_slice', '')}`",
+                f"- Hard pass: `{dict(row.get('promoted_hard_check') or {}).get('passed', False)}`",
                 f"- Plan source/actions: `{row.get('plan_source', '')}` / `{', '.join(row.get('plan_actions', []))}`",
                 f"- Baseline overall: `{baseline_judgement.get('overall', 0)}`",
                 f"- Baseline answer: {row.get('baseline_answer', '')}",
@@ -9313,6 +9480,7 @@ def run_web_overnight_loop(
     max_rounds: int = 4,
     benchmark_every: int = 1,
     target_overall: float = 4.25,
+    target_hard_pass_rate: float = 0.0,
     allowed_rescues: int = 2,
     patience: int = 2,
     min_delta: float = 0.05,
@@ -9424,15 +9592,22 @@ def run_web_overnight_loop(
             "trace_row_count": int(teacher_report.get("trace_row_count") or 0),
             "policy_rows_used": policy_rows_used,
             "benchmark_avg_teacher_overall": current_score,
+            "benchmark_hard_pass_rate": float((benchmark_report or latest_benchmark).get("hard_pass_rate") or 0.0),
             "benchmark_answer_rate": float((benchmark_report or latest_benchmark).get("answer_rate") or 0.0),
             "benchmark_avg_answer_latency_ms": float((benchmark_report or latest_benchmark).get("avg_answer_latency_ms") or 0.0),
         }
         rounds.append(round_summary)
 
-        if current_score >= float(target_overall) and int(teacher_report.get("promoted_rescue_count") or 0) <= int(allowed_rescues):
+        current_hard_pass_rate = float((benchmark_report or latest_benchmark).get("hard_pass_rate") or 0.0)
+        hard_target_met = float(target_hard_pass_rate) <= 0.0 or current_hard_pass_rate >= float(target_hard_pass_rate)
+        if (
+            current_score >= float(target_overall)
+            and hard_target_met
+            and int(teacher_report.get("promoted_rescue_count") or 0) <= int(allowed_rescues)
+        ):
             stop_reason = "target_reached"
             break
-        if int(teacher_report.get("trace_row_count") or 0) == 0 and current_score >= float(target_overall):
+        if int(teacher_report.get("trace_row_count") or 0) == 0 and current_score >= float(target_overall) and hard_target_met:
             stop_reason = "no_rescue_needed"
             break
         if stale_rounds >= max(int(patience), 1):
@@ -9452,6 +9627,7 @@ def run_web_overnight_loop(
         "judge_model": judge_model,
         "judge_provider": judge_provider or teacher_provider or memla_provider,
         "target_overall": float(target_overall),
+        "target_hard_pass_rate": float(target_hard_pass_rate),
         "allowed_rescues": int(allowed_rescues),
         "max_rounds": int(max_rounds),
         "benchmark_every": int(benchmark_every),
@@ -9481,16 +9657,19 @@ def render_web_overnight_loop_markdown(report: dict[str, Any]) -> str:
         f"- Judge model: `{report.get('judge_model', '')}`",
         f"- Stop reason: `{report.get('stop_reason', '')}`",
         f"- Best score: `{report.get('best_score', 0.0)}` at round `{report.get('best_round', 0)}`",
+        f"- Target hard pass rate: `{report.get('target_hard_pass_rate', 0.0)}`",
         "",
         "## Initial benchmark",
         "",
         f"- Avg teacher overall: `{initial.get('avg_teacher_overall', 0.0)}`",
+        f"- Hard pass rate: `{initial.get('hard_pass_rate', 0.0)}`",
         f"- Avg answer latency: `{initial.get('avg_answer_latency_ms', 0.0)} ms`",
         f"- Answer rate: `{initial.get('answer_rate', 0.0)}`",
         "",
         "## Latest benchmark",
         "",
         f"- Avg teacher overall: `{latest.get('avg_teacher_overall', 0.0)}`",
+        f"- Hard pass rate: `{latest.get('hard_pass_rate', 0.0)}`",
         f"- Avg answer latency: `{latest.get('avg_answer_latency_ms', 0.0)} ms`",
         f"- Answer rate: `{latest.get('answer_rate', 0.0)}`",
         "",
@@ -9507,6 +9686,7 @@ def render_web_overnight_loop_markdown(report: dict[str, Any]) -> str:
                 f"- Trace rows: `{round_summary.get('trace_row_count', 0)}`",
                 f"- Policy rows used: `{round_summary.get('policy_rows_used', 0)}`",
                 f"- Benchmark overall: `{round_summary.get('benchmark_avg_teacher_overall', 0.0)}`",
+                f"- Benchmark hard pass rate: `{round_summary.get('benchmark_hard_pass_rate', 0.0)}`",
                 f"- Benchmark answer latency: `{round_summary.get('benchmark_avg_answer_latency_ms', 0.0)} ms`",
                 "",
             ]

@@ -19,6 +19,7 @@ from memory_system.natural_terminal import (
     _browser_new_tab_command,
     _compiler_surface_text,
     _language_rule_plan,
+    _hard_check_web_answer,
     _merge_language_actions,
     _normalize_model_actions,
     _promote_language_rules,
@@ -1945,6 +1946,35 @@ def test_rescue_web_answer_with_teacher_parses_rewrite_payload():
     assert payload["extracted_facts"] == ["Founded in 2021", "Dario Amodei", "Daniela Amodei"]
 
 
+def test_hard_check_web_answer_fails_caption_like_creator_output():
+    result = _hard_check_web_answer(
+        prompt="who invented the light bulb",
+        question_type="creator_identity",
+        answer="Meet the largely forgotten pioneers who started creating the light bulb some 80 years before Edison.",
+        extracted_facts=[],
+        missing_fields=["creator_name"],
+    )
+
+    assert result["applicable"] is True
+    assert result["passed"] is False
+    assert "answer_looks_like_caption_or_headline" in result["reasons"]
+    assert "missing_creator_name" in result["reasons"]
+
+
+def test_hard_check_web_answer_passes_age_at_event_with_computed_age():
+    result = _hard_check_web_answer(
+        prompt="who founded apple and how old was steve jobs then",
+        question_type="derived_age_at_event",
+        answer="Steve Jobs co-founded Apple in 1976, when he was 21 years old.",
+        extracted_facts=["Steve Jobs", "born 1955", "Apple founded 1976", "age 21"],
+        missing_fields=[],
+    )
+
+    assert result["applicable"] is True
+    assert result["passed"] is True
+    assert result["score"] >= 0.8
+
+
 def test_run_web_teacher_loop_promotes_rescued_answers(monkeypatch, tmp_path):
     cases_path = tmp_path / "web_cases.jsonl"
     cases_path.write_text(
@@ -2066,6 +2096,7 @@ def test_run_web_teacher_loop_promotes_rescued_answers(monkeypatch, tmp_path):
     assert report["trace_rows"][0]["promoted_lane"] == "teacher_rescue"
     assert report["trace_rows"][0]["question_type"] == "creator_identity"
     assert report["trace_rows"][0]["rescued_relevant_chunk_ids"] == ["s1c2"]
+    assert report["hard_pass_rate"] == 1.0
 
 
 def test_distill_web_policy_bank_extracts_web_behaviors(tmp_path):
