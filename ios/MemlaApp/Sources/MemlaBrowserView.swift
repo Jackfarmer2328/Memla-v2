@@ -578,6 +578,13 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         let storeCardCount = payload["doordash_store_card_count"] as? Int ?? 0
         let itemCardCount = payload["doordash_item_card_count"] as? Int ?? 0
         let tipCount = payload["doordash_tip_option_count"] as? Int ?? 0
+        let customizerGroupCount = payload["doordash_customizer_group_count"] as? Int ?? 0
+        let customizerRequiredGroupCount = payload["doordash_customizer_required_group_count"] as? Int ?? 0
+        let checkedRadioCount = payload["doordash_customizer_checked_radio_count"] as? Int ?? 0
+        let checkedCheckboxCount = payload["doordash_customizer_checked_checkbox_count"] as? Int ?? 0
+        let presetCount = payload["doordash_customizer_recommended_preset_count"] as? Int ?? 0
+        let addToCartLabel = stringValue(payload["doordash_customizer_add_to_cart_label"])
+        let hasSpecialInstructions = payload["doordash_customizer_has_special_instructions"] as? Bool ?? false
         let layerKind = stringValue(payload["doordash_active_layer"])
         let modalTitle = stringValue(payload["doordash_modal_title"])
         switch pageKind {
@@ -586,7 +593,34 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         case "dd_storefront":
             return "DoorDash storefront with \(itemCardCount) relevant item/menu cards."
         case "dd_item_modal":
-            return "DoorDash item modal detected\(modalTitle.isEmpty ? "" : ": \(modalTitle)")."
+            var parts: [String] = []
+            if !modalTitle.isEmpty {
+                parts.append(modalTitle)
+            }
+            if customizerRequiredGroupCount > 0 {
+                parts.append("\(customizerRequiredGroupCount) required groups")
+            } else if customizerGroupCount > 0 {
+                parts.append("\(customizerGroupCount) modifier groups")
+            }
+            if checkedRadioCount > 0 {
+                parts.append("\(checkedRadioCount) selections already chosen")
+            }
+            if checkedCheckboxCount > 0 {
+                parts.append("\(checkedCheckboxCount) optional toggles selected")
+            }
+            if presetCount > 0 {
+                parts.append("\(presetCount) recommended presets")
+            }
+            if hasSpecialInstructions {
+                parts.append("special instructions available")
+            }
+            if !addToCartLabel.isEmpty {
+                parts.append(addToCartLabel)
+            }
+            if parts.isEmpty {
+                return "DoorDash item modal detected."
+            }
+            return "DoorDash item modal: \(parts.joined(separator: " • "))."
         case "dd_cart_drawer":
             return "DoorDash cart drawer is active with a continue path."
         case "dd_cart_page":
@@ -2042,6 +2076,14 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
       let doordashStoreCardCount = 0;
       let doordashItemCardCount = 0;
       let doordashTipOptionCount = 0;
+      let doordashCustomizerGroupCount = 0;
+      let doordashCustomizerRequiredGroupCount = 0;
+      let doordashCustomizerOptionCount = 0;
+      let doordashCustomizerCheckedRadioCount = 0;
+      let doordashCustomizerCheckedCheckboxCount = 0;
+      let doordashCustomizerRecommendedPresetCount = 0;
+      let doordashCustomizerHasSpecialInstructions = false;
+      let doordashCustomizerAddToCartLabel = '';
       let doordashHasCartCTA = false;
       let doordashHasContinueCTA = false;
       let doordashHasAddToCartCTA = false;
@@ -2215,11 +2257,52 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           const addToCartButtons = Array.from(document.querySelectorAll('button,[role="button"],a[href]'))
             .filter(visible)
             .filter((el) => /add to cart/i.test(labelForElement(el)));
+          doordashCustomizerAddToCartLabel = addToCartButtons.length > 0 ? clean(labelForElement(addToCartButtons[0])) : '';
           addToCartButtons.forEach((button) => {
             doordashHasAddToCartCTA = true;
             const root = sharedAncestor(itemModal, button) || closestWithText(button, 18, 240);
             pushUnique(doordashCandidates, candidateFromElement(button, 'dd_add_to_cart', root, 'Add to cart'));
           });
+
+          const checkedRadios = Array.from(itemModal.querySelectorAll('input[type="radio"]:checked')).filter(visible);
+          const checkedCheckboxes = Array.from(itemModal.querySelectorAll('input[type="checkbox"]:checked')).filter(visible);
+          const allOptions = Array.from(itemModal.querySelectorAll('input[type="radio"],input[type="checkbox"]')).filter(visible);
+          doordashCustomizerCheckedRadioCount = checkedRadios.length;
+          doordashCustomizerCheckedCheckboxCount = checkedCheckboxes.length;
+          doordashCustomizerOptionCount = allOptions.length;
+
+          const recommendedPresetButtons = Array.from(itemModal.querySelectorAll('button,[role="button"]'))
+            .filter(visible)
+            .filter((el) => /^#\d+/.test(clean(labelForElement(el))));
+          doordashCustomizerRecommendedPresetCount = recommendedPresetButtons.length;
+
+          doordashCustomizerHasSpecialInstructions = Array.from(itemModal.querySelectorAll('button,[role="button"],a[href]'))
+            .filter(visible)
+            .some((el) => /add special instructions/i.test(labelForElement(el)));
+
+          const customizerGroups = new Map();
+          Array.from(itemModal.querySelectorAll('fieldset,section,div'))
+            .filter(visible)
+            .forEach((el) => {
+              const text = clean(el.innerText || '');
+              if (!text || text.length < 12 || text.length > 900) return;
+              if (/^your recommended options\b/i.test(text)) return;
+              if (!/(required|optional).*(select|choose)|preferences\s*\(optional\)/i.test(text)) return;
+              const headerMatch = text.match(/^(.{1,120}?)(?:\s+(?:Required|\(Optional\)|Optional)\b)/i);
+              const header = clean(headerMatch ? headerMatch[1] : (/^preferences\b/i.test(text) ? 'Preferences' : ''));
+              if (!header || /^required$/i.test(header) || /^optional$/i.test(header)) return;
+              const key = header.toLowerCase();
+              const existing = customizerGroups.get(key);
+              if (!existing || text.length > existing.text.length) {
+                customizerGroups.set(key, {
+                  header,
+                  required: /\brequired\b/i.test(text),
+                  text
+                });
+              }
+            });
+          doordashCustomizerGroupCount = customizerGroups.size;
+          doordashCustomizerRequiredGroupCount = Array.from(customizerGroups.values()).filter((group) => group.required).length;
 
           const modalOptionButtons = Array.from(itemModal.querySelectorAll('button,[role="button"],a[href]'))
             .filter(visible)
@@ -2621,6 +2704,14 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         doordash_store_card_count: doordashStoreCardCount,
         doordash_item_card_count: doordashItemCardCount,
         doordash_tip_option_count: doordashTipOptionCount,
+        doordash_customizer_group_count: doordashCustomizerGroupCount,
+        doordash_customizer_required_group_count: doordashCustomizerRequiredGroupCount,
+        doordash_customizer_option_count: doordashCustomizerOptionCount,
+        doordash_customizer_checked_radio_count: doordashCustomizerCheckedRadioCount,
+        doordash_customizer_checked_checkbox_count: doordashCustomizerCheckedCheckboxCount,
+        doordash_customizer_recommended_preset_count: doordashCustomizerRecommendedPresetCount,
+        doordash_customizer_has_special_instructions: doordashCustomizerHasSpecialInstructions,
+        doordash_customizer_add_to_cart_label: doordashCustomizerAddToCartLabel,
         doordash_has_cart_cta: doordashHasCartCTA,
         doordash_has_continue_cta: doordashHasContinueCTA,
         doordash_has_add_to_cart_cta: doordashHasAddToCartCTA,
