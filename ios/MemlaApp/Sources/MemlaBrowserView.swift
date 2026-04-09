@@ -2154,15 +2154,35 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
       if (!button) {
         return { ok: false, reason: 'doordash_modifier_save_not_found' };
       }
-      try { button.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
-      ['mousedown', 'mouseup', 'click'].forEach((type) => {
-        try {
-          button.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
-        } catch (_) {}
-      });
-      if (typeof button.click === 'function') {
-        try { button.click(); } catch (_) {}
-      }
+      const footer = button.closest('[data-testid="in-content-modal-footer-container"], .ModalFooter-sc-ibg5mu-5, section, div');
+      const activate = (node) => {
+        if (!node) return;
+        try { node.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
+        const rect = typeof node.getBoundingClientRect === 'function'
+          ? node.getBoundingClientRect()
+          : { left: 0, top: 0, width: 0, height: 0 };
+        const pointInit = {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          clientX: rect.left + rect.width / 2,
+          clientY: rect.top + rect.height / 2
+        };
+        try { node.dispatchEvent(new PointerEvent('pointerdown', { ...pointInit, pointerId: 1, pointerType: 'touch', isPrimary: true })); } catch (_) {}
+        try { node.dispatchEvent(new TouchEvent('touchstart', { bubbles: true, cancelable: true, composed: true })); } catch (_) {}
+        try { node.dispatchEvent(new PointerEvent('pointerup', { ...pointInit, pointerId: 1, pointerType: 'touch', isPrimary: true })); } catch (_) {}
+        try { node.dispatchEvent(new TouchEvent('touchend', { bubbles: true, cancelable: true, composed: true })); } catch (_) {}
+        ['mousedown', 'mouseup', 'click'].forEach((type) => {
+          try {
+            node.dispatchEvent(new MouseEvent(type, { ...pointInit, view: window }));
+          } catch (_) {}
+        });
+        if (typeof node.click === 'function') {
+          try { node.click(); } catch (_) {}
+        }
+      };
+      activate(footer);
+      activate(button);
       return { ok: true, reason: 'tapped_doordash_modifier_save', label: clean(button.innerText || button.textContent || '') };
     })();
     """
