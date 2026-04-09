@@ -3049,12 +3049,17 @@ struct MemlaBrowserView: View {
     @State private var pendingDoorDashLabel: String = ""
     @State private var addToCartRetryCount = 0
     @State private var preferCartProgress = false
+    @State private var completedModifierTerms: Set<String> = []
+    @State private var primaryFoodItemAdded = false
+    @State private var pendingFoodAddOns: [String] = []
+    @State private var pendingFoodAddOperation = ""
 
     private struct MirrorAutoDriveAction {
         let candidate: WebsiteC2ACandidate
         let allowCaution: Bool
         let status: String
         let pendingRole: String
+        let consumedTerms: [String] = []
     }
 
     private let commerceChecklist = [
@@ -3096,6 +3101,10 @@ struct MemlaBrowserView: View {
                 pendingDoorDashLabel = ""
                 addToCartRetryCount = 0
                 preferCartProgress = false
+                completedModifierTerms = []
+                primaryFoodItemAdded = false
+                pendingFoodAddOns = initialFoodAddOns(from: route.capsule)
+                pendingFoodAddOperation = ""
                 browser.startGrounding(capsule: route.capsule)
                 if browser.currentURL.isEmpty {
                     browser.navigate(to: route.url, autoInspect: true, capsule: route.capsule)
@@ -3212,6 +3221,19 @@ struct MemlaBrowserView: View {
                     }
                     .buttonStyle(.bordered)
                     .font(.caption)
+                    if autoDriveEnabled {
+                        Button("Pause") {
+                            toggleAgency()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .font(.caption)
+                    } else {
+                        Button("Agency") {
+                            toggleAgency()
+                        }
+                        .buttonStyle(.bordered)
+                        .font(.caption)
+                    }
                 }
             }
 
@@ -3313,6 +3335,133 @@ struct MemlaBrowserView: View {
             parts.append("Tip: \(tip)")
         }
         return parts.isEmpty ? nil : parts.joined(separator: " • ")
+    }
+
+    private func toggleAgency() {
+        autoDriveEnabled.toggle()
+        lastAutoDriveSignature = ""
+        addToCartRetryCount = 0
+        pendingDoorDashRole = ""
+        pendingDoorDashLabel = ""
+        pendingFoodAddOperation = ""
+        completedModifierTerms = []
+        primaryFoodItemAdded = false
+        pendingFoodAddOns = initialFoodAddOns(from: route.capsule)
+        preferCartProgress = false
+        autoDriveStatus = autoDriveEnabled
+            ? "Agency is active. Memla will drive to cart review."
+            : "Manual Mirror mode. Tap the distilled controls yourself."
+        if autoDriveEnabled, let state = browser.websiteState {
+            handleAutoDriveUpdate(for: state)
+        }
+    }
+
+    private func initialFoodAddOns(from capsule: ActionCapsule?) -> [String] {
+        guard let raw = capsule?.slots["add_ons"]?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return []
+        }
+        return splitCommerceTerms(raw)
+    }
+
+    private func splitCommerceTerms(_ raw: String) -> [String] {
+        raw
+            .replacingOccurrences(of: " and ", with: ",")
+            .components(separatedBy: CharacterSet(charactersIn: ",/+&"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    private func normalizedCommerceTerm(_ value: String) -> String {
+        value
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .lowercased()
+            .replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func currentFoodTargetTerms() -> [String] {
+        guard let capsule = route.capsule else {
+            return []
+        }
+        if primaryFoodItemAdded, let addOn = pendingFoodAddOns.first {
+            return expandedCommerceTerms(from: splitCommerceTerms(addOn))
+        }
+        return expandedCommerceTerms(from: splitCommerceTerms(capsule.slots["item"] ?? ""))
+    }
+
+    private func currentModifierTargetTerms() -> [String] {
+        guard let capsule = route.capsule else {
+            return []
+        }
+        var terms: [String] = []
+        if let size = capsule.slots["size"], !size.isEmpty {
+            terms.append(size)
+        }
+        if let toppings = capsule.slots["toppings"], !toppings.isEmpty {
+            terms.append(contentsOf: splitCommerceTerms(toppings))
+        } else if let modifiers = capsule.slots["modifiers"], !modifiers.isEmpty {
+            terms.append(contentsOf: splitCommerceTerms(modifiers))
+        }
+        return terms
+            .map(normalizedCommerceTerm)
+            .filter { !$0.isEmpty && !completedModifierTerms.contains($0) }
+    }
+
+    private func expandedCommerceTerms(from rawTerms: [String]) -> [String] {
+        var ordered: [String] = []
+        for raw in rawTerms {
+            let normalized = normalizedCommerceTerm(raw)
+            guard !normalized.isEmpty else { continue }
+            ordered.append(normalized)
+            let parts = normalized.split(separator: " ").map(String.init)
+            if parts.count > 1, let last = parts.last, last.count > 2 {
+                ordered.append(last)
+            }
+        }
+        var seen = Set<String>()
+        return ordered.filter { seen.insert($0).inserted }
+    }
+
+    private func candidateMatchedTargetTerms(_ candidate: WebsiteC2ACandidate, targetTerms: [String]) -> [String] {
+        let label = normalizedCommerceTerm(candidate.label)
+        let matchedTerms = candidate.matchedTerms.map(normalizedCommerceTerm)
+        let reason = normalizedCommerceTerm(candidate.reason)
+        return targetTerms.filter { term in
+            guard !term.isEmpty else { return false }
+            if label == term || label.contains(term) || term.contains(label) {
+                return true
+            }
+            if matchedTerms.contains(where: { $0 == term || $0.contains(term) || term.contains($0) }) {
+                return true
+            }
+            let termTokens = term.split(separator: " ")
+            if !termTokens.isEmpty, termTokens.allSatisfy({ token in label.contains(token) || reason.contains(token) }) {
+                return true
+            }
+            return false
+        }
+    }
+
+    private func bestCandidate(role: String, in candidates: [WebsiteC2ACandidate], targetTerms: [String]) -> (candidate: WebsiteC2ACandidate, matched: [String])? {
+        let relevant = candidates.filter { $0.role == role && !$0.blocked }
+        guard !relevant.isEmpty else {
+            return nil
+        }
+        let scored = relevant.compactMap { candidate -> (WebsiteC2ACandidate, [String], Double)? in
+            let matched = candidateMatchedTargetTerms(candidate, targetTerms: targetTerms)
+            guard !matched.isEmpty else { return nil }
+            let label = normalizedCommerceTerm(candidate.label)
+            let specificity = matched.reduce(0.0) { partial, term in
+                if label == term { return partial + 5.0 }
+                if label.contains(term) || term.contains(label) { return partial + 3.0 }
+                return partial + 1.5
+            }
+            return (candidate, matched, candidate.score + specificity)
+        }
+        guard let best = scored.max(by: { left, right in left.2 < right.2 }) else {
+            return nil
+        }
+        return (best.0, best.1)
     }
 
     private var browserToolbar: some View {
@@ -4845,11 +4994,20 @@ struct MemlaBrowserView: View {
                 || state.pageKind == "dd_cart_page"
                 || state.pageKind == "ue_cart_page"
                 || candidates.contains(where: { ["dd_continue_cta", "dd_cart_cta", "ue_continue_cta", "ue_cart_cta"].contains($0.role) }) {
-                preferCartProgress = true
+                if pendingFoodAddOperation == "primary" && !pendingFoodAddOns.isEmpty {
+                    primaryFoodItemAdded = true
+                    preferCartProgress = false
+                } else {
+                    if pendingFoodAddOperation == "addon" && !pendingFoodAddOns.isEmpty {
+                        pendingFoodAddOns.removeFirst()
+                    }
+                    preferCartProgress = pendingFoodAddOns.isEmpty
+                }
             }
             pendingDoorDashRole = ""
             pendingDoorDashLabel = ""
             addToCartRetryCount = 0
+            pendingFoodAddOperation = ""
         }
 
         if pendingDoorDashRole == "ub_fill_destination" {
@@ -4915,11 +5073,15 @@ struct MemlaBrowserView: View {
 
         lastAutoDriveSignature = signature
         autoDriveStatus = action.status
+        if !action.consumedTerms.isEmpty {
+            completedModifierTerms.formUnion(action.consumedTerms)
+        }
         if action.pendingRole == "dd_add_to_cart" || action.pendingRole == "ue_add_to_cart" {
             pendingDoorDashRole = action.pendingRole
             pendingDoorDashLabel = action.candidate.label
             addToCartRetryCount = 0
-            preferCartProgress = true
+            pendingFoodAddOperation = primaryFoodItemAdded ? "addon" : "primary"
+            preferCartProgress = pendingFoodAddOns.isEmpty && primaryFoodItemAdded
         }
         let autoDriveDelay: TimeInterval
         switch action.candidate.role {
@@ -4940,7 +5102,12 @@ struct MemlaBrowserView: View {
             .prefix(4)
             .map { "\($0.role):\($0.label)" }
             .joined(separator: "|")
-        return [state.pageKind, browser.currentURL, candidateSlice].joined(separator: "||")
+        let agencyState = [
+            primaryFoodItemAdded ? "primary_added" : "primary_pending",
+            pendingFoodAddOns.first ?? "",
+            completedModifierTerms.sorted().joined(separator: ",")
+        ].joined(separator: "|")
+        return [state.pageKind, browser.currentURL, candidateSlice, agencyState].joined(separator: "||")
     }
 
     private func doorDashAutoAction(for state: WebsiteC2AState, candidates: [WebsiteC2ACandidate]) -> MirrorAutoDriveAction? {
@@ -5027,6 +5194,14 @@ struct MemlaBrowserView: View {
                     pendingRole: ""
                 )
             }
+            if let targetedItem = bestCandidate(role: "ue_item_card", in: candidates, targetTerms: currentFoodTargetTerms()) {
+                return MirrorAutoDriveAction(
+                    candidate: targetedItem.candidate,
+                    allowCaution: targetedItem.candidate.tapSafety == "caution",
+                    status: "Opening \(targetedItem.candidate.label)...",
+                    pendingRole: ""
+                )
+            }
             if let item = candidates.first(where: { $0.role == "ue_item_card" && !$0.blocked }) {
                 return MirrorAutoDriveAction(
                     candidate: item,
@@ -5079,12 +5254,32 @@ struct MemlaBrowserView: View {
                 )
             }
         case "dd_storefront":
+            if primaryFoodItemAdded, !pendingFoodAddOns.isEmpty,
+               let targetedAddOn = bestCandidate(role: "dd_item_card", in: candidates, targetTerms: currentFoodTargetTerms()) {
+                return MirrorAutoDriveAction(
+                    candidate: targetedAddOn.candidate,
+                    allowCaution: targetedAddOn.candidate.tapSafety == "caution",
+                    status: "Opening \(targetedAddOn.candidate.label)...",
+                    pendingRole: ""
+                )
+            }
+            if primaryFoodItemAdded, !pendingFoodAddOns.isEmpty {
+                return nil
+            }
             if preferCartProgress,
                let cart = candidates.first(where: { $0.role == "dd_cart_cta" && !$0.blocked }) {
                 return MirrorAutoDriveAction(
                     candidate: cart,
                     allowCaution: cart.tapSafety == "caution",
                     status: "Opening cart...",
+                    pendingRole: ""
+                )
+            }
+            if let targetedItem = bestCandidate(role: "dd_item_card", in: candidates, targetTerms: currentFoodTargetTerms()) {
+                return MirrorAutoDriveAction(
+                    candidate: targetedItem.candidate,
+                    allowCaution: targetedItem.candidate.tapSafety == "caution",
+                    status: "Opening \(targetedItem.candidate.label)...",
                     pendingRole: ""
                 )
             }
@@ -5105,6 +5300,23 @@ struct MemlaBrowserView: View {
                 )
             }
         case "dd_item_modal":
+            if let targetedModifier = bestCandidate(role: "dd_modifier_option", in: candidates, targetTerms: currentModifierTargetTerms()) {
+                return MirrorAutoDriveAction(
+                    candidate: targetedModifier.candidate,
+                    allowCaution: true,
+                    status: "Selecting \(targetedModifier.candidate.label)...",
+                    pendingRole: "",
+                    consumedTerms: targetedModifier.matched
+                )
+            }
+            if let save = candidates.first(where: { $0.role == "dd_modifier_save" && !$0.blocked }) {
+                return MirrorAutoDriveAction(
+                    candidate: save,
+                    allowCaution: true,
+                    status: "Saving options...",
+                    pendingRole: ""
+                )
+            }
             if let add = candidates.first(where: { $0.role == "dd_add_to_cart" && !$0.blocked }) {
                 return MirrorAutoDriveAction(
                     candidate: add,
@@ -5122,6 +5334,15 @@ struct MemlaBrowserView: View {
                 )
             }
         case "dd_cart_drawer", "dd_cart_page":
+            if !pendingFoodAddOns.isEmpty,
+               let close = candidates.first(where: { $0.role == "dd_modal_close" && !$0.blocked }) {
+                return MirrorAutoDriveAction(
+                    candidate: close,
+                    allowCaution: true,
+                    status: "Returning to menu for \(pendingFoodAddOns.first ?? "add on")...",
+                    pendingRole: ""
+                )
+            }
             if let checkout = candidates.first(where: { $0.role == "dd_continue_cta" && !$0.blocked }) {
                 return MirrorAutoDriveAction(
                     candidate: checkout,
