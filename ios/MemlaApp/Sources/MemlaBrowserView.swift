@@ -1152,6 +1152,15 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             seenKeys.insert(key)
             return true
         }
+        let limit: Int
+        switch pageKind {
+        case "dd_item_modal", "dd_storefront", "ue_item_modal", "ue_storefront":
+            limit = 40
+        case "dd_search_results", "ue_search_results":
+            limit = 24
+        default:
+            limit = 12
+        }
         return Array(deduped.sorted { left, right in
             if left.blocked != right.blocked {
                 return !left.blocked
@@ -1160,7 +1169,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
                 return left.label.localizedCaseInsensitiveCompare(right.label) == .orderedAscending
             }
             return left.score > right.score
-        }.prefix(12))
+        }.prefix(limit))
     }
 
     private static func isBlockedServiceRole(_ role: String) -> Bool {
@@ -2350,6 +2359,10 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           const modalOptionButtons = Array.from(itemModal.querySelectorAll('button,[role="button"],a[href],input[type="radio"],input[type="checkbox"]'))
             .filter(visible)
             .filter((el) => {
+              const elementLabel = clean(labelForElement(el));
+              if (/^back$/i.test(elementLabel)) {
+                return false;
+              }
               const root = closestWithText(el, 8, 220);
               const label = firstMeaningfulTextLine(root) || labelForElement(el);
               const text = clean([label, contextForElement(el, root)].join(' '));
