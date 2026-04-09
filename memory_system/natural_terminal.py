@@ -1017,14 +1017,18 @@ def _looks_like_low_signal_web_text(text: str) -> bool:
         "comprehensive coverage",
         "stay informed",
         "latest updates",
+        "get accurate hourly forecasts",
         "latest hourly weather updates",
         "detailed forecast including",
         "weather forecast and conditions",
+        "today tonight and tomorrow",
         "today s and tonight s",
+        "search for a location",
         "complete list of",
         "explore the forefront",
         "keep you ahead",
         "latest agentic ai news today",
+        "history key dates and facts",
         "summarized in one timeline",
         "what the source covers",
     }
@@ -1090,6 +1094,154 @@ def _query_focused_snippet(text: str, focus_text: str) -> str:
         return "" if _looks_like_low_signal_web_text(fallback) else fallback
     scored.sort(key=lambda item: (-item[0], len(item[1])))
     return _first_sentences(scored[0][1], max_sentences=2)
+
+
+def _web_answer_requirements(prompt: str, query: str, slice_kind: str) -> dict[str, Any]:
+    normalized = _normalize_goal_text(prompt or query)
+    question_type = str(slice_kind or "general").strip().lower() or "general"
+    needed_fields: list[str] = []
+    if slice_kind == "weather":
+        question_type = "weather_forecast"
+        needed_fields = ["target_place", "target_period", "condition", "temperature_or_precipitation"]
+        if "rain" in normalized or "raining" in normalized:
+            question_type = "weather_precipitation"
+            needed_fields = ["target_place", "target_period", "precipitation_chance", "rain_condition"]
+        elif any(token in normalized for token in {"temperature", "high", "low", "hot", "cold"}):
+            question_type = "weather_temperature"
+            needed_fields = ["target_place", "target_period", "temperature", "condition"]
+    elif "how old" in normalized:
+        question_type = "derived_age_at_event"
+        needed_fields = ["person_name", "birth_year_or_date", "event_year_or_date", "computed_age"]
+    elif re.search(r"\bwho (?:created|invented|founded|built|made|designed)\b", normalized):
+        question_type = "creator_identity"
+        needed_fields = ["creator_name", "thing_name", "role_or_context"]
+    elif re.search(r"\bwho (?:is|was) the ceo\b", normalized) or " chief executive " in f" {normalized} ":
+        question_type = "role_holder"
+        needed_fields = ["person_name", "organization", "role"]
+    elif slice_kind == "news":
+        question_type = "news_highlights"
+        needed_fields = ["topic", "recent_developments", "named_entities_or_numbers"]
+    elif slice_kind == "fact":
+        question_type = "direct_fact"
+        needed_fields = ["direct_answer"]
+    return {
+        "question_type": question_type,
+        "needed_fields": needed_fields,
+    }
+
+
+def _split_text_into_web_chunks(text: str, *, max_chars: int = 420) -> list[str]:
+    clean = " ".join(str(text or "").split()).strip()
+    if not clean:
+        return []
+    sentences = [segment.strip() for segment in re.split(r"(?<=[.!?])\s+", clean) if segment.strip()]
+    if not sentences:
+        return []
+    chunks: list[str] = []
+    current = ""
+    for sentence in sentences:
+        if len(sentence) > max_chars:
+            sentence = sentence[: max_chars - 3].rstrip() + "..."
+        candidate = f"{current} {sentence}".strip() if current else sentence
+        if current and len(candidate) > max_chars:
+            chunks.append(current)
+            current = sentence
+            continue
+        current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _score_web_evidence_chunk(
+    text: str,
+    *,
+    focus_text: str,
+    slice_kind: str,
+    question_type: str,
+) -> int:
+    clean = " ".join(str(text or "").split()).strip()
+    if not clean:
+        return -999
+    normalized = _normalize_goal_text(clean)
+    score = 0
+    query_tokens = _query_focus_tokens(focus_text)
+    score += sum(4 for token in query_tokens if token in normalized)
+    if not _looks_like_low_signal_web_text(clean):
+        score += 2
+    if re.search(r"\b\d{1,4}\b", clean):
+        score += 1
+    if slice_kind == "weather":
+        for token in ("rain", "snow", "forecast", "temperature", "high", "low", "humid", "cloud", "sun", "storm", "percent", "chance"):
+            if token in normalized:
+                score += 2
+    if question_type == "role_holder":
+        for token in ("ceo", "chief executive", "serves as", "is the ceo", "leads"):
+            if token in normalized:
+                score += 3
+    if question_type == "creator_identity":
+        for token in ("invented", "created", "founded", "designed", "built by", "developed by"):
+            if token in normalized:
+                score += 3
+    if question_type == "derived_age_at_event":
+        if any(token in normalized for token in ("born", "aged", "years old", "at age")):
+            score += 4
+        if re.search(r"\b(18|19|20)\d{2}\b", clean):
+            score += 2
+    return score
+
+
+def _build_web_evidence_chunks(
+    *,
+    prompt: str,
+    query: str,
+    slice_kind: str,
+    source_index: int,
+    card: dict[str, Any],
+    details: dict[str, Any],
+    max_chunks: int = 4,
+) -> list[dict[str, Any]]:
+    requirements = _web_answer_requirements(prompt, query, slice_kind)
+    question_type = str(requirements.get("question_type") or slice_kind or "general").strip()
+    title = str(details.get("title") or card.get("title") or "").strip()
+    url = str(details.get("url") or card.get("url") or "").strip()
+    candidates: list[tuple[str, str]] = []
+    summary = str(details.get("summary") or card.get("summary") or "").strip()
+    if summary:
+        candidates.append(("summary", summary))
+    body_text = str(details.get("body_text") or "").strip()
+    for chunk in _split_text_into_web_chunks(body_text):
+        candidates.append(("body", chunk))
+    ranked: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for idx, (kind, text) in enumerate(candidates, start=1):
+        normalized = _normalize_goal_text(text)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        if len(text) < 28:
+            continue
+        score = _score_web_evidence_chunk(
+            text,
+            focus_text=prompt or query,
+            slice_kind=slice_kind,
+            question_type=question_type,
+        )
+        if score < 1 and kind != "summary":
+            continue
+        ranked.append(
+            {
+                "chunk_id": f"s{source_index}c{idx}",
+                "source_index": int(source_index),
+                "kind": kind,
+                "title": title,
+                "url": url,
+                "text": text,
+                "score": score,
+            }
+        )
+    ranked.sort(key=lambda item: (int(item.get("score") or 0), len(str(item.get("text") or ""))), reverse=True)
+    return ranked[: max(int(max_chunks), 0)]
 
 
 def _prefer_content_summary(description: str, content_preview: str) -> str:
@@ -1771,8 +1923,25 @@ def _synthesize_browser_evidence(
         "web_page": "web page",
     }
     source_label = source_label_map.get(source_kind, source_kind.replace("_", " ") or "source")
-    summary = str(best.get("summary") or best.get("title") or "").strip()
     explanation_goal = goal_text or subject_title or "the current goal"
+    summary = str(best.get("summary") or best.get("title") or "").strip()
+    focused_summary = _query_focused_snippet(
+        " ".join(
+            part
+            for part in [
+                str(best.get("content_preview") or "").strip(),
+                summary,
+            ]
+            if part
+        ),
+        explanation_goal or goal_text or subject_title,
+    )
+    if focused_summary and (
+        _looks_like_low_signal_web_text(summary)
+        or len(summary) < 40
+        or source_kind == "web_page"
+    ):
+        summary = focused_summary
     best_title = str(best.get("title") or "").strip()
     if source_kind == "web_page":
         if summary and best_title and best_title not in summary:
@@ -4224,7 +4393,7 @@ def _github_metric(html: str, owner: str, repo: str, suffix: str) -> str:
 def _extract_page_snapshot(state: BrowserSessionState, html: str) -> dict[str, Any]:
     url = str(state.current_url or "").strip()
     title = _title_from_html(html)
-    content_preview = _body_text_from_html(html)
+    body_text = _body_text_from_html(html)
     description = (
         _meta_content(html, "og:description", attr="property")
         or _meta_content(html, "twitter:description", attr="name")
@@ -4234,8 +4403,9 @@ def _extract_page_snapshot(state: BrowserSessionState, html: str) -> dict[str, A
         "url": url,
         "page_kind": state.page_kind or "web_page",
         "title": title,
-        "summary": _prefer_content_summary(description, content_preview) or title,
-        "content_preview": _first_sentences(content_preview, max_sentences=3, max_chars=500),
+        "summary": _prefer_content_summary(description, body_text) or title,
+        "content_preview": _first_sentences(body_text, max_sentences=3, max_chars=500),
+        "body_text": body_text[:4000].strip(),
     }
     if state.page_kind == "repo_page":
         match = re.match(r"^https?://github\.com/([^/\s]+)/([^/\s?#]+)", url, flags=re.IGNORECASE)
@@ -4290,7 +4460,9 @@ def _browser_read_message(details: dict[str, Any], current_url: str) -> str:
 
 
 def _best_web_answer_summary(*, prompt: str, card: dict[str, Any], details: dict[str, Any]) -> str:
+    focused_body = _query_focused_snippet(str(details.get("body_text") or "").strip(), prompt)
     summary_candidates = [
+        focused_body,
         str(details.get("summary") or "").strip(),
         str(card.get("summary") or "").strip(),
         str(details.get("description") or "").strip(),
@@ -4520,7 +4692,10 @@ def _render_web_answer_via_model(
     query: str,
     slice_kind: str,
     evidence_items: list[dict[str, Any]],
-) -> str:
+    result_cards: list[dict[str, Any]],
+    evidence_chunks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    requirements = _web_answer_requirements(prompt, query, slice_kind)
     evidence_lines: list[str] = []
     for index, item in enumerate(list(evidence_items or [])[:3], start=1):
         title = str(item.get("title") or "").strip()
@@ -4538,6 +4713,18 @@ def _render_web_answer_via_model(
                 if part
             )
         )
+    card_lines: list[str] = []
+    for index, card in enumerate(list(result_cards or [])[:3], start=1):
+        title = str(card.get("title") or "").strip()
+        summary = str(card.get("summary") or "").strip()
+        url = str(card.get("url") or "").strip()
+        card_lines.append(f"{index}. {title} | {summary} | {url}")
+    chunk_lines: list[str] = []
+    for chunk in list(evidence_chunks or [])[:10]:
+        chunk_id = str(chunk.get("chunk_id") or "").strip()
+        title = str(chunk.get("title") or "").strip()
+        text = str(chunk.get("text") or "").strip()
+        chunk_lines.append(f"{chunk_id} | {title} | {text}")
     response = client.chat(
         model=model,
         temperature=0.1,
@@ -4545,17 +4732,22 @@ def _render_web_answer_via_model(
             ChatMessage(
                 role="system",
                 content=(
-                    "You are Memla's bounded web answer renderer. "
+                    "You are Memla's bounded web answer renderer and evidence selector. "
                     "Answer like a smart, calm friend. "
                     "Use only the evidence provided. "
+                    "First decide which evidence chunks actually answer the question. "
+                    "Ignore site chrome, slogans, navigation text, SEO blurbs, and article-summary filler. "
                     "Give the direct answer first. "
                     "For news, give 1-3 short concrete highlights. "
                     "For weather, include actual conditions or temperature if present. "
                     "For factual questions, state the fact plainly in the first sentence. "
+                    "For questions like 'how old were they when they did it', compute the age if the evidence includes both birth timing and event timing. "
                     "Do not describe what a source page covers. "
                     "Do not mention browsing, SEO, or marketing language. "
                     "If the evidence is weak or incomplete, say that plainly. "
-                    "Return JSON only: {\"answer\":\"...\"}."
+                    "Return JSON only with keys: "
+                    "answer, question_type, relevant_chunk_ids, extracted_facts, missing_fields. "
+                    "relevant_chunk_ids and extracted_facts and missing_fields must be JSON arrays."
                 ),
             ),
             ChatMessage(
@@ -4564,7 +4756,13 @@ def _render_web_answer_via_model(
                     f"Prompt: {prompt}\n"
                     f"Query: {query}\n"
                     f"Slice: {slice_kind}\n"
-                    "Evidence:\n"
+                    f"Question type: {requirements.get('question_type', '')}\n"
+                    f"Needed fields: {json.dumps(list(requirements.get('needed_fields') or []))}\n"
+                    "Top result cards:\n"
+                    + ("\n".join(card_lines) if card_lines else "(none)")
+                    + "\n\nEvidence chunks:\n"
+                    + ("\n".join(chunk_lines) if chunk_lines else "(none)")
+                    + "\n\nSupporting evidence summaries:\n"
                     + ("\n\n".join(evidence_lines) if evidence_lines else "(none)")
                 ),
             ),
@@ -4572,7 +4770,25 @@ def _render_web_answer_via_model(
     )
     payload = _extract_first_json_object(response)
     answer = str(payload.get("answer") or "").strip()
-    return " ".join(answer.split()).strip()
+    return {
+        "answer": " ".join(answer.split()).strip(),
+        "question_type": str(payload.get("question_type") or requirements.get("question_type") or "").strip(),
+        "relevant_chunk_ids": [
+            str(item).strip()
+            for item in list(payload.get("relevant_chunk_ids") or [])
+            if str(item).strip()
+        ],
+        "extracted_facts": [
+            str(item).strip()
+            for item in list(payload.get("extracted_facts") or [])
+            if str(item).strip()
+        ],
+        "missing_fields": [
+            str(item).strip()
+            for item in list(payload.get("missing_fields") or [])
+            if str(item).strip()
+        ],
+    }
 
 
 def _goal_subject_for_web(prompt: str, query: str) -> dict[str, str]:
@@ -4593,6 +4809,7 @@ def _resolve_web_answer(
     model: str = "",
 ) -> dict[str, Any]:
     slice_kind = _web_question_slice(prompt, query)
+    requirements = _web_answer_requirements(prompt, query, slice_kind)
     policy_priors = suggest_web_policy_priors(
         prompt=prompt,
         query=query,
@@ -4606,12 +4823,14 @@ def _resolve_web_answer(
     ranked_cards = _rank_cards_against_goal(cards, prompt or query) if cards else []
     top_candidates = [dict(item) for item in ranked_cards[: min(3, len(ranked_cards))]]
     evidence_items: list[dict[str, Any]] = []
+    evidence_chunks: list[dict[str, Any]] = []
     enriched_cards: list[dict[str, Any]] = []
     best_card: dict[str, Any] = dict(top_candidates[0]) if top_candidates else (dict(cards[0]) if cards else {})
     best_details: dict[str, Any] = {}
     answer = ""
     fallback_answer = ""
-    for card in top_candidates or cards[:3]:
+    model_render_payload: dict[str, Any] = {}
+    for source_index, card in enumerate(top_candidates or cards[:3], start=1):
         url = str(card.get("url") or "").strip()
         if not url:
             continue
@@ -4664,6 +4883,16 @@ def _resolve_web_answer(
         if "matching_terms" in card:
             evidence_item["matching_terms"] = list(card.get("matching_terms") or [])
         evidence_items.append(evidence_item)
+        evidence_chunks.extend(
+            _build_web_evidence_chunks(
+                prompt=prompt,
+                query=query,
+                slice_kind=slice_kind,
+                source_index=source_index,
+                card=merged_card,
+                details=details,
+            )
+        )
         if not fallback_answer:
             fallback_answer = _best_web_answer_summary(prompt=prompt, card=merged_card, details=details)
             best_card = dict(merged_card)
@@ -4699,19 +4928,31 @@ def _resolve_web_answer(
         }
         answer = _best_web_answer_summary(prompt=prompt, card=best_card, details=best_details)
     model_rendered_answer = ""
+    relevant_chunk_ids: list[str] = []
+    extracted_facts: list[str] = []
+    missing_fields: list[str] = []
+    resolved_question_type = str(requirements.get("question_type") or slice_kind).strip()
     if client is not None and model and evidence_items:
         if slice_kind in {"fact", "news", "weather"} or _web_answer_needs_model_rescue(slice_kind, answer):
             try:
-                model_rendered_answer = _render_web_answer_via_model(
+                model_render_payload = _render_web_answer_via_model(
                     client=client,
                     model=model,
                     prompt=prompt,
                     query=query,
                     slice_kind=slice_kind,
                     evidence_items=evidence_items,
+                    result_cards=enriched_cards or top_candidates or cards,
+                    evidence_chunks=evidence_chunks,
                 )
+                model_rendered_answer = str(model_render_payload.get("answer") or "").strip()
+                relevant_chunk_ids = [str(item).strip() for item in list(model_render_payload.get("relevant_chunk_ids") or []) if str(item).strip()]
+                extracted_facts = [str(item).strip() for item in list(model_render_payload.get("extracted_facts") or []) if str(item).strip()]
+                missing_fields = [str(item).strip() for item in list(model_render_payload.get("missing_fields") or []) if str(item).strip()]
+                resolved_question_type = str(model_render_payload.get("question_type") or resolved_question_type).strip()
             except Exception:
                 model_rendered_answer = ""
+                model_render_payload = {}
     if model_rendered_answer:
         answer = model_rendered_answer
     answer = _apply_web_policy_priors(
@@ -4745,10 +4986,16 @@ def _resolve_web_answer(
             "generator": "model" if model_rendered_answer else "heuristic",
             "policy_behaviors": list(policy_priors.get("behaviors") or []),
         },
+        "question_type": resolved_question_type,
+        "needed_fields": list(requirements.get("needed_fields") or []),
+        "relevant_chunk_ids": relevant_chunk_ids,
+        "extracted_facts": extracted_facts,
+        "missing_fields": missing_fields,
         "best_card": best_card,
         "best_details": best_details,
         "synthesis": synthesis,
         "evidence_items": evidence_items,
+        "evidence_chunks": evidence_chunks,
     }
 
 
@@ -8073,8 +8320,10 @@ def _rescue_web_answer_with_teacher(
     source_count: int,
     result_cards: list[dict[str, Any]],
     evidence_items: list[dict[str, Any]],
+    evidence_chunks: list[dict[str, Any]],
     coaching: str = "",
 ) -> dict[str, Any]:
+    requirements = _web_answer_requirements(prompt, query, slice_kind)
     card_lines: list[str] = []
     for index, card in enumerate(list(result_cards or [])[:3], start=1):
         title = str(card.get("title") or "").strip()
@@ -8098,6 +8347,12 @@ def _rescue_web_answer_with_teacher(
                 if part
             )
         )
+    chunk_lines: list[str] = []
+    for chunk in list(evidence_chunks or [])[:10]:
+        chunk_id = str(chunk.get("chunk_id") or "").strip()
+        title = str(chunk.get("title") or "").strip()
+        text = str(chunk.get("text") or "").strip()
+        chunk_lines.append(f"{chunk_id} | {title} | {text}")
     response = client.chat(
         model=model,
         temperature=0.0,
@@ -8112,10 +8367,12 @@ def _rescue_web_answer_with_teacher(
                     "For news, give 1-3 short concrete highlights. "
                     "For weather, include actual conditions or temperature if present. "
                     "For factual questions, state the fact plainly in the first sentence. "
+                    "If the question needs a derived answer like an age-at-event, compute it when the evidence supports it. "
+                    "Tell Memla which chunk ids actually mattered. "
                     "Do not talk about SEO, web pages, or what an article covers. "
                     "If evidence is weak, say that plainly. "
-                    "Return JSON only with keys answer, why_better, promotion_notes. "
-                    "promotion_notes must be a JSON array of short strings."
+                    "Return JSON only with keys answer, why_better, promotion_notes, question_type, relevant_chunk_ids, extracted_facts, missing_fields. "
+                    "promotion_notes, relevant_chunk_ids, extracted_facts, and missing_fields must be JSON arrays of short strings."
                 ),
             ),
             ChatMessage(
@@ -8124,6 +8381,8 @@ def _rescue_web_answer_with_teacher(
                     f"Prompt: {prompt}\n"
                     f"Resolved query: {query}\n"
                     f"Slice: {slice_kind}\n"
+                    f"Question type: {requirements.get('question_type', '')}\n"
+                    f"Needed fields: {json.dumps(list(requirements.get('needed_fields') or []))}\n"
                     f"Current Memla answer: {current_answer}\n"
                     f"Current best source title: {source_title}\n"
                     f"Current best source url: {source_url}\n"
@@ -8131,6 +8390,8 @@ def _rescue_web_answer_with_teacher(
                     f"Teacher coaching so far: {coaching}\n"
                     "Top result cards:\n"
                     + ("\n".join(card_lines) if card_lines else "(none)")
+                    + "\n\nEvidence chunks:\n"
+                    + ("\n".join(chunk_lines) if chunk_lines else "(none)")
                     + "\n\nEvidence:\n"
                     + ("\n\n".join(evidence_lines) if evidence_lines else "(none)")
                 ),
@@ -8146,10 +8407,29 @@ def _rescue_web_answer_with_teacher(
         for item in (promotion_notes_raw if isinstance(promotion_notes_raw, list) else [promotion_notes_raw])
         if str(item).strip()
     ]
+    relevant_chunk_ids = [
+        str(item).strip()
+        for item in list(payload.get("relevant_chunk_ids") or [])
+        if str(item).strip()
+    ]
+    extracted_facts = [
+        str(item).strip()
+        for item in list(payload.get("extracted_facts") or [])
+        if str(item).strip()
+    ]
+    missing_fields = [
+        str(item).strip()
+        for item in list(payload.get("missing_fields") or [])
+        if str(item).strip()
+    ]
     return {
         "answer": answer,
         "why_better": why_better,
         "promotion_notes": promotion_notes,
+        "question_type": str(payload.get("question_type") or requirements.get("question_type") or "").strip(),
+        "relevant_chunk_ids": relevant_chunk_ids,
+        "extracted_facts": extracted_facts,
+        "missing_fields": missing_fields,
         "raw_response": response,
     }
 
@@ -8184,10 +8464,16 @@ def _build_web_teacher_trace_row(row: dict[str, Any]) -> dict[str, Any]:
         "prompt": str(row.get("prompt") or "").strip(),
         "query": str(row.get("query") or "").strip(),
         "slice": str(row.get("answer_slice") or "").strip(),
+        "question_type": str(row.get("question_type") or "").strip(),
+        "needed_fields": [str(item).strip() for item in list(row.get("needed_fields") or []) if str(item).strip()],
         "baseline_answer": str(row.get("baseline_answer") or "").strip(),
         "baseline_overall": _web_teacher_overall(baseline_judgement),
+        "baseline_relevant_chunk_ids": [str(item).strip() for item in list(row.get("baseline_relevant_chunk_ids") or []) if str(item).strip()],
+        "baseline_extracted_facts": [str(item).strip() for item in list(row.get("baseline_extracted_facts") or []) if str(item).strip()],
         "rescued_answer": str(row.get("rescued_answer") or "").strip(),
         "rescued_overall": _web_teacher_overall(rescued_judgement),
+        "rescued_relevant_chunk_ids": [str(item).strip() for item in list(row.get("rescued_relevant_chunk_ids") or []) if str(item).strip()],
+        "rescued_extracted_facts": [str(item).strip() for item in list(row.get("rescued_extracted_facts") or []) if str(item).strip()],
         "promoted_answer": str(row.get("promoted_answer") or "").strip(),
         "promoted_lane": str(row.get("promoted_lane") or "").strip(),
         "improvement_delta": float(row.get("improvement_delta") or 0.0),
@@ -8197,6 +8483,7 @@ def _build_web_teacher_trace_row(row: dict[str, Any]) -> dict[str, Any]:
         "source_title": str(row.get("baseline_source_title") or "").strip(),
         "source_url": str(row.get("baseline_source_url") or "").strip(),
         "source_count": int(row.get("baseline_source_count") or 0),
+        "evidence_chunk_count": int(row.get("evidence_chunk_count") or 0),
     }
 
 
@@ -8300,6 +8587,7 @@ def run_web_answer_benchmark(
         best_details = dict(answer_payload.get("best_details") or {})
         cards = [dict(item) for item in list(answer_payload.get("cards") or []) if isinstance(item, dict)]
         answer_style = dict(answer_payload.get("answer_style") or {})
+        evidence_chunks = [dict(item) for item in list(answer_payload.get("evidence_chunks") or []) if isinstance(item, dict)]
         source_title = str(best_details.get("title") or best_card.get("title") or "").strip()
         source_url = str(best_details.get("url") or best_card.get("url") or "").strip()
         source_count = int(answer_payload.get("source_count") or len(cards) or 0)
@@ -8336,9 +8624,14 @@ def run_web_answer_benchmark(
                 "raw_answer": raw_answer,
                 "answer_voice": str(answer_style.get("voice") or "").strip(),
                 "answer_slice": str(answer_style.get("slice") or "").strip(),
+                "question_type": str(answer_payload.get("question_type") or "").strip(),
+                "needed_fields": [str(item).strip() for item in list(answer_payload.get("needed_fields") or []) if str(item).strip()],
+                "relevant_chunk_ids": [str(item).strip() for item in list(answer_payload.get("relevant_chunk_ids") or []) if str(item).strip()],
+                "extracted_facts": [str(item).strip() for item in list(answer_payload.get("extracted_facts") or []) if str(item).strip()],
                 "source_title": source_title,
                 "source_url": source_url,
                 "source_count": source_count,
+                "evidence_chunk_count": len(evidence_chunks),
                 "teacher_judgement": teacher_judgement,
             }
         )
@@ -8496,11 +8789,16 @@ def run_web_teacher_loop(
         best_details = dict(answer_payload.get("best_details") or {})
         cards = [dict(item) for item in list(answer_payload.get("cards") or []) if isinstance(item, dict)]
         evidence_items = [dict(item) for item in list(answer_payload.get("evidence_items") or []) if isinstance(item, dict)]
+        evidence_chunks = [dict(item) for item in list(answer_payload.get("evidence_chunks") or []) if isinstance(item, dict)]
         answer_style = dict(answer_payload.get("answer_style") or {})
         source_title = str(best_details.get("title") or best_card.get("title") or "").strip()
         source_url = str(best_details.get("url") or best_card.get("url") or "").strip()
         source_count = int(answer_payload.get("source_count") or len(cards) or 0)
         slice_kind = str(answer_style.get("slice") or _web_question_slice(goal or case.prompt, query)).strip()
+        question_type = str(answer_payload.get("question_type") or "").strip()
+        needed_fields = [str(item).strip() for item in list(answer_payload.get("needed_fields") or []) if str(item).strip()]
+        baseline_relevant_chunk_ids = [str(item).strip() for item in list(answer_payload.get("relevant_chunk_ids") or []) if str(item).strip()]
+        baseline_extracted_facts = [str(item).strip() for item in list(answer_payload.get("extracted_facts") or []) if str(item).strip()]
 
         baseline_judgement: dict[str, Any] = {}
         if judge_client is not None and baseline_answer:
@@ -8548,6 +8846,7 @@ def run_web_teacher_loop(
                     source_count=source_count,
                     result_cards=cards,
                     evidence_items=evidence_items,
+                    evidence_chunks=evidence_chunks,
                     coaching=str(baseline_judgement.get("coaching") or "").strip(),
                 )
                 rescue_latency_ms = round((time.perf_counter() - rescue_started) * 1000.0, 2)
@@ -8599,6 +8898,8 @@ def run_web_teacher_loop(
             "query": query,
             "answer_voice": str(answer_style.get("voice") or "").strip(),
             "answer_slice": slice_kind,
+            "question_type": question_type,
+            "needed_fields": needed_fields,
             "baseline_answer_latency_ms": baseline_answer_latency_ms,
             "baseline_answer": baseline_answer,
             "baseline_raw_answer": baseline_raw_answer,
@@ -8606,6 +8907,9 @@ def run_web_teacher_loop(
             "baseline_source_title": source_title,
             "baseline_source_url": source_url,
             "baseline_source_count": source_count,
+            "baseline_relevant_chunk_ids": baseline_relevant_chunk_ids,
+            "baseline_extracted_facts": baseline_extracted_facts,
+            "evidence_chunk_count": len(evidence_chunks),
             "baseline_judgement": baseline_judgement,
             "needs_rescue": bool(needs_rescue),
             "rescue_attempted": rescue_attempted,
@@ -8614,6 +8918,9 @@ def run_web_teacher_loop(
             "rescued_judgement": rescued_judgement,
             "rescue_why_better": str(rescue_payload.get("why_better") or "").strip(),
             "promotion_notes": [str(item).strip() for item in list(rescue_payload.get("promotion_notes") or []) if str(item).strip()],
+            "rescued_relevant_chunk_ids": [str(item).strip() for item in list(rescue_payload.get("relevant_chunk_ids") or []) if str(item).strip()],
+            "rescued_extracted_facts": [str(item).strip() for item in list(rescue_payload.get("extracted_facts") or []) if str(item).strip()],
+            "missing_fields": [str(item).strip() for item in list(rescue_payload.get("missing_fields") or []) if str(item).strip()],
             "promoted_lane": promoted_lane,
             "promoted_answer": promoted_answer,
             "promoted_overall": promoted_overall,

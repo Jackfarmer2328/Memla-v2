@@ -88,6 +88,12 @@ def _classify_web_behaviors(texts: list[str]) -> list[str]:
         behaviors.append("tight_direct_answer")
     if re.search(r"\bpage covers|page description|website navigation|headers rather than|seo\b", joined):
         behaviors.append("avoid_page_description")
+    if re.search(r"\bderived_age_at_event|compute[_\s-]?age|birth_year|event_year|computed_age\b", joined):
+        behaviors.append("compute_derived_fact")
+    if re.search(r"\bweather_precipitation|precipitation_chance|rain_condition|forecast\b", joined):
+        behaviors.append("extract_weather_fact")
+    if re.search(r"\brole_holder|creator_identity|person_name|organization|creator_name\b", joined):
+        behaviors.append("extract_identity_fact")
     return list(dict.fromkeys(behaviors))
 
 
@@ -120,7 +126,17 @@ def distill_web_policy_bank(*, trace_bank_path: str, min_improvement: float = 0.
         coaching = str(row.get("teacher_coaching") or "").strip()
         why_better = str(row.get("rescue_why_better") or "").strip()
         promotion_notes = [str(item).strip() for item in list(row.get("promotion_notes") or []) if str(item).strip()]
-        behaviors = _classify_web_behaviors([coaching, why_better, *promotion_notes])
+        question_type = str(row.get("question_type") or "").strip()
+        needed_fields = [str(item).strip() for item in list(row.get("needed_fields") or []) if str(item).strip()]
+        extracted_facts = [
+            str(item).strip()
+            for item in [
+                *list(row.get("baseline_extracted_facts") or []),
+                *list(row.get("rescued_extracted_facts") or []),
+            ]
+            if str(item).strip()
+        ]
+        behaviors = _classify_web_behaviors([coaching, why_better, question_type, *needed_fields, *promotion_notes, *extracted_facts])
         if not prompt or not behaviors:
             continue
         kept_rows += 1

@@ -1729,6 +1729,106 @@ def test_resolve_web_answer_uses_model_renderer_when_available(monkeypatch):
     assert payload["answer"].startswith("Dario Amodei is Anthropic's CEO.")
 
 
+def test_resolve_web_answer_prefers_query_focused_body_fact_over_page_slogan(monkeypatch):
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._fetch_search_result_cards",
+        lambda engine, query, limit=5: [
+            {
+                "index": 1,
+                "title": "Weather Forecast and Conditions for Minneapolis",
+                "url": "https://example.com/minneapolis-weather",
+                "summary": "Get accurate hourly forecasts for Minneapolis today, tonight and tomorrow.",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._fetch_page_html",
+        lambda url: """
+        <html>
+          <head>
+            <title>Weather Forecast and Conditions for Minneapolis</title>
+            <meta name="description" content="Get accurate hourly forecasts for Minneapolis today, tonight and tomorrow." />
+          </head>
+          <body>
+            <nav>today hourly ten day radar</nav>
+            <article>
+              Tomorrow in Minneapolis, light rain is expected in the afternoon with a 62% chance of precipitation.
+              The high will be 61 F and the low will be 47 F.
+            </article>
+          </body>
+        </html>
+        """,
+    )
+
+    payload = _resolve_web_answer(
+        prompt="is it raining tomorrow in minneapolis?",
+        query="is it raining tomorrow in minneapolis",
+    )
+
+    assert "light rain is expected" in payload["raw_answer"].lower()
+    assert "62% chance of precipitation" in payload["raw_answer"]
+
+
+def test_resolve_web_answer_model_renderer_receives_real_body_chunks(monkeypatch):
+    captured = {"prompt": ""}
+
+    class DummyClient:
+        def chat(self, **kwargs):
+            captured["prompt"] = kwargs["messages"][-1].content
+            return json.dumps(
+                {
+                    "answer": "Yes. Minneapolis is expected to get light rain tomorrow with about a 62% chance of precipitation and a high near 61 F.",
+                    "question_type": "weather_precipitation",
+                    "relevant_chunk_ids": ["s1c2"],
+                    "extracted_facts": ["62% chance of precipitation", "high near 61 F"],
+                    "missing_fields": [],
+                }
+            )
+
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._fetch_search_result_cards",
+        lambda engine, query, limit=5: [
+            {
+                "index": 1,
+                "title": "Weather Forecast and Conditions for Minneapolis",
+                "url": "https://example.com/minneapolis-weather",
+                "summary": "Get accurate hourly forecasts for Minneapolis today, tonight and tomorrow.",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._fetch_page_html",
+        lambda url: """
+        <html>
+          <head>
+            <title>Weather Forecast and Conditions for Minneapolis</title>
+            <meta name="description" content="Get accurate hourly forecasts for Minneapolis today, tonight and tomorrow." />
+          </head>
+          <body>
+            <nav>today hourly ten day radar</nav>
+            <article>
+              Tomorrow in Minneapolis, light rain is expected in the afternoon with a 62% chance of precipitation.
+              The high will be 61 F and the low will be 47 F.
+            </article>
+          </body>
+        </html>
+        """,
+    )
+
+    payload = _resolve_web_answer(
+        prompt="is it raining tomorrow in minneapolis?",
+        query="is it raining tomorrow in minneapolis",
+        client=DummyClient(),
+        model="claude-sonnet-4-20250514",
+    )
+
+    assert "62% chance of precipitation" in captured["prompt"]
+    assert payload["question_type"] == "weather_precipitation"
+    assert payload["relevant_chunk_ids"] == ["s1c2"]
+    assert payload["extracted_facts"] == ["62% chance of precipitation", "high near 61 F"]
+    assert payload["answer"].startswith("Yes.")
+
+
 def test_run_web_answer_benchmark_collects_answer_rows(monkeypatch, tmp_path):
     cases_path = tmp_path / "web_cases.jsonl"
     cases_path.write_text(
@@ -1793,6 +1893,10 @@ def test_rescue_web_answer_with_teacher_parses_rewrite_payload():
                     "answer": "Anthropic was co-founded in 2021 by Dario Amodei and Daniela Amodei.",
                     "why_better": "It states the fact directly instead of describing a page.",
                     "promotion_notes": ["prefer direct founder statement", "avoid page-description phrasing"],
+                    "question_type": "creator_identity",
+                    "relevant_chunk_ids": ["s1c2"],
+                    "extracted_facts": ["Founded in 2021", "Dario Amodei", "Daniela Amodei"],
+                    "missing_fields": [],
                 }
             )
 
@@ -1821,12 +1925,23 @@ def test_rescue_web_answer_with_teacher_parses_rewrite_payload():
                 "url": "https://example.com/anthropic-founders",
             }
         ],
+        evidence_chunks=[
+            {
+                "chunk_id": "s1c2",
+                "title": "Anthropic founders",
+                "url": "https://example.com/anthropic-founders",
+                "text": "Anthropic was founded in 2021 by Dario Amodei and Daniela Amodei.",
+            }
+        ],
         coaching="Answer directly.",
     )
 
     assert payload["answer"].startswith("Anthropic was co-founded")
     assert payload["why_better"] == "It states the fact directly instead of describing a page."
     assert payload["promotion_notes"] == ["prefer direct founder statement", "avoid page-description phrasing"]
+    assert payload["question_type"] == "creator_identity"
+    assert payload["relevant_chunk_ids"] == ["s1c2"]
+    assert payload["extracted_facts"] == ["Founded in 2021", "Dario Amodei", "Daniela Amodei"]
 
 
 def test_run_web_teacher_loop_promotes_rescued_answers(monkeypatch, tmp_path):
@@ -1883,6 +1998,10 @@ def test_run_web_teacher_loop_promotes_rescued_answers(monkeypatch, tmp_path):
                     "answer": "Anthropic was founded in 2021 by Dario Amodei and Daniela Amodei.",
                     "why_better": "It answers the question directly.",
                     "promotion_notes": ["promote direct founder wording"],
+                    "question_type": "creator_identity",
+                    "relevant_chunk_ids": ["s1c2"],
+                    "extracted_facts": ["Founded in 2021", "Dario Amodei", "Daniela Amodei"],
+                    "missing_fields": [],
                 }
             )
         ]
@@ -1944,6 +2063,8 @@ def test_run_web_teacher_loop_promotes_rescued_answers(monkeypatch, tmp_path):
     assert row["rescued_answer"].startswith("Anthropic was founded in 2021")
     assert row["promotion_notes"] == ["promote direct founder wording"]
     assert report["trace_rows"][0]["promoted_lane"] == "teacher_rescue"
+    assert report["trace_rows"][0]["question_type"] == "creator_identity"
+    assert report["trace_rows"][0]["rescued_relevant_chunk_ids"] == ["s1c2"]
 
 
 def test_distill_web_policy_bank_extracts_web_behaviors(tmp_path):
@@ -1958,6 +2079,8 @@ def test_distill_web_policy_bank_extracts_web_behaviors(tmp_path):
                 "improvement_delta": 1.0,
                 "teacher_coaching": "Suggest they visit the weather.com link you found for current conditions.",
                 "rescue_why_better": "Acknowledges the limitation while being more helpful by directing the user to the specific weather.com page.",
+                "question_type": "weather_precipitation",
+                "needed_fields": ["target_place", "target_period", "precipitation_chance", "rain_condition"],
                 "promotion_notes": [
                     "Directs user to found weather source",
                     "More helpful than just stating limitation",
@@ -1979,6 +2102,7 @@ def test_distill_web_policy_bank_extracts_web_behaviors(tmp_path):
     assert report["rows_used"] == 1
     assert "direct_to_found_source" in priors["behaviors"]
     assert "offer_actionable_next_step" in priors["behaviors"]
+    assert "extract_weather_fact" in priors["behaviors"]
 
 
 def test_resolve_web_answer_applies_policy_priors_to_limitation(monkeypatch):
