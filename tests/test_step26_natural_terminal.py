@@ -82,6 +82,28 @@ def test_terminal_heuristic_plan_builds_search_urls_for_look_up_phrase():
     assert plan.actions[0].resolved_target == "https://www.youtube.com/results?search_query=nine+vicious"
 
 
+def test_terminal_heuristic_plan_builds_bounded_web_answer_for_news():
+    plan = build_terminal_plan(
+        prompt="what's happening in the news about AI agents today?",
+        heuristic_only=True,
+    )
+
+    assert plan.source == "heuristic"
+    assert [action.kind for action in plan.actions] == ["browser_answer_query"]
+    assert plan.actions[0].resolved_target == "ai agents news today"
+
+
+def test_terminal_heuristic_plan_builds_bounded_web_answer_for_weather():
+    plan = build_terminal_plan(
+        prompt="what's the weather today in minneapolis",
+        heuristic_only=True,
+    )
+
+    assert plan.source == "heuristic"
+    assert [action.kind for action in plan.actions] == ["browser_answer_query"]
+    assert plan.actions[0].resolved_target == "weather today minneapolis"
+
+
 def test_terminal_heuristic_plan_handles_noisy_click_first_video_follow_up():
     browser_state = BrowserSessionState(
         current_url="https://www.youtube.com/results?search_query=nine+vicious",
@@ -1408,6 +1430,28 @@ def test_fetch_search_result_urls_uses_github_api_first(monkeypatch):
     ]
 
 
+def test_fetch_search_result_urls_uses_web_backend_for_google(monkeypatch):
+    def fake_fetch(url: str, *, accept: str = "text/html") -> str:
+        assert "html.duckduckgo.com/html/" in url
+        return """
+        <html>
+          <body>
+            <a class="result__a" href="https://example.com/ai-agents-news">AI agents today</a>
+            <a class="result__a" href="https://example.com/weather-minneapolis">Weather</a>
+          </body>
+        </html>
+        """
+
+    monkeypatch.setattr("memory_system.natural_terminal._fetch_url_text", fake_fetch)
+
+    results = _fetch_search_result_urls("google", "ai agents news today", limit=2)
+
+    assert results == [
+        "https://example.com/ai-agents-news",
+        "https://example.com/weather-minneapolis",
+    ]
+
+
 def test_terminal_execute_plan_reads_current_repo_page(monkeypatch, tmp_path):
     state_path = tmp_path / "browser_state.json"
     save_browser_session_state(
@@ -1456,6 +1500,58 @@ def test_terminal_execute_plan_reads_current_repo_page(monkeypatch, tmp_path):
     assert result.records[0].details["forks"] == "11.2k"
     assert "Repo summary:" in result.records[0].message
     assert "language C++" in result.records[0].message
+
+
+def test_terminal_execute_plan_answers_bounded_web_query(monkeypatch, tmp_path):
+    state_path = tmp_path / "browser_state.json"
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._fetch_search_result_cards",
+        lambda engine, query, limit=5: [
+            {
+                "index": 1,
+                "title": "AI agents today",
+                "url": "https://example.com/ai-agents",
+                "summary": "AI agents are getting more capable across coding and commerce workflows.",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "memory_system.natural_terminal._fetch_page_html",
+        lambda url: """
+        <html>
+          <head>
+            <title>AI agents today</title>
+            <meta name="description" content="AI agents are getting more capable across coding and commerce workflows." />
+          </head>
+        </html>
+        """,
+    )
+
+    plan = TerminalPlan(
+        prompt="what's happening in the news about AI agents today?",
+        source="heuristic",
+        actions=[
+            TerminalAction(
+                kind="browser_answer_query",
+                target="ai agents news today",
+                resolved_target="ai agents news today",
+                note=json.dumps(
+                    {
+                        "goal": "what's happening in the news about AI agents today?",
+                        "query": "ai agents news today",
+                    }
+                ),
+            )
+        ],
+    )
+
+    result = execute_terminal_plan(plan, platform_name="linux", state_path=state_path)
+
+    assert result.ok is True
+    assert result.records[0].status == "ok"
+    assert "AI agents are getting more capable" in result.records[0].message
+    assert result.browser_state["current_url"] == "https://example.com/ai-agents"
+    assert result.browser_state["search_query"] == "ai agents news today"
 
 
 def test_terminal_execute_plan_ranks_and_compares_cards():

@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 from typing import Any
-from urllib.parse import quote_plus
+from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 from urllib import request as urllib_request
 from urllib.error import URLError
 
@@ -26,6 +26,7 @@ from .ollama_client import ChatMessage, UniversalLLMClient
 SUPPORTED_ACTION_KINDS = {
     "launch_app",
     "open_url",
+    "browser_answer_query",
     "browser_new_tab",
     "browser_close_tab",
     "browser_switch_tab",
@@ -853,6 +854,77 @@ def _search_url(engine: str, query: str) -> str:
     return ""
 
 
+def _web_backend_search_url(query: str) -> str:
+    clean_query = " ".join(str(query or "").strip().split())
+    if not clean_query:
+        return ""
+    return f"https://html.duckduckgo.com/html/?q={quote_plus(clean_query)}"
+
+
+def _decode_search_result_href(raw: str) -> str:
+    text = _html_unescape(str(raw or "").strip())
+    if not text:
+        return ""
+    if text.startswith("//"):
+        text = f"https:{text}"
+    parsed = urlparse(text)
+    if "duckduckgo.com" in parsed.netloc.lower():
+        query = parse_qs(parsed.query)
+        uddg = query.get("uddg") or []
+        if uddg:
+            return unquote(str(uddg[0] or "").strip())
+    if parsed.path == "/url":
+        query = parse_qs(parsed.query)
+        target = query.get("q") or []
+        if target:
+            return unquote(str(target[0] or "").strip())
+    return text if _normalize_url(text) else ""
+
+
+def _fetch_web_search_cards(query: str, *, limit: int = 5) -> list[dict[str, Any]]:
+    html = _fetch_url_text(_web_backend_search_url(query))
+    cards: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    pattern = re.compile(
+        r'(?is)<a(?=[^>]*class="[^"]*result__a[^"]*")(?=[^>]*href="([^"]+)")[^>]*>(.*?)</a>(.*?)(?=<a(?=[^>]*class="[^"]*result__a[^"]*")|$)'
+    )
+    for match in pattern.finditer(html):
+        url = _decode_search_result_href(match.group(1))
+        if not url or url.lower() in seen:
+            continue
+        seen.add(url.lower())
+        title = _strip_html(match.group(2))
+        tail = str(match.group(3) or "")
+        snippet_match = re.search(r'(?is)class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</', tail)
+        snippet = _strip_html(snippet_match.group(1)) if snippet_match else ""
+        cards.append(
+            {
+                "index": len(cards) + 1,
+                "title": title or _preview_label_for_url(url) or url,
+                "url": url,
+                "summary": snippet,
+            }
+        )
+        if len(cards) >= limit:
+            break
+    return cards
+
+
+def _fetch_web_search_result_urls(query: str, *, limit: int = 5) -> list[str]:
+    html = _fetch_url_text(_web_backend_search_url(query))
+    results: list[str] = []
+    seen: set[str] = set()
+    for match in re.findall(r'(?is)<a(?=[^>]*class="[^"]*result__a[^"]*")(?=[^>]*href="([^"]+)")[^>]*>', html):
+        url = _decode_search_result_href(match)
+        if not url or url.lower() in seen:
+            continue
+        seen.add(url.lower())
+        results.append(url)
+        if len(results) >= limit:
+            break
+    return results[:limit]
+
+
 def _html_unescape(text: str) -> str:
     clean = str(text or "")
     return (
@@ -1014,6 +1086,80 @@ def _wants_browser_read(prompt: str) -> bool:
     verb_hit = any(token in normalized for token in {"read", "summarize", "summarise", "extract"})
     noun_hit = any(token in normalized for token in {"page", "repo", "repository", "post", "video"})
     return page_phrase_hit or (verb_hit and noun_hit)
+
+
+def _general_web_query_from_prompt(prompt: str) -> str:
+    normalized = " ".join(_normalize_goal_text(prompt).split()).strip(" ?.!")
+    if not normalized:
+        return ""
+    news_match = re.search(r"\b(?:what(?: s| is)?\s+happening\s+in\s+the\s+news\s+about|news\s+about)\s+(.+?)(?:\s+today)?$", normalized)
+    if news_match:
+        topic = str(news_match.group(1) or "").strip()
+        if topic:
+            return f"{topic} news today"
+    weather_match = re.search(r"\bweather(?:\s+today)?(?:\s+in\s+|\s+for\s+)(.+)$", normalized)
+    if weather_match:
+        location = str(weather_match.group(1) or "").strip()
+        if location:
+            return f"weather today {location}"
+    return normalized
+
+
+def _looks_like_general_web_question(prompt: str) -> bool:
+    normalized = _intent_text(prompt)
+    if not normalized:
+        return False
+    if any(
+        token in normalized
+        for token in {
+            "open ",
+            "click ",
+            "launch ",
+            "search ",
+            "watch ",
+            "play ",
+            "type ",
+            "submit",
+            "go back",
+            "go forward",
+            "scroll ",
+            "close tab",
+        }
+    ):
+        return False
+    question_start = bool(
+        re.match(
+            r"^(?:what|who|when|where|why|how|which)\b",
+            normalized,
+        )
+    )
+    info_signals = {
+        "news",
+        "weather",
+        "forecast",
+        "latest",
+        "today",
+        "currently",
+        "happening",
+        "changed",
+        "release",
+        "tell me about",
+    }
+    return question_start or "?" in str(prompt or "") or any(signal in normalized for signal in info_signals)
+
+
+def _general_web_answer_action(prompt: str) -> TerminalAction | None:
+    if not _looks_like_general_web_question(prompt):
+        return None
+    query = _general_web_query_from_prompt(prompt)
+    if not query:
+        return None
+    return TerminalAction(
+        kind="browser_answer_query",
+        target=query,
+        resolved_target=query,
+        note=_encode_action_note({"goal": str(prompt or "").strip(), "query": query, "engine": "web"}),
+    )
 
 
 def _cached_cards(browser_state: BrowserSessionState) -> list[dict[str, Any]]:
@@ -2216,6 +2362,10 @@ def _heuristic_plan(prompt: str, *, browser_state: BrowserSessionState | None = 
             if topic in normalized and any(token in normalized for token in {"show", "check", "status", "usage", "what s", "what is"}):
                 actions.append(TerminalAction(kind="system_info", target=topic, resolved_target=topic))
                 break
+    if not actions:
+        web_answer = _general_web_answer_action(prompt)
+        if web_answer is not None:
+            actions.append(web_answer)
 
     if not actions:
         return None
@@ -2279,7 +2429,7 @@ def _llm_prompt(prompt: str, *, browser_state: BrowserSessionState | None = None
                 "use open_search_result or browser_click_index with a 1-based result index, browser_click_text for a known visible label, "
                 "browser_read_page/browser_extract_page for reading the current page, browser_extract_cards for current result cards, "
                 "browser_rank_cards for ranking current cached cards against a goal, browser_compare_cards for comparing cached cards against a goal, browser_search_subject for searching another site about the active subject, browser_retry_subject_result for reopening a stronger cached result, "
-                "browser_synthesize_evidence for choosing the best current source from accumulated evidence, "
+                "browser_synthesize_evidence for choosing the best current source from accumulated evidence, browser_answer_query for bounded live web questions, "
                 "browser_new_tab/browser_close_tab/browser_switch_tab for tab control, browser_back/browser_forward/browser_scroll/browser_type_text/browser_submit/browser_wait/browser_screenshot for browser control, "
                 "or browser_media_* when appropriate."
             )
@@ -2291,7 +2441,7 @@ def _llm_prompt(prompt: str, *, browser_state: BrowserSessionState | None = None
             role="system",
             content=(
                 "You translate natural terminal requests into a tiny safe JSON action plan.\n"
-                "Allowed action kinds: launch_app, open_url, browser_new_tab, browser_close_tab, browser_switch_tab, open_search_result, browser_click_index, browser_click_text, browser_read_page, browser_extract_page, browser_extract_cards, browser_rank_cards, browser_compare_cards, browser_search_subject, browser_retry_subject_result, browser_synthesize_evidence, open_path, browser_back, browser_forward, browser_scroll, browser_type_text, browser_submit, browser_wait, browser_screenshot, browser_media_pause, browser_media_play, list_directory, system_info, unsupported.\n"
+                "Allowed action kinds: launch_app, open_url, browser_answer_query, browser_new_tab, browser_close_tab, browser_switch_tab, open_search_result, browser_click_index, browser_click_text, browser_read_page, browser_extract_page, browser_extract_cards, browser_rank_cards, browser_compare_cards, browser_search_subject, browser_retry_subject_result, browser_synthesize_evidence, open_path, browser_back, browser_forward, browser_scroll, browser_type_text, browser_submit, browser_wait, browser_screenshot, browser_media_pause, browser_media_play, list_directory, system_info, unsupported.\n"
                 f"Allowed app ids: {app_ids}.\n"
                 f"Allowed path ids: {path_ids}.\n"
                 f"Allowed system_info targets: {topics}.\n"
@@ -2376,6 +2526,10 @@ def _language_llm_prompt(prompt: str, *, browser_state: BrowserSessionState | No
             "user": "tell me which source best explains what this repo is for",
             "assistant": {"actions": [{"kind": "browser_synthesize_evidence", "target": "what this repo is for"}], "needs_confirmation": False, "clarification": ""},
         },
+        {
+            "user": "what's happening in the news about ai agents today?",
+            "assistant": {"actions": [{"kind": "browser_answer_query", "target": "ai agents news today"}], "needs_confirmation": False, "clarification": ""},
+        },
     ]
     example_lines = []
     for example in examples:
@@ -2391,7 +2545,7 @@ def _language_llm_prompt(prompt: str, *, browser_state: BrowserSessionState | No
                 "Prefer canonical actions over free-form behavior.\n"
                 "If the wording is messy but the intent is recoverable, compile it.\n"
                 "If the request is still ambiguous or unsupported, return a single unsupported action with a short clarification.\n"
-                "Allowed action kinds: launch_app, open_url, browser_new_tab, browser_close_tab, browser_switch_tab, open_search_result, browser_click_index, browser_click_text, browser_read_page, browser_extract_page, browser_extract_cards, browser_rank_cards, browser_compare_cards, browser_search_subject, browser_retry_subject_result, browser_synthesize_evidence, open_path, browser_back, browser_forward, browser_scroll, browser_type_text, browser_submit, browser_wait, browser_screenshot, browser_media_pause, browser_media_play, list_directory, system_info, unsupported.\n"
+                "Allowed action kinds: launch_app, open_url, browser_answer_query, browser_new_tab, browser_close_tab, browser_switch_tab, open_search_result, browser_click_index, browser_click_text, browser_read_page, browser_extract_page, browser_extract_cards, browser_rank_cards, browser_compare_cards, browser_search_subject, browser_retry_subject_result, browser_synthesize_evidence, open_path, browser_back, browser_forward, browser_scroll, browser_type_text, browser_submit, browser_wait, browser_screenshot, browser_media_pause, browser_media_play, list_directory, system_info, unsupported.\n"
                 f"Allowed app ids: {app_ids}.\n"
                 f"Allowed path ids: {path_ids}.\n"
                 f"Allowed system_info targets: {topics}.\n"
@@ -2401,6 +2555,7 @@ def _language_llm_prompt(prompt: str, *, browser_state: BrowserSessionState | No
                 "- use browser_rank_cards or browser_compare_cards only when the user is judging current search cards\n"
                 "- use browser_retry_subject_result when the user wants a better follow-on result because the first one is weak/off-topic\n"
                 "- use browser_synthesize_evidence when the user asks which source best explains something across already-read sources\n"
+                "- use browser_answer_query for bounded live web questions like news, weather, latest changes, or factual lookups that need current web retrieval\n"
                 "- use open_url with a full URL only for direct page opens or direct site searches\n"
                 "- if a normalized translation surface is provided, use it as the main intent signal and only use the raw wording for nuance\n"
                 f"{context_block}"
@@ -2455,6 +2610,8 @@ def _validate_language_actions(
     for action in actions:
         if action.kind == "unsupported":
             return True, []
+        if action.kind == "browser_answer_query":
+            continue
         if action.kind in {"browser_rank_cards", "browser_compare_cards"}:
             if state.page_kind != "search_results" or not _cached_cards(state):
                 return False, ["browser_state_missing_search_results"]
@@ -3086,6 +3243,18 @@ def _normalize_model_actions(payload: dict[str, Any]) -> list[TerminalAction]:
         if kind == "browser_read_page":
             actions.append(TerminalAction(kind=kind, target=target, resolved_target=target or "current_page"))
             continue
+        if kind == "browser_answer_query":
+            query = " ".join(str(target or "").split()).strip()
+            if query:
+                actions.append(
+                    TerminalAction(
+                        kind=kind,
+                        target=query,
+                        resolved_target=query,
+                        note=_encode_action_note({"goal": query, "query": query, "engine": "web"}),
+                    )
+                )
+            continue
         if kind in {"browser_extract_page", "browser_extract_cards", "browser_screenshot"}:
             actions.append(TerminalAction(kind=kind, target=target, resolved_target=target or "current_page"))
             continue
@@ -3219,6 +3388,8 @@ def _action_signature(action: TerminalAction) -> str:
         return f"{kind}:{app_key or _normalize_label(action.resolved_target or action.target)}"
     if kind == "browser_read_page":
         return f"{kind}:{_normalize_label(action.resolved_target or action.target or 'current_page')}"
+    if kind == "browser_answer_query":
+        return f"{kind}:{_normalize_label(action.resolved_target or action.target)}"
     if kind in {"browser_extract_page", "browser_extract_cards", "browser_screenshot"}:
         return f"{kind}:{_normalize_label(action.resolved_target or action.target or 'current_page')}"
     if kind == "browser_rank_cards":
@@ -3248,6 +3419,8 @@ def _autonomy_memory_kind_from_actions(actions: list[TerminalAction]) -> str:
     kinds = [str(action.kind or "").strip() for action in actions]
     if not kinds:
         return ""
+    if "browser_answer_query" in kinds:
+        return "autonomy_web_answer"
     if "browser_synthesize_evidence" in kinds:
         return "autonomy_evidence_synthesis"
     if "browser_search_subject" in kinds:
@@ -3714,6 +3887,10 @@ def _fetch_github_search_cards(query: str, *, limit: int = 5) -> list[dict[str, 
 
 def _fetch_search_result_cards(engine: str, query: str, *, limit: int = 5) -> list[dict[str, Any]]:
     normalized_engine = _normalize_label(engine)
+    if normalized_engine in {"google", "web"}:
+        cards = _fetch_web_search_cards(query, limit=limit)
+        if cards:
+            return cards
     if normalized_engine == "github":
         cards = _fetch_github_search_cards(query, limit=limit)
         if cards:
@@ -3734,6 +3911,10 @@ def _fetch_search_result_urls(engine: str, query: str, *, limit: int = 5) -> lis
         results.append(clean)
 
     normalized_engine = _normalize_label(engine)
+    if normalized_engine in {"google", "web"}:
+        web_results = _fetch_web_search_result_urls(query, limit=limit)
+        if web_results:
+            return web_results[:limit]
     if normalized_engine == "github":
         api_results = _fetch_github_search_result_urls(query, limit=limit)
         if api_results:
@@ -3858,6 +4039,74 @@ def _browser_read_message(details: dict[str, Any], current_url: str) -> str:
             return "Repo summary: " + ". ".join(parts)
     summary = str(details.get("summary") or details.get("title") or current_url).strip()
     return f"Read current page: {summary}"
+
+
+def _best_web_answer_summary(*, prompt: str, card: dict[str, Any], details: dict[str, Any]) -> str:
+    summary_candidates = [
+        str(details.get("summary") or "").strip(),
+        str(card.get("summary") or "").strip(),
+        str(details.get("description") or "").strip(),
+        str(details.get("title") or "").strip(),
+        str(card.get("title") or "").strip(),
+    ]
+    answer = next((item for item in summary_candidates if item), "")
+    source_title = str(details.get("title") or card.get("title") or "").strip()
+    if not answer:
+        return ""
+    if source_title and source_title not in answer:
+        return f"{answer} Source: {source_title}"
+    return answer
+
+
+def _resolve_web_answer(
+    *,
+    prompt: str,
+    query: str,
+    limit: int = 5,
+) -> dict[str, Any]:
+    cards = _fetch_search_result_cards("web", query, limit=limit)
+    if not cards:
+        urls = _fetch_search_result_urls("web", query, limit=limit)
+        cards = _fallback_cards_from_urls(urls[:limit])
+    best_card: dict[str, Any] = dict(cards[0]) if cards else {}
+    best_details: dict[str, Any] = {}
+    answer = ""
+    for card in cards[:3]:
+        url = str(card.get("url") or "").strip()
+        if not url:
+            continue
+        try:
+            html = _fetch_page_html(url)
+            details = _extract_page_snapshot(_browser_state_for_url(url, search_engine="web", search_query=query), html)
+        except Exception:
+            details = {
+                "url": url,
+                "page_kind": _browser_state_for_url(url).page_kind or "web_page",
+                "title": str(card.get("title") or url).strip(),
+                "summary": str(card.get("summary") or card.get("title") or url).strip(),
+            }
+        summary = _best_web_answer_summary(prompt=prompt, card=card, details=details)
+        if not summary:
+            continue
+        best_card = dict(card)
+        best_details = dict(details)
+        answer = summary
+        break
+    if not answer and best_card:
+        best_details = {
+            "url": str(best_card.get("url") or "").strip(),
+            "page_kind": _browser_state_for_url(str(best_card.get("url") or "").strip()).page_kind or "web_page",
+            "title": str(best_card.get("title") or best_card.get("url") or "").strip(),
+            "summary": str(best_card.get("summary") or best_card.get("title") or best_card.get("url") or "").strip(),
+        }
+        answer = _best_web_answer_summary(prompt=prompt, card=best_card, details=best_details)
+    return {
+        "query": query,
+        "cards": cards,
+        "answer": answer,
+        "best_card": best_card,
+        "best_details": best_details,
+    }
 
 
 _SCOUT_NUMBER_WORDS = {
@@ -4557,6 +4806,83 @@ def execute_terminal_plan(
             app_key = _resolve_app_key(action.resolved_target or action.target)
             if _is_browser_app(app_key):
                 current_browser_state = _browser_state_copy(current_browser_state, browser_app=app_key)
+            continue
+        if action.kind == "browser_answer_query":
+            note_payload = _decode_action_note(action.note)
+            goal = str(note_payload.get("goal") or plan.prompt or "").strip()
+            query = str(note_payload.get("query") or action.resolved_target or action.target or goal).strip()
+            try:
+                answer_payload = _resolve_web_answer(prompt=goal or plan.prompt, query=query)
+            except Exception as exc:
+                residuals.append("browser_web_answer_failed")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message=f"Memla could not answer that web question yet: {str(exc).strip() or 'unknown error'}.",
+                    )
+                )
+                continue
+            answer = str(answer_payload.get("answer") or "").strip()
+            cards = [dict(item) for item in list(answer_payload.get("cards") or []) if isinstance(item, dict)]
+            best_card = dict(answer_payload.get("best_card") or {})
+            best_details = dict(answer_payload.get("best_details") or {})
+            best_url = str(best_details.get("url") or best_card.get("url") or "").strip()
+            if not answer:
+                residuals.append("browser_web_answer_missing")
+                records.append(
+                    TerminalExecutionRecord(
+                        kind=action.kind,
+                        target=action.target,
+                        status="failed",
+                        message="Memla could not resolve a strong web answer from the current query yet.",
+                        details={
+                            "goal": goal,
+                            "query": query,
+                            "top_results": cards,
+                        },
+                    )
+                )
+                continue
+            current_browser_state = BrowserSessionState(
+                current_url=best_url,
+                page_kind=str(best_details.get("page_kind") or _browser_state_for_url(best_url).page_kind or "web_page").strip(),
+                browser_app=current_browser_state.browser_app,
+                search_engine="web",
+                search_query=query,
+                result_urls=[str(card.get("url") or "").strip() for card in cards if str(card.get("url") or "").strip()],
+                result_cards=cards,
+                subject_title=str(best_details.get("title") or best_card.get("title") or "").strip(),
+                subject_url=best_url,
+                subject_summary=answer,
+                research_subject_title=goal,
+                evidence_items=_clone_evidence_items(current_browser_state.evidence_items),
+            )
+            current_browser_state = _append_browser_evidence(
+                current_browser_state,
+                _evidence_item_from_details(current_browser_state, best_details or {
+                    "url": best_url,
+                    "title": str(best_card.get("title") or best_url).strip(),
+                    "summary": answer,
+                    "page_kind": str(best_details.get("page_kind") or "web_page").strip(),
+                }),
+            )
+            records.append(
+                TerminalExecutionRecord(
+                    kind=action.kind,
+                    target=action.target,
+                    status="ok",
+                    message=answer,
+                    details={
+                        "goal": goal,
+                        "query": query,
+                        "best_source_title": str(best_details.get("title") or best_card.get("title") or "").strip(),
+                        "best_source_url": best_url,
+                        "top_results": cards,
+                    },
+                )
+            )
             continue
         if action.kind in {"open_url", "open_path"}:
             target = action.resolved_target or action.target
@@ -5875,6 +6201,10 @@ def _plan_label(plan: TerminalPlan) -> str:
         return f"Click card #{target or '1'}"
     if action.kind == "browser_click_text":
         return f"Click \"{target}\""
+    if action.kind == "browser_answer_query":
+        note = _decode_action_note(action.note)
+        goal = str(note.get("goal") or target).strip()
+        return f"Answer the web question \"{goal}\""
     if action.kind == "browser_read_page":
         return "Read the current page"
     if action.kind == "browser_extract_page":
@@ -6102,6 +6432,15 @@ def _candidate_preview_from_plan(plan: TerminalPlan, browser_state: BrowserSessi
         card = _resolve_card_by_text(browser_state, target)
         target_preview = str(card.get("title") or target or "matching card").strip()
         return target_preview, f"Open the visible card that matches \"{target}\".", []
+    if action.kind == "browser_answer_query":
+        note = _decode_action_note(action.note)
+        goal = str(note.get("goal") or target or plan.prompt).strip()
+        query = str(note.get("query") or target or goal).strip()
+        return (
+            goal or query or "web question",
+            f"Search the live web for \"{query}\" and return the strongest bounded answer with a source.",
+            ["answer", "best_source_title", "best_source_url", "top_results"],
+        )
     if action.kind == "browser_read_page":
         page_kind = str(browser_state.page_kind or "web_page").strip()
         current_target = browser_state.current_url or "current page"
