@@ -1037,7 +1037,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             }
             let readable = label ?? key.replacingOccurrences(of: "_", with: " ")
             let parts: [String]
-            if key == "modifiers" {
+            if key == "modifiers" || key == "toppings" || key == "add_ons" {
                 parts = raw
                     .replacingOccurrences(of: " and ", with: ",")
                     .components(separatedBy: CharacterSet(charactersIn: ",/+&"))
@@ -1063,7 +1063,10 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
 
         verifySlot("restaurant")
         verifySlot("item")
+        verifySlot("size")
         verifySlot("modifiers")
+        verifySlot("toppings")
+        verifySlot("add_ons", label: "add ons")
         verifySlot("tip")
         verifySlot("destination")
         verifySlot("pickup_time")
@@ -1587,15 +1590,19 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
                 weight = 8.0
             case "item", "service_class":
                 weight = 2.0
-            case "modifiers":
+            case "size":
+                weight = 1.7
+            case "modifiers", "toppings":
                 weight = 1.5
+            case "add_ons":
+                weight = 1.3
             case "service":
                 continue
             default:
                 weight = 1.0
             }
             let parts: [String]
-            if key == "modifiers" {
+            if key == "modifiers" || key == "toppings" || key == "add_ons" {
                 parts = cleanValue
                     .replacingOccurrences(of: " and ", with: ",")
                     .components(separatedBy: CharacterSet(charactersIn: ",/+&"))

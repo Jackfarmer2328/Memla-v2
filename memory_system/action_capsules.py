@@ -102,6 +102,66 @@ def _extract_between(prompt: str, start_pattern: str, stop_pattern: str) -> str:
     return _title_text(str(match.group(1) or "").strip(" .,"))
 
 
+_FOOD_SIZE_PATTERNS: list[tuple[str, str]] = [
+    (r"\bextra[\s-]?large\b", "Extra Large"),
+    (r"\bx[\s-]?large\b", "Extra Large"),
+    (r"\bxl\b", "Extra Large"),
+    (r"\blarge\b", "Large"),
+    (r"\bmedium\b", "Medium"),
+    (r"\bsmall\b", "Small"),
+    (r"\bpersonal(?:\s+size)?\b", "Personal"),
+    (r"\bfamily(?:\s+size)?\b", "Family Size"),
+]
+
+
+def _strip_food_leading_words(value: str) -> str:
+    return re.sub(r"^(?:me|the|a|an|some)\s+", "", _clean_text(value), flags=re.IGNORECASE).strip(" .,")
+
+
+def _extract_food_size(value: str) -> str:
+    for pattern, label in _FOOD_SIZE_PATTERNS:
+        if re.search(pattern, value, flags=re.IGNORECASE):
+            return label
+    return ""
+
+
+def _remove_food_size(value: str) -> str:
+    text = _clean_text(value)
+    for pattern, _label in _FOOD_SIZE_PATTERNS:
+        if re.search(pattern, text, flags=re.IGNORECASE):
+            text = re.sub(pattern, " ", text, count=1, flags=re.IGNORECASE)
+            break
+    return " ".join(text.split()).strip(" .,")
+
+
+def _clean_food_phrase(value: str) -> str:
+    text = _clean_text(value)
+    text = re.sub(r"\b(?:that's it|that is it|thats it|please)\b", "", text, flags=re.IGNORECASE)
+    return text.strip(" .,")
+
+
+def _split_food_list(value: str) -> list[str]:
+    text = _clean_food_phrase(value)
+    if not text:
+        return []
+    text = re.sub(r"\s*&\s*", " and ", text)
+    text = re.sub(r"\s*\+\s*", ", ", text)
+    raw_parts = re.split(r"\s*(?:,|/|\band\b)\s*", text, flags=re.IGNORECASE)
+    parts: list[str] = []
+    for part in raw_parts:
+        clean_part = _strip_food_leading_words(part)
+        if clean_part:
+            parts.append(_title_text(clean_part))
+    return parts
+
+
+def _food_list_display(value: str) -> str:
+    parts = _split_food_list(value)
+    if not parts:
+        return _title_text(_clean_food_phrase(value))
+    return ", ".join(parts)
+
+
 def _extract_food_slots(prompt: str) -> dict[str, str]:
     raw = _clean_text(prompt)
     normalized = _normalize_text(raw)
@@ -113,25 +173,44 @@ def _extract_food_slots(prompt: str) -> dict[str, str]:
     else:
         slots["service"] = "food delivery"
 
-    restaurant = _extract_between(raw, r"\bfrom\b", r"\b(?:with|make it|have|and|give|tip|for delivery|to)\b")
+    food_stop_pattern = r",|\b(?:from|with|make(?:\s+it|\s+the)?|have|add|and\s+add|give|tip|for delivery|to|top(?:\s+it)?(?:\s+with)?|toppings?)\b"
+    restaurant = _extract_between(raw, r"\bfrom\b", r",|\b(?:with|make(?:\s+it|\s+the)?|have|add|and\s+add|give|tip|for delivery|to|top(?:\s+it)?(?:\s+with)?|toppings?)\b")
     if restaurant and restaurant.lower() not in {"doordash", "uber eats"}:
         slots["restaurant"] = restaurant
 
-    item = _extract_between(raw, r"\b(?:get|order|want|buy|grab)\b", r"\b(?:from|with|make it|and|give|tip)\b")
+    item = _extract_between(raw, r"\b(?:get|order|want|buy|grab)\b", food_stop_pattern)
+    if not item:
+        item = _extract_between(raw, r"\b(?:doordash|uber eats)\b", food_stop_pattern)
     if item:
-        item = re.sub(r"^(?:me|a|an|some)\s+", "", item, flags=re.IGNORECASE).strip()
+        item = _strip_food_leading_words(item)
     if not item:
         known_items = ["pizza", "burger", "sushi", "taco", "tacos", "burrito", "wings", "salad", "food"]
         for known_item in known_items:
             if re.search(rf"\b{re.escape(known_item)}\b", normalized):
                 item = known_item
                 break
+    size = _extract_food_size(item or raw)
+    if size:
+        slots["size"] = size
+        item = _remove_food_size(item or "")
     if item:
         slots["item"] = _title_text(item)
 
-    modifiers = _extract_between(raw, r"\b(?:with|make it(?: have)?|have)\b", r"\b(?:and|give|tip)\b")
+    modifiers = _extract_between(raw, r"\b(?:with|make it(?: have)?|have)\b", r",|\b(?:and\s+add|give|tip|that's it|that is it|thats it|for delivery|to)\b")
     if modifiers:
-        slots["modifiers"] = modifiers
+        slots["modifiers"] = _food_list_display(modifiers)
+
+    toppings = _extract_between(raw, r"\b(?:make(?:\s+the)?\s+toppings?|toppings?|top(?:\s+it)?(?:\s+with)?)\b", r",|\b(?:and\s+add|give|tip|that's it|that is it|thats it|for delivery|to)\b")
+    if not toppings and item and re.search(r"\bpizza\b", item, flags=re.IGNORECASE) and modifiers:
+        toppings = modifiers
+    if toppings:
+        toppings_display = _food_list_display(toppings)
+        slots["toppings"] = toppings_display
+        slots["modifiers"] = toppings_display
+
+    add_ons = _extract_between(raw, r"\badd\b", r"\b(?:give|tip|that's it|that is it|thats it|for delivery|to)\b")
+    if add_ons:
+        slots["add_ons"] = _food_list_display(add_ons)
 
     tip_match = re.search(r"(?:\$([0-9]+(?:\.[0-9]{1,2})?)\s*(?:tip)?|tip(?:\s+the\s+dasher)?\s+\$?([0-9]+(?:\.[0-9]{1,2})?))", raw, flags=re.IGNORECASE)
     if tip_match:

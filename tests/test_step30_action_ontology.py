@@ -80,6 +80,7 @@ def test_action_capsule_v1_structures_food_orders_but_blocks_autosubmit():
     assert capsule.auto_submit_allowed is False
     assert capsule.slots["service"] == "DoorDash"
     assert capsule.slots["item"] == "pizza"
+    assert capsule.slots["toppings"] == "pepperoni"
     assert capsule.slots["tip"] == "$6"
     assert [option.label for option in capsule.bridge_options] == ["Open DoorDash App", "Open DoorDash Web", "Search Web"]
     assert capsule.bridge_options[1].kind == "in_app_web"
@@ -95,5 +96,22 @@ def test_action_capsule_v1_avoids_duplicate_item_when_restaurant_contains_item()
     assert capsule.slots["restaurant"] == "Tony's pizza"
     assert capsule.slots["item"] == "pizza"
     assert capsule.slots["modifiers"] == "cheese"
+    assert capsule.slots["toppings"] == "cheese"
     assert "Tony%27s%20pizza%20pizza" not in capsule.bridge_options[0].url
     assert "Tony%27s%20pizza" in capsule.bridge_options[0].url
+
+
+def test_action_capsule_v1_extracts_size_toppings_and_add_ons_from_food_prompt():
+    capsule = create_action_capsule(
+        "DoorDash a large cheese pizza from Domino's, make the toppings chicken and pineapple, and add a coke"
+    )
+
+    assert capsule.action_id == "food_order_quote"
+    assert capsule.slots["service"] == "DoorDash"
+    assert capsule.slots["restaurant"] == "Domino's"
+    assert capsule.slots["item"] == "cheese pizza"
+    assert capsule.slots["size"] == "Large"
+    assert capsule.slots["toppings"] == "chicken, pineapple"
+    assert capsule.slots["modifiers"] == "chicken, pineapple"
+    assert capsule.slots["add_ons"] == "coke"
+    assert "Domino%27s%20cheese%20pizza" in capsule.bridge_options[0].url
