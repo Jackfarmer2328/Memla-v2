@@ -3577,10 +3577,10 @@ struct MemlaBrowserView: View {
             }
         case "dd_item_modal":
             switch role {
+            case "dd_modifier_save":
+                return 110
             case "dd_modifier_option":
                 return 100
-            case "dd_modifier_save":
-                return 92
             case "dd_add_to_cart":
                 return 85
             case "dd_cart_cta":
@@ -3805,7 +3805,7 @@ struct MemlaBrowserView: View {
     }
 
     private func mirrorItemCandidates(for state: WebsiteC2AState) -> [WebsiteC2ACandidate] {
-        let itemRoles = Set(["store_link", "menu_item", "dd_store_card", "dd_item_card", "dd_modifier_option", "ue_store_card", "ue_item_card", "ub_vehicle_option"])
+        let itemRoles = Set(["store_link", "menu_item", "dd_store_card", "dd_item_card", "dd_modifier_option", "dd_modifier_save", "ue_store_card", "ue_item_card", "ub_vehicle_option"])
         let filtered = mirrorSectionCandidates(for: state, allowedRoles: itemRoles)
         return filtered.isEmpty ? mirrorSectionCandidates(for: state) : filtered
     }
@@ -3861,7 +3861,7 @@ struct MemlaBrowserView: View {
         case "dd_storefront":
             return "Menu Items"
         case "dd_item_modal":
-            return "Customizer Options"
+            return "Customizer Steps"
         case "dd_cart_drawer":
             return "Cart Signals"
         case "dd_checkout":
