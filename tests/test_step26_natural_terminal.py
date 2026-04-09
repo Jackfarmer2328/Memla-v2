@@ -19,6 +19,8 @@ from memory_system.natural_terminal import (
     _browser_new_tab_command,
     _compiler_surface_text,
     _extract_google_ai_overview_from_html,
+    _extract_google_featured_snippet_from_html,
+    _extract_google_role_holder_answer_from_html,
     _extract_google_weather_answer_from_html,
     _language_rule_plan,
     _hard_check_web_answer,
@@ -2049,6 +2051,48 @@ def test_extract_google_weather_answer_from_html_answers_precipitation_question(
     assert payload["answer"].startswith("No, it doesn't look like rain tomorrow in Minneapolis, MN.")
     assert "0% precipitation chance" in payload["answer"]
     assert payload["source_cards"][0]["url"] == "https://www.mprnews.org/weather"
+
+
+def test_extract_google_role_holder_answer_from_html_parses_breadcrumb_answer():
+    html = """
+    <html>
+      <body>
+        <div>
+          AI Overview Sam Altman is the CEO of OpenAI.
+          Explore more OpenAI › CEO Sam Altman Nov 29, 2023
+        </div>
+        <a href="https://en.wikipedia.org/wiki/Sam_Altman">Wikipedia</a>
+      </body>
+    </html>
+    """
+
+    payload = _extract_google_role_holder_answer_from_html(
+        html,
+        query="who is the ceo of openai",
+    )
+
+    assert payload["answer_kind"] == "google_role_holder"
+    assert payload["answer"] == "Sam Altman is the CEO of OpenAI."
+    assert payload["source_cards"][0]["url"] == "https://en.wikipedia.org/wiki/Sam_Altman"
+
+
+def test_extract_google_featured_snippet_rejects_article_teaser_for_creator_query():
+    html = """
+    <html>
+      <body>
+        <div class="hgKElc">
+          The light bulb literally brightened the whole world and changed history forever.
+        </div>
+      </body>
+    </html>
+    """
+
+    payload = _extract_google_featured_snippet_from_html(
+        html,
+        query="who invented the light bulb and how old were they",
+    )
+
+    assert payload == {}
 
 
 def test_resolve_web_answer_prefers_google_answer_surface(monkeypatch):

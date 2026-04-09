@@ -1220,15 +1220,81 @@ def _extract_google_weather_answer_from_html(html: str, *, query: str = "") -> d
     }
 
 
+def _extract_google_role_holder_answer_from_html(html: str, *, query: str = "") -> dict[str, Any]:
+    requirements = _web_answer_requirements(query, query, _web_question_slice(query, query))
+    if str(requirements.get("question_type") or "").strip() != "role_holder":
+        return {}
+    clean = _normalize_google_surface_text(_strip_html(html))
+    if not clean:
+        return {}
+    breadcrumb_match = re.search(
+        r"\b([A-Z][A-Za-z0-9&'-]+(?:\s+[A-Z][A-Za-z0-9&'-]+){0,4})\s*(?:›|>|/)\s*(CEO|Chief Executive Officer|President)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\b",
+        clean,
+    )
+    if not breadcrumb_match:
+        return {}
+    organization = " ".join(breadcrumb_match.group(1).split()).strip()
+    role = " ".join(breadcrumb_match.group(2).split()).strip()
+    person = " ".join(breadcrumb_match.group(3).split()).strip()
+    person_tokens = person.split()
+    trailing_noise = {
+        "jan",
+        "january",
+        "feb",
+        "february",
+        "mar",
+        "march",
+        "apr",
+        "april",
+        "may",
+        "jun",
+        "june",
+        "jul",
+        "july",
+        "aug",
+        "august",
+        "sep",
+        "sept",
+        "september",
+        "oct",
+        "october",
+        "nov",
+        "november",
+        "dec",
+        "december",
+    }
+    while person_tokens and (
+        person_tokens[-1].lower().rstrip(".,") in trailing_noise
+        or re.fullmatch(r"\d{1,4}[.,]?", person_tokens[-1])
+    ):
+        person_tokens.pop()
+    person = " ".join(person_tokens).strip()
+    answer = f"{person} is the {role} of {organization}."
+    if _answer_fails_question_type(answer, "role_holder"):
+        return {}
+    window_start = max(breadcrumb_match.start() - 400, 0)
+    window_end = breadcrumb_match.end() + 1600
+    window = str(html or "")[window_start:window_end]
+    return {
+        "answer": answer,
+        "answer_kind": "google_role_holder",
+        "source_cards": _extract_external_links_from_html(window, limit=3),
+    }
+
+
 def _extract_google_featured_snippet_from_html(html: str, *, query: str = "") -> dict[str, Any]:
+    requirements = _web_answer_requirements(query, query, _web_question_slice(query, query))
+    question_type = str(requirements.get("question_type") or "").strip()
     patterns = (
         r'(?is)<div[^>]*data-attrid="wa:/description"[^>]*>(.*?)</div>',
-        r'(?is)<div[^>]*class="[^"]*(?:hgKElc|IZ6rdc|yXK7lf|e24Kjd|ILfuVd|kno-rdesc)[^"]*"[^>]*>(.*?)</div>',
+        r'(?is)<div[^>]*class="[^"]*\bkno-rdesc\b[^"]*"[^>]*>(.*?)</div>',
     )
     for pattern in patterns:
         for raw in re.findall(pattern, str(html or "")):
             answer = _clean_google_answer_text(raw, answer_kind="google_featured_snippet")
             if not answer or _looks_like_low_signal_web_text(answer):
+                continue
+            if _answer_fails_question_type(answer, question_type):
                 continue
             window = raw if isinstance(raw, str) else str(raw)
             return {
@@ -1253,7 +1319,13 @@ def _fetch_google_answer_surface(query: str) -> dict[str, Any]:
         for token in ("weather", "forecast", "rain", "raining", "snow", "humidity", "temperature", "hot", "cold")
     ):
         extractors.append(_extract_google_weather_answer_from_html)
-    extractors.extend((_extract_google_ai_overview_from_html, _extract_google_featured_snippet_from_html))
+    extractors.extend(
+        (
+            _extract_google_role_holder_answer_from_html,
+            _extract_google_ai_overview_from_html,
+            _extract_google_featured_snippet_from_html,
+        )
+    )
     for extractor in extractors:
         payload = extractor(html, query=query)
         if payload:
@@ -1325,6 +1397,18 @@ def _normalize_google_surface_text(text: str) -> str:
         "â€¦": "...",
     }
     for needle, value in replacements.items():
+        clean = clean.replace(needle, value)
+    for needle, value in (
+        ("Â°", "°"),
+        ("â€¢", " • "),
+        ("â€“", " - "),
+        ("â€”", " - "),
+        ("â€º", " › "),
+        ("â€™", "'"),
+        ("â€œ", '"'),
+        ("â€", '"'),
+        ("â€¦", "..."),
+    ):
         clean = clean.replace(needle, value)
     return " ".join(clean.split()).strip()
 
@@ -1511,6 +1595,24 @@ def _looks_like_web_caption_or_headline(text: str) -> bool:
         r"\bwhat the source covers\b",
     )
     return any(re.search(pattern, normalized) for pattern in caption_patterns)
+
+
+def _answer_fails_question_type(answer: str, question_type: str) -> bool:
+    clean = " ".join(str(answer or "").split()).strip()
+    if not clean:
+        return True
+    normalized = _normalize_goal_text(clean)
+    normalized_question_type = str(question_type or "").strip().lower()
+    if normalized_question_type in {"creator_identity", "derived_age_at_event"} and _looks_like_web_caption_or_headline(clean):
+        return True
+    if normalized_question_type == "role_holder":
+        if _looks_like_web_caption_or_headline(clean):
+            return True
+        if not _has_name_like_fact_signal(clean, []):
+            return True
+        if not any(token in normalized for token in ("ceo", "chief executive", "president", "founder", "leader")):
+            return True
+    return False
 
 
 def _has_name_like_fact_signal(answer: str, extracted_facts: list[str]) -> bool:
@@ -4981,7 +5083,7 @@ def _render_memla_web_answer(
     follow_up = ""
     direct_lower = direct.lower()
     source_lower = clean_source.lower()
-    if str(source_kind or "").strip() in {"google_ai_overview", "google_featured_snippet", "google_answer_box", "google_weather"}:
+    if str(source_kind or "").strip() in {"google_ai_overview", "google_featured_snippet", "google_answer_box", "google_weather", "google_role_holder"}:
         follow_up = ""
     elif clean_source and source_lower not in direct_lower:
         if slice_kind == "news":
@@ -5140,7 +5242,7 @@ def _apply_web_policy_priors(
     return " ".join(part.strip() for part in parts if part.strip()).strip()
 
 
-def _web_answer_needs_model_rescue(slice_kind: str, answer: str) -> bool:
+def _web_answer_needs_model_rescue(slice_kind: str, answer: str, *, question_type: str = "") -> bool:
     clean = " ".join(str(answer or "").split()).strip()
     if not clean:
         return True
@@ -5148,6 +5250,8 @@ def _web_answer_needs_model_rescue(slice_kind: str, answer: str) -> bool:
     if len(clean) < 32:
         return True
     if _looks_like_low_signal_web_text(clean):
+        return True
+    if _answer_fails_question_type(clean, question_type):
         return True
     if slice_kind == "weather":
         return not bool(re.search(r"\b\d{1,3}\b", clean))
@@ -5465,7 +5569,11 @@ def _resolve_web_answer(
     missing_fields: list[str] = []
     resolved_question_type = str(requirements.get("question_type") or slice_kind).strip()
     if client is not None and model and evidence_items:
-        should_attempt_model = _web_answer_needs_model_rescue(slice_kind, answer)
+        should_attempt_model = _web_answer_needs_model_rescue(
+            slice_kind,
+            answer,
+            question_type=resolved_question_type,
+        )
         if not google_surface_hit and slice_kind in {"fact", "news", "weather"}:
             should_attempt_model = True
         if should_attempt_model:
@@ -8989,7 +9097,7 @@ def _should_rescue_web_answer(
     overall = _web_teacher_overall(baseline_judgement)
     if overall and overall < max(int(rescue_threshold), 1):
         return True
-    return _web_answer_needs_model_rescue(slice_kind, answer)
+    return _web_answer_needs_model_rescue(slice_kind, answer, question_type=question_type)
 
 
 def _build_web_teacher_trace_row(row: dict[str, Any]) -> dict[str, Any]:
