@@ -3231,12 +3231,16 @@ struct MemlaBrowserView: View {
 
             if let capsule = route.capsule {
                 if !capsule.slots.isEmpty {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            ForEach(capsule.slots.keys.sorted(), id: \.self) { key in
-                                if let value = capsule.slots[key], !value.isEmpty {
-                                    capsuleChip(title: key.replacingOccurrences(of: "_", with: " ").capitalized, value: value)
-                                }
+                    VStack(alignment: .leading, spacing: 8) {
+                        if let commerceSummary = commerceIntentSummary(for: capsule), !commerceSummary.isEmpty {
+                            Text(commerceSummary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(3)
+                        }
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 132), spacing: 8, alignment: .leading)], alignment: .leading, spacing: 8) {
+                            ForEach(orderedCapsuleSlotEntries(for: capsule), id: \.key) { entry in
+                                capsuleChip(title: readableCapsuleSlotTitle(entry.key), value: entry.value)
                             }
                         }
                     }
@@ -3261,6 +3265,68 @@ struct MemlaBrowserView: View {
         }
         .padding(10)
         .background(Color(.secondarySystemBackground))
+    }
+
+    private func orderedCapsuleSlotEntries(for capsule: ActionCapsule) -> [(key: String, value: String)] {
+        let preferredOrder = [
+            "service",
+            "restaurant",
+            "item",
+            "size",
+            "toppings",
+            "add_ons",
+            "modifiers",
+            "tip",
+            "destination",
+            "pickup_time",
+        ]
+        let orderIndex = Dictionary(uniqueKeysWithValues: preferredOrder.enumerated().map { ($0.element, $0.offset) })
+        return capsule.slots
+            .filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .sorted { left, right in
+                let leftIndex = orderIndex[left.key] ?? Int.max
+                let rightIndex = orderIndex[right.key] ?? Int.max
+                if leftIndex != rightIndex {
+                    return leftIndex < rightIndex
+                }
+                return left.key < right.key
+            }
+            .map { (key: $0.key, value: $0.value) }
+    }
+
+    private func readableCapsuleSlotTitle(_ key: String) -> String {
+        switch key {
+        case "add_ons":
+            return "Add Ons"
+        case "pickup_time":
+            return "Pickup Time"
+        default:
+            return key.replacingOccurrences(of: "_", with: " ").capitalized
+        }
+    }
+
+    private func commerceIntentSummary(for capsule: ActionCapsule) -> String? {
+        guard let service = capsule.slots["service"], ["DoorDash", "Uber Eats", "food delivery"].contains(service) else {
+            return nil
+        }
+        var parts: [String] = []
+        if let item = capsule.slots["item"], !item.isEmpty {
+            if let size = capsule.slots["size"], !size.isEmpty {
+                parts.append("\(size) \(item)")
+            } else {
+                parts.append(item)
+            }
+        }
+        if let toppings = capsule.slots["toppings"], !toppings.isEmpty {
+            parts.append("Toppings: \(toppings)")
+        }
+        if let addOns = capsule.slots["add_ons"], !addOns.isEmpty {
+            parts.append("Add ons: \(addOns)")
+        }
+        if let tip = capsule.slots["tip"], !tip.isEmpty {
+            parts.append("Tip: \(tip)")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " • ")
     }
 
     private var browserToolbar: some View {
