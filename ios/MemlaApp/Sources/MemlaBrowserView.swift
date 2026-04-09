@@ -2913,6 +2913,7 @@ struct MemlaBrowserView: View {
     @State private var authNotes: [String: String] = [:]
     @State private var autoDriveEnabled = false
     @State private var autoDriveStatus = "Manual Mirror mode. Tap the distilled controls yourself."
+    @State private var debugCopyStatus = ""
     @State private var lastAutoDriveSignature = ""
     @State private var pendingDoorDashRole: String = ""
     @State private var pendingDoorDashLabel: String = ""
@@ -2959,6 +2960,7 @@ struct MemlaBrowserView: View {
             .onAppear {
                 autoDriveEnabled = false
                 autoDriveStatus = "Manual Mirror mode. Tap the distilled controls yourself."
+                debugCopyStatus = ""
                 lastAutoDriveSignature = ""
                 pendingDoorDashRole = ""
                 pendingDoorDashLabel = ""
@@ -3194,6 +3196,13 @@ struct MemlaBrowserView: View {
                 }
                 .buttonStyle(.bordered)
                 .font(.caption2)
+                if let state = browser.websiteState {
+                    Button("Copy Debug") {
+                        copyDebugSnapshot(state)
+                    }
+                    .buttonStyle(.bordered)
+                    .font(.caption2)
+                }
                 Button {
                     withAnimation(.easeInOut(duration: 0.2)) {
                         isC2AConsoleClosed = true
@@ -3226,6 +3235,12 @@ struct MemlaBrowserView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
+            }
+            if !debugCopyStatus.isEmpty {
+                Text(debugCopyStatus)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
         }
         .padding(.horizontal, 12)
@@ -4967,6 +4982,41 @@ struct MemlaBrowserView: View {
             return
         }
         browser.tapButtonCandidate(candidate, allowCaution: allowCaution, capsule: route.capsule)
+    }
+
+    private func copyDebugSnapshot(_ state: WebsiteC2AState) {
+        UIPasteboard.general.string = debugSnapshotText(for: state)
+        debugCopyStatus = "Copied debug snapshot."
+    }
+
+    private func debugSnapshotText(for state: WebsiteC2AState) -> String {
+        var lines: [String] = []
+        lines.append("Memla Mirror Debug Snapshot")
+        lines.append("Title: \(browser.pageTitle)")
+        lines.append("URL: \(browser.currentURL)")
+        lines.append("PageKind: \(state.pageKind)")
+        lines.append("Summary: \(state.summary)")
+        lines.append("Auth: \(state.authState)")
+        if !state.residuals.isEmpty {
+            lines.append("Residuals: \(state.residuals.joined(separator: ", "))")
+        }
+        if !state.safeActions.isEmpty {
+            lines.append("SafeActions: \(state.safeActions.joined(separator: ", "))")
+        }
+        lines.append("Candidates:")
+        for candidate in state.candidates {
+            let score = String(format: "%.1f", candidate.score)
+            let detail = [
+                "[\(candidate.role)]",
+                candidate.label,
+                "score=\(score)",
+                "kind=\(candidate.kind)",
+                "tap=\(candidate.tapSafety)",
+                "reason=\(candidate.reason)"
+            ].joined(separator: " | ")
+            lines.append(detail)
+        }
+        return lines.joined(separator: "\n")
     }
 
     private func openBridgeOption(_ option: ActionBridgeOption) {
