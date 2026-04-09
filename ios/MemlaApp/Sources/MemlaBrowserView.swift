@@ -1781,19 +1781,59 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
     }
 
     private static func uberRideFieldFocusScript(isPickup: Bool) -> String {
+        if isPickup {
+            return """
+            (() => {
+              const input = document.querySelector('input[data-testid="dotcom-ui.pickup-destination.input.pickup"]');
+              const row = input?.closest('[data-testid="pudo-select-v2"]')
+                || input?.closest('.css-ilwscx')
+                || input?.parentElement?.parentElement?.parentElement;
+              const locationButton = document.querySelector('[data-testid="clear-button"] [role="button"]')
+                || document.querySelector('[data-testid="clear-button"] svg[role="button"]')
+                || document.querySelector('[data-testid="clear-button"]');
+
+              if (!row && !input) {
+                return { ok: false, reason: 'uber_pickup_row_not_found' };
+              }
+
+              const clickNode = (node) => {
+                if (!node) return;
+                try { node.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
+                ['mousedown', 'mouseup', 'click'].forEach((type) => {
+                  try {
+                    node.dispatchEvent(new MouseEvent(type, {
+                      bubbles: true,
+                      cancelable: true,
+                      view: window
+                    }));
+                  } catch (_) {}
+                });
+                if (typeof node.click === 'function') {
+                  try { node.click(); } catch (_) {}
+                }
+              };
+
+              clickNode(row);
+              clickNode(locationButton || input);
+              if (input && typeof input.focus === 'function') {
+                try { input.focus(); } catch (_) {}
+              }
+
+              return { ok: true, reason: 'focused_uber_pickup_field' };
+            })();
+            """
+        }
         let selector = isPickup
             ? "input[data-testid=\"dotcom-ui.pickup-destination.input.pickup\"]"
             : "input[data-testid=\"dotcom-ui.pickup-destination.input.destination.drop0\"]"
         let wrapperSelector = isPickup
             ? "div[data-testid=\"dotcom-ui.pickup-destination.placeholder.pickup\"]"
             : "div[data-testid=\"dotcom-ui.pickup-destination.placeholder.destination.drop0\"]"
-        let locationButtonSelector = "[data-testid=\"clear-button\"] [role=\"button\"], [data-testid=\"clear-button\"]"
         let reason = isPickup ? "focused_uber_pickup_field" : "focused_uber_destination_field"
         return """
         (() => {
           const target = document.querySelector('\(selector)');
           const wrapper = document.querySelector('\(wrapperSelector)') || target?.closest('[data-tracking="disabled"]');
-          const locationButton = \(isPickup ? "document.querySelector('\(locationButtonSelector)')" : "null");
           const explicitRow = target?.closest('[data-testid="pudo-select-v2"]');
           const findInteractiveRow = (node) => {
             let current = node;
@@ -1817,53 +1857,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           const activate = (node) => {
             if (!node) return;
             try { node.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
-            const rect = typeof node.getBoundingClientRect === 'function'
-              ? node.getBoundingClientRect()
-              : { left: 0, top: 0, width: 1, height: 1 };
-            const point = {
-              clientX: rect.left + Math.max(6, rect.width / 2),
-              clientY: rect.top + Math.max(6, rect.height / 2),
-              screenX: rect.left + Math.max(6, rect.width / 2),
-              screenY: rect.top + Math.max(6, rect.height / 2),
-              pageX: window.scrollX + rect.left + Math.max(6, rect.width / 2),
-              pageY: window.scrollY + rect.top + Math.max(6, rect.height / 2)
-            };
-            ['pointerdown', 'pointerup'].forEach((type) => {
-              try {
-                node.dispatchEvent(new PointerEvent(type, {
-                  bubbles: true,
-                  cancelable: true,
-                  pointerId: 1,
-                  pointerType: 'touch',
-                  isPrimary: true,
-                  ...point
-                }));
-              } catch (_) {}
-            });
-            ['touchstart', 'touchend'].forEach((type) => {
-              try {
-                const touch = typeof Touch === 'function'
-                  ? new Touch({
-                      identifier: Date.now(),
-                      target: node,
-                      clientX: point.clientX,
-                      clientY: point.clientY,
-                      screenX: point.screenX,
-                      screenY: point.screenY,
-                      pageX: point.pageX,
-                      pageY: point.pageY
-                    })
-                  : null;
-                node.dispatchEvent(new TouchEvent(type, {
-                  bubbles: true,
-                  cancelable: true,
-                  touches: type === 'touchend' || !touch ? [] : [touch],
-                  targetTouches: type === 'touchend' || !touch ? [] : [touch],
-                  changedTouches: touch ? [touch] : []
-                }));
-              } catch (_) {}
-            });
-            ['pointerdown', 'mousedown', 'mouseup', 'pointerup', 'click'].forEach((type) => {
+            ['mousedown', 'mouseup', 'click'].forEach((type) => {
               try {
                 node.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
               } catch (_) {}
@@ -1880,10 +1874,6 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           activate(target);
           if (typeof target.focus === 'function') {
             try { target.focus(); } catch (_) {}
-          }
-          if (\(isPickup ? "true" : "false") && !String(target.value || '').trim() && locationButton && target.getAttribute('aria-expanded') !== 'true') {
-            activate(locationButton);
-            return { ok: true, reason: 'activated_uber_pickup_location' };
           }
           return { ok: true, reason: '\(reason)' };
         })();
@@ -4488,7 +4478,16 @@ struct MemlaBrowserView: View {
             addToCartRetryCount = 0
             preferCartProgress = true
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+        let autoDriveDelay: TimeInterval
+        switch action.candidate.role {
+        case "ub_pickup_input", "ub_pickup_current_location":
+            autoDriveDelay = 0.8
+        case "ub_dropoff_input":
+            autoDriveDelay = 0.65
+        default:
+            autoDriveDelay = 0.45
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + autoDriveDelay) {
             performAutoDriveAction(action.candidate, allowCaution: action.allowCaution)
         }
     }
