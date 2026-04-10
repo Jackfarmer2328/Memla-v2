@@ -3712,6 +3712,22 @@ struct MemlaBrowserView: View {
         }
     }
 
+    private func finalizePendingFoodAdd() {
+        if pendingFoodAddOperation == "primary" {
+            primaryFoodItemAdded = true
+            preferCartProgress = pendingFoodAddOns.isEmpty
+        } else if pendingFoodAddOperation == "addon" {
+            if !pendingFoodAddOns.isEmpty {
+                pendingFoodAddOns.removeFirst()
+            }
+            preferCartProgress = pendingFoodAddOns.isEmpty
+        }
+        pendingDoorDashRole = ""
+        pendingDoorDashLabel = ""
+        addToCartRetryCount = 0
+        pendingFoodAddOperation = ""
+    }
+
     private var browserToolbar: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
@@ -5266,20 +5282,23 @@ struct MemlaBrowserView: View {
                 || state.pageKind == "dd_cart_page"
                 || state.pageKind == "ue_cart_page"
                 || candidates.contains(where: { ["dd_continue_cta", "dd_cart_cta", "ue_continue_cta", "ue_cart_cta"].contains($0.role) }) {
-                if pendingFoodAddOperation == "primary" && !pendingFoodAddOns.isEmpty {
-                    primaryFoodItemAdded = true
-                    preferCartProgress = false
-                } else {
-                    if pendingFoodAddOperation == "addon" && !pendingFoodAddOns.isEmpty {
-                        pendingFoodAddOns.removeFirst()
-                    }
-                    preferCartProgress = pendingFoodAddOns.isEmpty
-                }
+                finalizePendingFoodAdd()
+            } else if pendingDoorDashRole == "dd_add_to_cart", state.pageKind == "dd_storefront" {
+                autoDriveStatus = "Verifying cart update after add..."
+                appendAgencyTrace(autoDriveStatus)
+                finalizePendingFoodAdd()
+                lastAutoDriveSignature = ""
+            } else if pendingDoorDashRole == "dd_add_to_cart" {
+                autoDriveStatus = "Waiting for cart confirmation..."
+                appendAgencyTrace(autoDriveStatus)
+                lastAutoDriveSignature = signature
+                return
+            } else if pendingDoorDashRole == "ue_add_to_cart" {
+                autoDriveStatus = "Waiting for order confirmation..."
+                appendAgencyTrace(autoDriveStatus)
+                lastAutoDriveSignature = signature
+                return
             }
-            pendingDoorDashRole = ""
-            pendingDoorDashLabel = ""
-            addToCartRetryCount = 0
-            pendingFoodAddOperation = ""
         }
 
         if pendingDoorDashRole == "ub_fill_destination" {
@@ -5543,6 +5562,17 @@ struct MemlaBrowserView: View {
                 )
             }
             if primaryFoodItemAdded, !pendingFoodAddOns.isEmpty {
+                return nil
+            }
+            if primaryFoodItemAdded, pendingFoodAddOns.isEmpty {
+                if let cart = candidates.first(where: { $0.role == "dd_cart_cta" && !$0.blocked }) {
+                    return MirrorAutoDriveAction(
+                        candidate: cart,
+                        allowCaution: cart.tapSafety == "caution",
+                        status: "Opening cart...",
+                        pendingRole: ""
+                    )
+                }
                 return nil
             }
             if preferCartProgress,
