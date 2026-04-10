@@ -5685,24 +5685,37 @@ struct MemlaBrowserView: View {
                     )
                 }()
             let saveCandidate = candidates.first(where: { $0.role == "dd_modifier_save" && !$0.blocked })
+            let fallbackModifier = fallbackDoorDashModifierCandidate(in: candidates)
 
-            if let targetedModifier = bestDoorDashModifierCandidate(in: candidates, targetTerms: remainingModifierTerms) {
-                return MirrorAutoDriveAction(
-                    candidate: targetedModifier.candidate,
-                    allowCaution: true,
-                    status: "Selecting \(targetedModifier.candidate.label)...",
-                    pendingRole: "",
-                    consumedTerms: targetedModifier.matched
-                )
+            if !remainingModifierTerms.isEmpty {
+                if let targetedModifier = bestDoorDashModifierCandidate(in: candidates, targetTerms: remainingModifierTerms) {
+                    return MirrorAutoDriveAction(
+                        candidate: targetedModifier.candidate,
+                        allowCaution: true,
+                        status: "Selecting \(targetedModifier.candidate.label)...",
+                        pendingRole: "",
+                        consumedTerms: targetedModifier.matched
+                    )
+                }
+                if let fallbackModifier {
+                    return MirrorAutoDriveAction(
+                        candidate: fallbackModifier,
+                        allowCaution: true,
+                        status: "Continuing through \(fallbackModifier.label)...",
+                        pendingRole: ""
+                    )
+                }
+                if let save = saveCandidate {
+                    return MirrorAutoDriveAction(
+                        candidate: save,
+                        allowCaution: true,
+                        status: "Saving options...",
+                        pendingRole: ""
+                    )
+                }
+                return nil
             }
-            if remainingModifierTerms.isEmpty, let add = addCandidate {
-                return MirrorAutoDriveAction(
-                    candidate: add,
-                    allowCaution: true,
-                    status: "Adding item to cart...",
-                    pendingRole: "dd_add_to_cart"
-                )
-            }
+
             if addCandidate == nil, let save = saveCandidate {
                 return MirrorAutoDriveAction(
                     candidate: save,
@@ -5711,7 +5724,7 @@ struct MemlaBrowserView: View {
                     pendingRole: ""
                 )
             }
-            if addCandidate == nil, let fallbackModifier = fallbackDoorDashModifierCandidate(in: candidates) {
+            if addCandidate == nil, let fallbackModifier {
                 return MirrorAutoDriveAction(
                     candidate: fallbackModifier,
                     allowCaution: true,
