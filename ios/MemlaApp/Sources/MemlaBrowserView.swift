@@ -3606,14 +3606,24 @@ struct MemlaBrowserView: View {
         return expandedCommerceTerms(from: splitCommerceTerms(capsule.slots["item"] ?? ""))
     }
 
-    private func currentModifierTargetTerms() -> [String] {
+    private enum FoodModifierStage {
+        case size
+        case toppings
+        case modifiers
+        case none
+    }
+
+    private func currentModifierTargets() -> (stage: FoodModifierStage, terms: [String]) {
         guard let capsule = route.capsule else {
-            return []
+            return (.none, [])
+        }
+        if primaryFoodItemAdded {
+            return (.none, [])
         }
         if let size = capsule.slots["size"], !size.isEmpty {
             let normalizedSize = normalizedCommerceTerm(size)
             if !normalizedSize.isEmpty && !completedModifierTerms.contains(normalizedSize) {
-                return [normalizedSize]
+                return (.size, [normalizedSize])
             }
         }
         if let toppings = capsule.slots["toppings"], !toppings.isEmpty {
@@ -3621,17 +3631,17 @@ struct MemlaBrowserView: View {
                 .map(normalizedCommerceTerm)
                 .filter { !$0.isEmpty && !completedModifierTerms.contains($0) }
             if let nextTopping = remainingToppings.first {
-                return [nextTopping]
+                return (.toppings, [nextTopping])
             }
         } else if let modifiers = capsule.slots["modifiers"], !modifiers.isEmpty {
             let remainingModifiers = splitCommerceTerms(modifiers)
                 .map(normalizedCommerceTerm)
                 .filter { !$0.isEmpty && !completedModifierTerms.contains($0) }
             if let nextModifier = remainingModifiers.first {
-                return [nextModifier]
+                return (.modifiers, [nextModifier])
             }
         }
-        return []
+        return (.none, [])
     }
 
     private func expandedCommerceTerms(from rawTerms: [String]) -> [String] {
@@ -3669,6 +3679,24 @@ struct MemlaBrowserView: View {
         }
     }
 
+    private func candidateMatchedModifierTerms(_ candidate: WebsiteC2ACandidate, targetTerms: [String]) -> [String] {
+        let label = normalizedCommerceTerm(candidate.label)
+        let labelTokens = Set(label.split(separator: " ").map(String.init))
+        return targetTerms.filter { term in
+            guard !term.isEmpty else { return false }
+            if label == term || label.contains(term) || term.contains(label) {
+                return true
+            }
+            let termTokens = term.split(separator: " ").map(String.init)
+            guard !termTokens.isEmpty else {
+                return false
+            }
+            return termTokens.allSatisfy { token in
+                labelTokens.contains(token) || label.contains(token)
+            }
+        }
+    }
+
     private func bestCandidate(role: String, in candidates: [WebsiteC2ACandidate], targetTerms: [String]) -> (candidate: WebsiteC2ACandidate, matched: [String])? {
         let relevant = candidates.filter { $0.role == role && !$0.blocked }
         guard !relevant.isEmpty else {
@@ -3682,6 +3710,31 @@ struct MemlaBrowserView: View {
                 if label == term { return partial + 5.0 }
                 if label.contains(term) || term.contains(label) { return partial + 3.0 }
                 return partial + 1.5
+            }
+            return (candidate, matched, candidate.score + specificity)
+        }
+        guard let best = scored.max(by: { left, right in left.2 < right.2 }) else {
+            return nil
+        }
+        return (best.0, best.1)
+    }
+
+    private func bestDoorDashModifierCandidate(
+        in candidates: [WebsiteC2ACandidate],
+        targetTerms: [String]
+    ) -> (candidate: WebsiteC2ACandidate, matched: [String])? {
+        let relevant = candidates.filter { $0.role == "dd_modifier_option" && !$0.blocked }
+        guard !relevant.isEmpty else {
+            return nil
+        }
+        let scored = relevant.compactMap { candidate -> (WebsiteC2ACandidate, [String], Double)? in
+            let matched = candidateMatchedModifierTerms(candidate, targetTerms: targetTerms)
+            guard !matched.isEmpty else { return nil }
+            let label = normalizedCommerceTerm(candidate.label)
+            let specificity = matched.reduce(0.0) { partial, term in
+                if label == term { return partial + 6.0 }
+                if label.contains(term) || term.contains(label) { return partial + 4.0 }
+                return partial + 2.0
             }
             return (candidate, matched, candidate.score + specificity)
         }
@@ -5609,7 +5662,7 @@ struct MemlaBrowserView: View {
                 )
             }
         case "dd_item_modal":
-            let remainingModifierTerms = currentModifierTargetTerms()
+            let remainingModifierTerms = currentModifierTargets().terms
             let addCandidate = candidates.first(where: { $0.role == "dd_add_to_cart" && !$0.blocked })
                 ?? {
                     guard state.serviceFacts["dd_has_add_to_cart"] == "true" else {
@@ -5633,7 +5686,7 @@ struct MemlaBrowserView: View {
                 }()
             let saveCandidate = candidates.first(where: { $0.role == "dd_modifier_save" && !$0.blocked })
 
-            if let targetedModifier = bestCandidate(role: "dd_modifier_option", in: candidates, targetTerms: remainingModifierTerms) {
+            if let targetedModifier = bestDoorDashModifierCandidate(in: candidates, targetTerms: remainingModifierTerms) {
                 return MirrorAutoDriveAction(
                     candidate: targetedModifier.candidate,
                     allowCaution: true,
