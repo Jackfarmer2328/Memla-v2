@@ -3056,6 +3056,8 @@ struct MemlaBrowserView: View {
     @State private var primaryFoodItemAdded = false
     @State private var pendingFoodAddOns: [String] = []
     @State private var pendingFoodAddOperation = ""
+    @State private var agencyTrace: [String] = []
+    @State private var lastAgencyPageMarker = ""
 
     private struct MirrorAutoDriveAction {
         let candidate: WebsiteC2ACandidate
@@ -3122,6 +3124,8 @@ struct MemlaBrowserView: View {
                 primaryFoodItemAdded = false
                 pendingFoodAddOns = initialFoodAddOns(from: route.capsule)
                 pendingFoodAddOperation = ""
+                agencyTrace = []
+                lastAgencyPageMarker = ""
                 browser.startGrounding(capsule: route.capsule)
                 if browser.currentURL.isEmpty {
                     browser.navigate(to: route.url, autoInspect: true, capsule: route.capsule)
@@ -3131,7 +3135,26 @@ struct MemlaBrowserView: View {
                 browser.stopGrounding()
             }
             .onReceive(browser.$websiteState.compactMap { $0 }) { state in
+                if autoDriveEnabled {
+                    let marker = "\(state.pageKind)||\(browser.currentURL)"
+                    if marker != lastAgencyPageMarker {
+                        lastAgencyPageMarker = marker
+                        appendAgencyTrace("Page: \(state.pageKind) • \(state.summary)")
+                    }
+                }
                 handleAutoDriveUpdate(for: state)
+            }
+            .onReceive(browser.$buttonActionStatus.removeDuplicates()) { status in
+                guard autoDriveEnabled, !status.isEmpty else {
+                    return
+                }
+                appendAgencyTrace("Button: \(status)")
+            }
+            .onReceive(browser.$searchActionStatus.removeDuplicates()) { status in
+                guard autoDriveEnabled, !status.isEmpty else {
+                    return
+                }
+                appendAgencyTrace("Search: \(status)")
             }
         }
     }
@@ -3365,11 +3388,35 @@ struct MemlaBrowserView: View {
         primaryFoodItemAdded = false
         pendingFoodAddOns = initialFoodAddOns(from: route.capsule)
         preferCartProgress = false
+        lastAgencyPageMarker = ""
         autoDriveStatus = autoDriveEnabled
             ? "Agency is active. Memla will drive to cart review."
             : "Manual Mirror mode. Tap the distilled controls yourself."
+        if autoDriveEnabled {
+            agencyTrace = []
+            appendAgencyTrace("Agency enabled.")
+        } else {
+            appendAgencyTrace("Agency paused.")
+        }
         if autoDriveEnabled, let state = browser.websiteState {
             handleAutoDriveUpdate(for: state)
+        }
+    }
+
+    private func appendAgencyTrace(_ message: String) {
+        let clean = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else {
+            return
+        }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        let line = "[\(formatter.string(from: Date()))] \(clean)"
+        if agencyTrace.first?.hasSuffix(clean) == true {
+            return
+        }
+        agencyTrace.insert(line, at: 0)
+        if agencyTrace.count > 60 {
+            agencyTrace = Array(agencyTrace.prefix(60))
         }
     }
 
@@ -3595,6 +3642,13 @@ struct MemlaBrowserView: View {
                     }
                     .buttonStyle(.bordered)
                     .font(.caption2)
+                    if !agencyTrace.isEmpty {
+                        Button("Copy Trace") {
+                            copyAgencyTrace()
+                        }
+                        .buttonStyle(.bordered)
+                        .font(.caption2)
+                    }
                 }
                 Button {
                     withAnimation(.easeInOut(duration: 0.2)) {
@@ -3612,6 +3666,20 @@ struct MemlaBrowserView: View {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 10) {
                             mirrorCompactContent(for: state)
+                            if !agencyTrace.isEmpty {
+                                Divider()
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Agency Trace")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                    ForEach(Array(agencyTrace.prefix(10).enumerated()), id: \.offset) { _, entry in
+                                        Text(entry)
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+                                }
+                            }
                             Divider()
                             Text("Raw Website C2A")
                                 .font(.caption.weight(.semibold))
@@ -5017,12 +5085,14 @@ struct MemlaBrowserView: View {
             autoDriveStatus = state.pageKind == "ub_product_selection"
                 ? "Uber ride is priced. Waiting for your final request confirmation."
                 : "Reached checkout. Waiting for your final confirmation."
+            appendAgencyTrace(autoDriveStatus)
             lastAutoDriveSignature = signature
             return
         }
 
         if state.authState == "login_required" {
             autoDriveStatus = "Waiting for you to sign in."
+            appendAgencyTrace(autoDriveStatus)
             lastAutoDriveSignature = signature
             return
         }
@@ -5033,6 +5103,7 @@ struct MemlaBrowserView: View {
                addToCartRetryCount < 1 {
                 addToCartRetryCount += 1
                 autoDriveStatus = "Retrying Add to cart..."
+                appendAgencyTrace(autoDriveStatus)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
                     performAutoDriveAction(retryCandidate, allowCaution: true)
                 }
@@ -5067,6 +5138,7 @@ struct MemlaBrowserView: View {
                       !destination.isEmpty {
                 addToCartRetryCount += 1
                 autoDriveStatus = "Retrying destination entry..."
+                appendAgencyTrace(autoDriveStatus)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
                     browser.fillUberRideLocation(destination, isPickup: false, capsule: route.capsule)
                 }
@@ -5082,6 +5154,7 @@ struct MemlaBrowserView: View {
             autoDriveStatus = state.pageKind == "ue_cart_page"
                 ? "Cart is ready. Review the order before checkout."
                 : "DoorDash cart is ready. Review the order before checkout."
+            appendAgencyTrace(autoDriveStatus)
             lastAutoDriveSignature = signature
             return
         }
@@ -5101,6 +5174,7 @@ struct MemlaBrowserView: View {
             pendingDoorDashLabel = destination
             addToCartRetryCount = 0
             autoDriveStatus = "Typing destination..."
+            appendAgencyTrace(autoDriveStatus)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                 browser.fillUberRideLocation(destination, isPickup: false, capsule: route.capsule)
             }
@@ -5115,7 +5189,10 @@ struct MemlaBrowserView: View {
                 autoDriveStatus = "Waiting for Uber Eats menu items..."
             } else if state.pageKind == "ub_trip_builder" {
                 autoDriveStatus = "Waiting for Uber trip fields..."
+            } else {
+                autoDriveStatus = "Agency is waiting on \(state.pageKind)."
             }
+            appendAgencyTrace(autoDriveStatus)
             return
         }
 
@@ -5124,6 +5201,7 @@ struct MemlaBrowserView: View {
         if !action.consumedTerms.isEmpty {
             completedModifierTerms.formUnion(action.consumedTerms)
         }
+        appendAgencyTrace("Action: \(action.candidate.role) → \(action.candidate.label)")
         if action.pendingRole == "dd_add_to_cart" || action.pendingRole == "ue_add_to_cart" {
             pendingDoorDashRole = action.pendingRole
             pendingDoorDashLabel = action.candidate.label
@@ -5423,8 +5501,10 @@ struct MemlaBrowserView: View {
 
     private func performAutoDriveAction(_ candidate: WebsiteC2ACandidate, allowCaution: Bool) {
         if !candidate.url.isEmpty {
+            appendAgencyTrace("Open: \(candidate.label)")
             openCandidate(candidate)
         } else {
+            appendAgencyTrace("Tap: \(candidate.label)")
             tapCandidate(candidate, allowCaution: allowCaution)
         }
     }
@@ -5466,6 +5546,11 @@ struct MemlaBrowserView: View {
         debugCopyStatus = "Copied debug snapshot."
     }
 
+    private func copyAgencyTrace() {
+        UIPasteboard.general.string = agencyTraceText()
+        debugCopyStatus = "Copied agency trace."
+    }
+
     private func debugSnapshotText(for state: WebsiteC2AState) -> String {
         var lines: [String] = []
         lines.append("Memla Mirror Debug Snapshot")
@@ -5492,6 +5577,22 @@ struct MemlaBrowserView: View {
                 "reason=\(candidate.reason)"
             ].joined(separator: " | ")
             lines.append(detail)
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func agencyTraceText() -> String {
+        var lines: [String] = []
+        lines.append("Memla Agency Trace")
+        lines.append("Title: \(browser.pageTitle)")
+        lines.append("URL: \(browser.currentURL)")
+        lines.append("AutoDrive: \(autoDriveEnabled ? "enabled" : "disabled")")
+        lines.append("Status: \(autoDriveStatus)")
+        lines.append("Trace:")
+        if agencyTrace.isEmpty {
+            lines.append("(empty)")
+        } else {
+            lines.append(contentsOf: agencyTrace.reversed())
         }
         return lines.joined(separator: "\n")
     }
