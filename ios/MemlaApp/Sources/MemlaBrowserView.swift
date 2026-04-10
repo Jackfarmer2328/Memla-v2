@@ -3213,6 +3213,10 @@ struct MemlaBrowserView: View {
     @State private var lastAgencyPageMarker = ""
     @State private var lastModifierSelectionLabel = ""
     @State private var lastModifierSelectionAt = Date.distantPast
+    @State private var pendingStepActionRole = ""
+    @State private var pendingStepActionLabel = ""
+    @State private var pendingStepActionSignature = ""
+    @State private var pendingStepActionAt = Date.distantPast
 
     private struct MirrorAutoDriveAction {
         let candidate: WebsiteC2ACandidate
@@ -3283,6 +3287,10 @@ struct MemlaBrowserView: View {
                 pendingFoodAddOperation = ""
                 agencyTrace = []
                 lastAgencyPageMarker = ""
+                pendingStepActionRole = ""
+                pendingStepActionLabel = ""
+                pendingStepActionSignature = ""
+                pendingStepActionAt = .distantPast
                 browser.startGrounding(capsule: route.capsule)
                 if browser.currentURL.isEmpty {
                     browser.navigate(to: route.url, autoInspect: true, capsule: route.capsule)
@@ -3544,6 +3552,10 @@ struct MemlaBrowserView: View {
         completedModifierTerms = []
         lastModifierSelectionLabel = ""
         lastModifierSelectionAt = .distantPast
+        pendingStepActionRole = ""
+        pendingStepActionLabel = ""
+        pendingStepActionSignature = ""
+        pendingStepActionAt = .distantPast
         primaryFoodItemAdded = false
         pendingFoodAddOns = initialFoodAddOns(from: route.capsule)
         preferCartProgress = false
@@ -3827,6 +3839,10 @@ struct MemlaBrowserView: View {
         pendingFoodAddOperation = ""
         lastModifierSelectionLabel = ""
         lastModifierSelectionAt = .distantPast
+        pendingStepActionRole = ""
+        pendingStepActionLabel = ""
+        pendingStepActionSignature = ""
+        pendingStepActionAt = .distantPast
     }
 
     private var browserToolbar: some View {
@@ -5390,6 +5406,22 @@ struct MemlaBrowserView: View {
         let signature = doorDashAutoDriveSignature(for: state)
         let candidates = mirrorCandidates(for: state)
 
+        if !pendingStepActionRole.isEmpty {
+            let actionSettled = signature != pendingStepActionSignature
+                || Date().timeIntervalSince(pendingStepActionAt) >= 1.8
+            if actionSettled {
+                pendingStepActionRole = ""
+                pendingStepActionLabel = ""
+                pendingStepActionSignature = ""
+                pendingStepActionAt = .distantPast
+            } else {
+                autoDriveStatus = "Waiting for DoorDash customizer transition..."
+                appendAgencyTrace(autoDriveStatus)
+                lastAutoDriveSignature = signature
+                return
+            }
+        }
+
         if state.pageKind == "dd_payment_sheet" || state.pageKind == "dd_checkout" || state.pageKind == "ue_checkout" || state.pageKind == "ub_product_selection" {
             pendingDoorDashRole = ""
             pendingDoorDashLabel = ""
@@ -5530,9 +5562,22 @@ struct MemlaBrowserView: View {
         if action.candidate.role == "dd_modifier_option" {
             lastModifierSelectionLabel = action.candidate.label
             lastModifierSelectionAt = Date()
+            pendingStepActionRole = action.candidate.role
+            pendingStepActionLabel = action.candidate.label
+            pendingStepActionSignature = signature
+            pendingStepActionAt = Date()
         } else if action.candidate.role == "dd_modifier_save" {
             lastModifierSelectionLabel = ""
             lastModifierSelectionAt = .distantPast
+            pendingStepActionRole = action.candidate.role
+            pendingStepActionLabel = action.candidate.label
+            pendingStepActionSignature = signature
+            pendingStepActionAt = Date()
+        } else {
+            pendingStepActionRole = ""
+            pendingStepActionLabel = ""
+            pendingStepActionSignature = ""
+            pendingStepActionAt = .distantPast
         }
         appendAgencyTrace("Action: \(action.candidate.role) → \(action.candidate.label)")
         if action.pendingRole == "dd_add_to_cart" || action.pendingRole == "ue_add_to_cart" {
