@@ -3211,6 +3211,8 @@ struct MemlaBrowserView: View {
     @State private var pendingFoodAddOperation = ""
     @State private var agencyTrace: [String] = []
     @State private var lastAgencyPageMarker = ""
+    @State private var lastModifierSelectionLabel = ""
+    @State private var lastModifierSelectionAt = Date.distantPast
 
     private struct MirrorAutoDriveAction {
         let candidate: WebsiteC2ACandidate
@@ -3274,6 +3276,8 @@ struct MemlaBrowserView: View {
                 addToCartRetryCount = 0
                 preferCartProgress = false
                 completedModifierTerms = []
+                lastModifierSelectionLabel = ""
+                lastModifierSelectionAt = .distantPast
                 primaryFoodItemAdded = false
                 pendingFoodAddOns = initialFoodAddOns(from: route.capsule)
                 pendingFoodAddOperation = ""
@@ -3538,6 +3542,8 @@ struct MemlaBrowserView: View {
         pendingDoorDashLabel = ""
         pendingFoodAddOperation = ""
         completedModifierTerms = []
+        lastModifierSelectionLabel = ""
+        lastModifierSelectionAt = .distantPast
         primaryFoodItemAdded = false
         pendingFoodAddOns = initialFoodAddOns(from: route.capsule)
         preferCartProgress = false
@@ -3659,6 +3665,23 @@ struct MemlaBrowserView: View {
         return ordered.filter { seen.insert($0).inserted }
     }
 
+    private func allRequestedModifierTerms() -> [String] {
+        guard let capsule = route.capsule else {
+            return []
+        }
+        var requested: [String] = []
+        if let size = capsule.slots["size"], !size.isEmpty {
+            requested.append(contentsOf: expandedCommerceTerms(from: [size]))
+        }
+        if let toppings = capsule.slots["toppings"], !toppings.isEmpty {
+            requested.append(contentsOf: expandedCommerceTerms(from: splitCommerceTerms(toppings)))
+        } else if let modifiers = capsule.slots["modifiers"], !modifiers.isEmpty {
+            requested.append(contentsOf: expandedCommerceTerms(from: splitCommerceTerms(modifiers)))
+        }
+        var seen = Set<String>()
+        return requested.filter { seen.insert($0).inserted }
+    }
+
     private func candidateMatchedTargetTerms(_ candidate: WebsiteC2ACandidate, targetTerms: [String]) -> [String] {
         let label = normalizedCommerceTerm(candidate.label)
         let matchedTerms = candidate.matchedTerms.map(normalizedCommerceTerm)
@@ -3744,6 +3767,22 @@ struct MemlaBrowserView: View {
         return (best.0, best.1)
     }
 
+    private func shouldSaveAfterModifierSelection(saveCandidate: WebsiteC2ACandidate?, requestedTerms: [String]) -> Bool {
+        guard saveCandidate != nil else {
+            return false
+        }
+        let recentLabel = normalizedCommerceTerm(lastModifierSelectionLabel)
+        guard !recentLabel.isEmpty else {
+            return false
+        }
+        guard Date().timeIntervalSince(lastModifierSelectionAt) < 4.0 else {
+            return false
+        }
+        return !requestedTerms.contains(where: { term in
+            recentLabel == term || recentLabel.contains(term) || term.contains(recentLabel)
+        })
+    }
+
     private func fallbackDoorDashModifierCandidate(in candidates: [WebsiteC2ACandidate]) -> WebsiteC2ACandidate? {
         let ignoredLabels = Set([
             "choose your size",
@@ -3753,6 +3792,13 @@ struct MemlaBrowserView: View {
             "required",
             "optional",
         ])
+        if let whole = candidates.first(where: {
+            $0.role == "dd_modifier_option"
+                && !$0.blocked
+                && normalizedCommerceTerm($0.label) == "whole"
+        }) {
+            return whole
+        }
         return candidates.first { candidate in
             guard candidate.role == "dd_modifier_option", !candidate.blocked else {
                 return false
@@ -3779,6 +3825,8 @@ struct MemlaBrowserView: View {
         pendingDoorDashLabel = ""
         addToCartRetryCount = 0
         pendingFoodAddOperation = ""
+        lastModifierSelectionLabel = ""
+        lastModifierSelectionAt = .distantPast
     }
 
     private var browserToolbar: some View {
@@ -5421,10 +5469,28 @@ struct MemlaBrowserView: View {
             return
         }
 
+        let normalizedActionLabel = normalizedCommerceTerm(action.candidate.label)
+        if action.candidate.role == "dd_modifier_option",
+           !normalizedActionLabel.isEmpty,
+           normalizedActionLabel == normalizedCommerceTerm(lastModifierSelectionLabel),
+           Date().timeIntervalSince(lastModifierSelectionAt) < 1.6 {
+            lastAutoDriveSignature = signature
+            autoDriveStatus = "Waiting for DoorDash customizer transition..."
+            appendAgencyTrace(autoDriveStatus)
+            return
+        }
+
         lastAutoDriveSignature = signature
         autoDriveStatus = action.status
         if !action.consumedTerms.isEmpty {
             completedModifierTerms.formUnion(action.consumedTerms)
+        }
+        if action.candidate.role == "dd_modifier_option" {
+            lastModifierSelectionLabel = action.candidate.label
+            lastModifierSelectionAt = Date()
+        } else if action.candidate.role == "dd_modifier_save" {
+            lastModifierSelectionLabel = ""
+            lastModifierSelectionAt = .distantPast
         }
         appendAgencyTrace("Action: \(action.candidate.role) → \(action.candidate.label)")
         if action.pendingRole == "dd_add_to_cart" || action.pendingRole == "ue_add_to_cart" {
@@ -5663,6 +5729,7 @@ struct MemlaBrowserView: View {
             }
         case "dd_item_modal":
             let remainingModifierTerms = currentModifierTargets().terms
+            let requestedModifierTerms = allRequestedModifierTerms()
             let addCandidate = candidates.first(where: { $0.role == "dd_add_to_cart" && !$0.blocked })
                 ?? {
                     guard state.serviceFacts["dd_has_add_to_cart"] == "true" else {
@@ -5688,6 +5755,15 @@ struct MemlaBrowserView: View {
             let fallbackModifier = fallbackDoorDashModifierCandidate(in: candidates)
 
             if !remainingModifierTerms.isEmpty {
+                if let save = saveCandidate,
+                   shouldSaveAfterModifierSelection(saveCandidate: saveCandidate, requestedTerms: requestedModifierTerms) {
+                    return MirrorAutoDriveAction(
+                        candidate: save,
+                        allowCaution: true,
+                        status: "Saving options...",
+                        pendingRole: ""
+                    )
+                }
                 if let targetedModifier = bestDoorDashModifierCandidate(in: candidates, targetTerms: remainingModifierTerms) {
                     return MirrorAutoDriveAction(
                         candidate: targetedModifier.candidate,
