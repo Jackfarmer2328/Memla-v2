@@ -2511,6 +2511,9 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
               if (/^your recommended options\\b/i.test(text)) {
                 return false;
               }
+              if (customizerGroups.has(clean(label).toLowerCase())) {
+                return false;
+              }
               if (/required|optional|choose|select|preferences$/i.test(label)) {
                 return false;
               }
@@ -3407,18 +3410,28 @@ struct MemlaBrowserView: View {
         guard let capsule = route.capsule else {
             return []
         }
-        var terms: [String] = []
         if let size = capsule.slots["size"], !size.isEmpty {
-            terms.append(size)
+            let normalizedSize = normalizedCommerceTerm(size)
+            if !normalizedSize.isEmpty && !completedModifierTerms.contains(normalizedSize) {
+                return [normalizedSize]
+            }
         }
         if let toppings = capsule.slots["toppings"], !toppings.isEmpty {
-            terms.append(contentsOf: splitCommerceTerms(toppings))
+            let remainingToppings = splitCommerceTerms(toppings)
+                .map(normalizedCommerceTerm)
+                .filter { !$0.isEmpty && !completedModifierTerms.contains($0) }
+            if let nextTopping = remainingToppings.first {
+                return [nextTopping]
+            }
         } else if let modifiers = capsule.slots["modifiers"], !modifiers.isEmpty {
-            terms.append(contentsOf: splitCommerceTerms(modifiers))
+            let remainingModifiers = splitCommerceTerms(modifiers)
+                .map(normalizedCommerceTerm)
+                .filter { !$0.isEmpty && !completedModifierTerms.contains($0) }
+            if let nextModifier = remainingModifiers.first {
+                return [nextModifier]
+            }
         }
-        return terms
-            .map(normalizedCommerceTerm)
-            .filter { !$0.isEmpty && !completedModifierTerms.contains($0) }
+        return []
     }
 
     private func expandedCommerceTerms(from rawTerms: [String]) -> [String] {
@@ -3476,6 +3489,27 @@ struct MemlaBrowserView: View {
             return nil
         }
         return (best.0, best.1)
+    }
+
+    private func fallbackDoorDashModifierCandidate(in candidates: [WebsiteC2ACandidate]) -> WebsiteC2ACandidate? {
+        let ignoredLabels = Set([
+            "choose your size",
+            "topping side",
+            "user preferences",
+            "preferences",
+            "required",
+            "optional",
+        ])
+        return candidates.first { candidate in
+            guard candidate.role == "dd_modifier_option", !candidate.blocked else {
+                return false
+            }
+            let label = normalizedCommerceTerm(candidate.label)
+            guard !label.isEmpty, !ignoredLabels.contains(label) else {
+                return false
+            }
+            return true
+        }
     }
 
     private var browserToolbar: some View {
@@ -5328,6 +5362,14 @@ struct MemlaBrowserView: View {
                     candidate: save,
                     allowCaution: true,
                     status: "Saving options...",
+                    pendingRole: ""
+                )
+            }
+            if let fallbackModifier = fallbackDoorDashModifierCandidate(in: candidates) {
+                return MirrorAutoDriveAction(
+                    candidate: fallbackModifier,
+                    allowCaution: true,
+                    status: "Continuing through \(fallbackModifier.label)...",
                     pendingRole: ""
                 )
             }
