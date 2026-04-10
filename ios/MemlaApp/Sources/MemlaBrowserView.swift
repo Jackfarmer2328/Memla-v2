@@ -4199,10 +4199,16 @@ struct MemlaBrowserView: View {
             stateScopedRoles.contains(candidate.role)
         }
         let candidatePool = stateScoped.isEmpty ? visibleCandidates : stateScoped
-        let preferred = candidatePool.filter { candidate in
+        let focusedPool: [WebsiteC2ACandidate]
+        if state.pageKind == "dd_item_modal" {
+            focusedPool = focusedDoorDashItemModalCandidates(from: candidatePool)
+        } else {
+            focusedPool = candidatePool
+        }
+        let preferred = focusedPool.filter { candidate in
             candidate.score > 0 || preferredRoles.contains(candidate.role)
         }
-        let effectivePool = preferred.isEmpty ? candidatePool : preferred
+        let effectivePool = preferred.isEmpty ? focusedPool : preferred
         let sorted = effectivePool.sorted { left, right in
             let leftPriority = mirrorRolePriority(pageKind: state.pageKind, role: left.role)
             let rightPriority = mirrorRolePriority(pageKind: state.pageKind, role: right.role)
@@ -4375,12 +4381,48 @@ struct MemlaBrowserView: View {
         }
     }
 
+    private func focusedDoorDashItemModalCandidates(from candidates: [WebsiteC2ACandidate]) -> [WebsiteC2ACandidate] {
+        let remainingModifierTerms = currentModifierTargets().terms
+        let requestedModifierTerms = allRequestedModifierTerms()
+        let saveCandidate = candidates.first(where: { $0.role == "dd_modifier_save" && !$0.blocked })
+        let hasAddToCart = candidates.contains(where: { $0.role == "dd_add_to_cart" && !$0.blocked })
+
+        if !remainingModifierTerms.isEmpty {
+            if shouldSaveAfterModifierSelection(saveCandidate: saveCandidate, requestedTerms: requestedModifierTerms) {
+                let saveStep = candidates.filter { ["dd_modifier_save", "dd_modal_close"].contains($0.role) }
+                return saveStep.isEmpty ? candidates : saveStep
+            }
+            let stepCandidates = candidates.filter { ["dd_modifier_option", "dd_modifier_save", "dd_modal_close"].contains($0.role) }
+            return stepCandidates.isEmpty ? candidates : stepCandidates
+        }
+
+        if saveCandidate != nil && !hasAddToCart {
+            let saveStep = candidates.filter { ["dd_modifier_save", "dd_modal_close"].contains($0.role) }
+            return saveStep.isEmpty ? candidates : saveStep
+        }
+
+        let reviewStep = candidates.filter { ["dd_add_to_cart", "dd_cart_cta", "dd_modal_close"].contains($0.role) }
+        return reviewStep.isEmpty ? candidates : reviewStep
+    }
+
     private func mirrorFacts(for state: WebsiteC2AState) -> [WebsiteMirrorFact] {
         var facts: [WebsiteMirrorFact] = [
             WebsiteMirrorFact(id: "page", title: "Page", value: readableRequirement(state.pageKind)),
             WebsiteMirrorFact(id: "auth", title: "Auth", value: readableRequirement(state.authState)),
             WebsiteMirrorFact(id: "actions", title: "Moves", value: "\(state.safeActions.count)")
         ]
+        if state.pageKind == "dd_item_modal" {
+            let remainingModifierTerms = currentModifierTargets().terms
+            let focusValue: String
+            if !remainingModifierTerms.isEmpty {
+                focusValue = remainingModifierTerms.joined(separator: ", ")
+            } else if state.serviceFacts["dd_has_add_to_cart"] == "true" {
+                focusValue = "add to cart"
+            } else {
+                focusValue = "save current step"
+            }
+            facts.append(WebsiteMirrorFact(id: "focus", title: "Focus", value: focusValue))
+        }
         if let verification = state.capsuleVerification {
             facts.append(WebsiteMirrorFact(id: "matched", title: "Matched", value: "\(verification.matched.count)"))
             if !verification.missing.isEmpty {
