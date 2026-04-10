@@ -583,7 +583,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         let serviceFacts: [String: String]
         let summary: String
         if isDoorDash {
-            serviceFacts = [:]
+            serviceFacts = doorDashFacts(payload: payload)
             summary = doorDashSummary(payload: payload, pageKind: pageKind, candidates: candidates)
         } else if isUberEats {
             serviceFacts = [:]
@@ -690,6 +690,29 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
     private static func isUberRideDomain(url: String) -> Bool {
         let domain = domainFrom(url: url)
         return domain.contains("uber.com") && !domain.contains("ubereats.com")
+    }
+
+    private static func doorDashFacts(payload: [String: Any]) -> [String: String] {
+        var facts: [String: String] = [:]
+        let addToCartLabel = stringValue(payload["doordash_customizer_add_to_cart_label"])
+        let hasAddToCart = payload["doordash_has_add_to_cart_cta"] as? Bool ?? false
+        let hasCartCTA = payload["doordash_has_cart_cta"] as? Bool ?? false
+        let hasContinueCTA = payload["doordash_has_continue_cta"] as? Bool ?? false
+        let activeLayer = stringValue(payload["doordash_active_layer"])
+        let modalTitle = stringValue(payload["doordash_modal_title"])
+        facts["dd_has_add_to_cart"] = hasAddToCart ? "true" : "false"
+        facts["dd_has_cart_cta"] = hasCartCTA ? "true" : "false"
+        facts["dd_has_continue_cta"] = hasContinueCTA ? "true" : "false"
+        if !addToCartLabel.isEmpty {
+            facts["dd_add_to_cart_label"] = addToCartLabel
+        }
+        if !activeLayer.isEmpty {
+            facts["dd_active_layer"] = activeLayer
+        }
+        if !modalTitle.isEmpty {
+            facts["dd_modal_title"] = modalTitle
+        }
+        return facts
     }
 
     private static func classifyDoorDashPage(payload: [String: Any], combined: String, url: String, inputs: [String]) -> String {
@@ -2605,23 +2628,40 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           doordashCustomizerGroupCount = customizerGroups.size;
           doordashCustomizerRequiredGroupCount = Array.from(customizerGroups.values()).filter((group) => group.required).length;
 
-          const modalOptionButtons = Array.from(itemModal.querySelectorAll('button,[role="button"],a[href],input[type="radio"],input[type="checkbox"]'))
+          const optionRootForElement = (el) => {
+            if (!el) return null;
+            const id = clean((el.getAttribute && el.getAttribute('id')) || '');
+            if (id) {
+              try {
+                const boundLabel = itemModal.querySelector(`label[for="${CSS.escape(id)}"]`);
+                if (boundLabel && visible(boundLabel)) {
+                  return boundLabel;
+                }
+              } catch (_) {}
+            }
+            return el.closest('label,[role="radio"],[role="checkbox"]') || closestWithText(el, 6, 180);
+          };
+
+          const modalOptionButtons = Array.from(itemModal.querySelectorAll('label,input[type="radio"],input[type="checkbox"],[role="radio"],[role="checkbox"]'))
             .filter(visible)
             .filter((el) => {
               const elementLabel = clean(labelForElement(el));
               if (/^back$/i.test(elementLabel)) {
                 return false;
               }
-              const root = closestWithText(el, 8, 220);
-              const label = firstMeaningfulTextLine(root) || labelForElement(el);
+              const root = optionRootForElement(el);
+              if (!root || !visible(root)) {
+                return false;
+              }
+              const label = firstMeaningfulTextLine(root) || labelForElement(root) || labelForElement(el);
               const text = clean([label, contextForElement(el, root)].join(' '));
               if (!text || isDoorDashNoise(text) || /close|dismiss|add special instructions|add to cart/i.test(text)) {
                 return false;
               }
-              if (el.matches('button[data-testid="optionFooter"]')) {
+              if (/^your recommended options\\b/i.test(text)) {
                 return false;
               }
-              if (/^your recommended options\\b/i.test(text)) {
+              if (/recommended|featured|favorites|cookie brownie|lava crunch|parmesan bites|stuffed cheesy bread/i.test(text)) {
                 return false;
               }
               if (customizerGroups.has(clean(label).toLowerCase())) {
@@ -2634,8 +2674,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             })
             .slice(0, 24);
           modalOptionButtons.forEach((el) => {
-            const root = closestWithText(el, 8, 220);
-            const label = firstMeaningfulTextLine(root) || labelForElement(el);
+            const root = optionRootForElement(el) || closestWithText(el, 6, 180);
+            const label = firstMeaningfulTextLine(root) || labelForElement(root) || labelForElement(el);
             if (!label) return;
             doordashItemCardCount += 1;
             pushUnique(doordashCandidates, candidateFromElement(el, 'dd_modifier_option', root, label));
@@ -4028,7 +4068,7 @@ struct MemlaBrowserView: View {
         case "dd_storefront":
             stateScopedRoles = ["dd_item_card", "dd_add_to_cart", "dd_cart_cta"]
         case "dd_item_modal":
-            stateScopedRoles = ["dd_modifier_option", "dd_modifier_save", "dd_add_to_cart", "dd_item_card", "dd_cart_cta", "dd_modal_close"]
+            stateScopedRoles = ["dd_modifier_option", "dd_modifier_save", "dd_add_to_cart", "dd_cart_cta", "dd_modal_close"]
         case "dd_cart_drawer", "dd_cart_page":
             stateScopedRoles = ["dd_cart_cta", "dd_continue_cta", "dd_tip_option", "dd_address_cta", "dd_modal_close"]
         case "dd_checkout":
@@ -5541,6 +5581,26 @@ struct MemlaBrowserView: View {
         case "dd_item_modal":
             let remainingModifierTerms = currentModifierTargetTerms()
             let addCandidate = candidates.first(where: { $0.role == "dd_add_to_cart" && !$0.blocked })
+                ?? {
+                    guard state.serviceFacts["dd_has_add_to_cart"] == "true" else {
+                        return nil
+                    }
+                    let label = state.serviceFacts["dd_add_to_cart_label"] ?? "Add to cart"
+                    return WebsiteC2ACandidate(
+                        id: "synthetic-dd-item-modal-add-to-cart",
+                        domIndex: -1,
+                        label: label,
+                        url: "",
+                        kind: "button",
+                        role: "dd_add_to_cart",
+                        score: 5.1,
+                        matchedTerms: [],
+                        blocked: false,
+                        tapSafety: "caution",
+                        tapReason: "Needs user review before Memla taps",
+                        reason: "DoorDash add-to-cart control"
+                    )
+                }()
             let saveCandidate = candidates.first(where: { $0.role == "dd_modifier_save" && !$0.blocked })
 
             if let targetedModifier = bestCandidate(role: "dd_modifier_option", in: candidates, targetTerms: remainingModifierTerms) {
@@ -5582,14 +5642,6 @@ struct MemlaBrowserView: View {
                     allowCaution: true,
                     status: "Adding item to cart...",
                     pendingRole: "dd_add_to_cart"
-                )
-            }
-            if let option = candidates.first(where: { $0.role == "dd_item_card" && !$0.blocked }) {
-                return MirrorAutoDriveAction(
-                    candidate: option,
-                    allowCaution: option.tapSafety == "caution",
-                    status: "Selecting \(option.label)...",
-                    pendingRole: ""
                 )
             }
         case "dd_cart_drawer", "dd_cart_page":
