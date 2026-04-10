@@ -376,6 +376,41 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         }
     }
 
+    func tapDoorDashAddToCart(capsule: ActionCapsule?) {
+        isRunningButtonAction = true
+        buttonActionStatus = "Adding item to cart..."
+        webView.evaluateJavaScript(Self.doorDashAddToCartScript) { [weak self] result, error in
+            DispatchQueue.main.async {
+                guard let self = self else {
+                    return
+                }
+                self.isRunningButtonAction = false
+                if let error = error {
+                    self.buttonActionStatus = error.localizedDescription
+                    return
+                }
+                guard let payload = result as? [String: Any] else {
+                    self.buttonActionStatus = "Add-to-cart tap returned no page result."
+                    return
+                }
+                let reason = Self.stringValue(payload["reason"]).replacingOccurrences(of: "_", with: " ")
+                let ok = payload["ok"] as? Bool ?? false
+                self.buttonActionStatus = ok ? reason.capitalized : "Add-to-cart tap blocked: \(reason)"
+                if ok {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) {
+                        self.inspectPage(capsule: capsule)
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                        guard !self.isInspecting, !self.isLoading else {
+                            return
+                        }
+                        self.inspectPage(capsule: capsule)
+                    }
+                }
+            }
+        }
+    }
+
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         websiteState = nil
         inspectionStatus = ""
@@ -586,10 +621,36 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         guard pageKind == "dd_item_modal" else {
             return candidates
         }
-        guard !candidates.contains(where: { $0.role == "dd_modifier_save" }) else {
-            return candidates
-        }
         let normalizedButtons = buttons.map(normalizedText)
+        var enriched = candidates
+
+        if !enriched.contains(where: { $0.role == "dd_add_to_cart" }),
+           let addLabel = buttons.first(where: {
+               let normalized = normalizedText($0)
+               return normalized.contains("add to cart") || normalized.contains("update item")
+           }) {
+            enriched.append(
+                WebsiteC2ACandidate(
+                    id: "synthetic-dd-add-to-cart",
+                    domIndex: -1,
+                    label: addLabel,
+                    url: "",
+                    kind: "button",
+                    role: "dd_add_to_cart",
+                    score: 5.1,
+                    matchedTerms: [],
+                    blocked: false,
+                    tapSafety: "caution",
+                    tapReason: "Needs user review before Memla taps",
+                    reason: "DoorDash add-to-cart control"
+                )
+            )
+        }
+
+        guard !enriched.contains(where: { $0.role == "dd_modifier_save" }),
+              !enriched.contains(where: { $0.role == "dd_add_to_cart" }) else {
+            return enriched
+        }
         let saveLabel: String?
         if normalizedButtons.contains(where: { $0 == "save" }) {
             saveLabel = "Save"
@@ -601,9 +662,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             saveLabel = nil
         }
         guard let saveLabel else {
-            return candidates
+            return enriched
         }
-        var enriched = candidates
         enriched.append(
             WebsiteC2ACandidate(
                 id: "synthetic-dd-modifier-save",
@@ -2181,6 +2241,59 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
       activate(footer);
       activate(button);
       return { ok: true, reason: 'tapped_doordash_modifier_save', label: clean(button.innerText || button.textContent || '') };
+    })();
+    """
+
+    private static let doorDashAddToCartScript = """
+    (() => {
+      const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+      const visible = (el) => {
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 1 && rect.height > 1;
+      };
+      const addMatcher = (el) => {
+        const text = clean(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
+        return /^(?:add to cart|update item)(?:\\s*[-+]\\s*.*)?$/i.test(text) || /add to cart|update item/i.test(text);
+      };
+      const button = Array.from(document.querySelectorAll('#prism-modal-footer button, button, [role="button"]'))
+        .filter(visible)
+        .find(addMatcher);
+      if (!button) {
+        return { ok: false, reason: 'doordash_add_to_cart_not_found' };
+      }
+      const footer = button.closest('#prism-modal-footer, [data-testid="in-content-modal-footer-container"], .ModalFooter-sc-ibg5mu-5, section, div');
+      const activate = (node) => {
+        if (!node) return;
+        try { node.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
+        const rect = typeof node.getBoundingClientRect === 'function'
+          ? node.getBoundingClientRect()
+          : { left: 0, top: 0, width: 0, height: 0 };
+        const pointInit = {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          clientX: rect.left + rect.width / 2,
+          clientY: rect.top + rect.height / 2
+        };
+        try { node.dispatchEvent(new PointerEvent('pointerdown', { ...pointInit, pointerId: 1, pointerType: 'touch', isPrimary: true })); } catch (_) {}
+        try { node.dispatchEvent(new TouchEvent('touchstart', { bubbles: true, cancelable: true, composed: true })); } catch (_) {}
+        try { node.dispatchEvent(new PointerEvent('pointerup', { ...pointInit, pointerId: 1, pointerType: 'touch', isPrimary: true })); } catch (_) {}
+        try { node.dispatchEvent(new TouchEvent('touchend', { bubbles: true, cancelable: true, composed: true })); } catch (_) {}
+        ['mousedown', 'mouseup', 'click'].forEach((type) => {
+          try {
+            node.dispatchEvent(new MouseEvent(type, { ...pointInit, view: window }));
+          } catch (_) {}
+        });
+        if (typeof node.click === 'function') {
+          try { node.click(); } catch (_) {}
+        }
+      };
+      activate(footer);
+      activate(button);
+      return { ok: true, reason: 'tapped_doordash_add_to_cart', label: clean(button.innerText || button.textContent || '') };
     })();
     """
 
@@ -5426,7 +5539,11 @@ struct MemlaBrowserView: View {
                 )
             }
         case "dd_item_modal":
-            if let targetedModifier = bestCandidate(role: "dd_modifier_option", in: candidates, targetTerms: currentModifierTargetTerms()) {
+            let remainingModifierTerms = currentModifierTargetTerms()
+            let addCandidate = candidates.first(where: { $0.role == "dd_add_to_cart" && !$0.blocked })
+            let saveCandidate = candidates.first(where: { $0.role == "dd_modifier_save" && !$0.blocked })
+
+            if let targetedModifier = bestCandidate(role: "dd_modifier_option", in: candidates, targetTerms: remainingModifierTerms) {
                 return MirrorAutoDriveAction(
                     candidate: targetedModifier.candidate,
                     allowCaution: true,
@@ -5435,7 +5552,15 @@ struct MemlaBrowserView: View {
                     consumedTerms: targetedModifier.matched
                 )
             }
-            if let save = candidates.first(where: { $0.role == "dd_modifier_save" && !$0.blocked }) {
+            if remainingModifierTerms.isEmpty, let add = addCandidate {
+                return MirrorAutoDriveAction(
+                    candidate: add,
+                    allowCaution: true,
+                    status: "Adding item to cart...",
+                    pendingRole: "dd_add_to_cart"
+                )
+            }
+            if addCandidate == nil, let save = saveCandidate {
                 return MirrorAutoDriveAction(
                     candidate: save,
                     allowCaution: true,
@@ -5443,7 +5568,7 @@ struct MemlaBrowserView: View {
                     pendingRole: ""
                 )
             }
-            if let fallbackModifier = fallbackDoorDashModifierCandidate(in: candidates) {
+            if addCandidate == nil, let fallbackModifier = fallbackDoorDashModifierCandidate(in: candidates) {
                 return MirrorAutoDriveAction(
                     candidate: fallbackModifier,
                     allowCaution: true,
@@ -5451,7 +5576,7 @@ struct MemlaBrowserView: View {
                     pendingRole: ""
                 )
             }
-            if let add = candidates.first(where: { $0.role == "dd_add_to_cart" && !$0.blocked }) {
+            if let add = addCandidate {
                 return MirrorAutoDriveAction(
                     candidate: add,
                     allowCaution: true,
@@ -5536,6 +5661,10 @@ struct MemlaBrowserView: View {
         }
         if candidate.role == "dd_modifier_save" {
             browser.tapDoorDashModifierSave(capsule: route.capsule)
+            return
+        }
+        if candidate.role == "dd_add_to_cart", browser.websiteState?.pageKind == "dd_item_modal" {
+            browser.tapDoorDashAddToCart(capsule: route.capsule)
             return
         }
         browser.tapButtonCandidate(candidate, allowCaution: allowCaution, capsule: route.capsule)
