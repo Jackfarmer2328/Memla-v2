@@ -2597,6 +2597,13 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             optionGroupCache.set(root, group);
             return group;
           };
+          const opensSubflowForOptionRoot = (root) => {
+            if (!root || !root.querySelectorAll) return false;
+            return Array.from(root.querySelectorAll('svg path')).some((path) => {
+              const d = clean(path.getAttribute('d') || '');
+              return d.includes('11.707 7.29289') || d.includes('9.58586 7.99992');
+            });
+          };
 
           const fingerprintFor = (role, label, groupKey, groupLabel) =>
             clean([role, groupKey, groupLabel, label].join(' | ')).toLowerCase();
@@ -2615,6 +2622,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             const resolvedGroupKey = clean(group?.groupKey || inferGroupKey(resolvedGroupLabel, resolvedLabel));
             const fingerprint = fingerprintFor('dd_modifier_option', resolvedLabel, resolvedGroupKey, resolvedGroupLabel);
             const isSelected = checkedStateForOption(control || el, root);
+            const opensSubflow = opensSubflowForOptionRoot(root);
             let score = 0;
             const normalizedLabel = normalized(resolvedLabel);
             const normalizedTarget = normalized(targetLabel);
@@ -2623,14 +2631,14 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             if (targetGroupKey && resolvedGroupKey === targetGroupKey) score += 110;
             if (targetGroupLabel && normalized(resolvedGroupLabel) === normalized(targetGroupLabel)) score += 70;
             if (targetFingerprint && fingerprint === normalized(targetFingerprint)) score += 180;
-            return { el, root, control, resolvedLabel, resolvedGroupKey, resolvedGroupLabel, fingerprint, isSelected, score };
+            return { el, root, control, resolvedLabel, resolvedGroupKey, resolvedGroupLabel, fingerprint, isSelected, opensSubflow, score };
           }).filter(Boolean).sort((left, right) => right.score - left.score);
 
           const best = scored.find((item) => item.score >= 120);
           if (!best) {
             return { ok: false, reason: 'doordash_modifier_option_not_found' };
           }
-          if (best.isSelected) {
+          if (best.isSelected && !best.opensSubflow) {
             return {
               ok: true,
               reason: 'doordash_modifier_already_selected',
@@ -2673,8 +2681,12 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             }
           };
 
-          const primaryTarget = best.control || best.root || best.el;
-          const fallbackTarget = best.root && best.root !== primaryTarget ? best.root : best.el;
+          const primaryTarget = best.opensSubflow
+            ? (best.root || best.el || best.control)
+            : (best.control || best.root || best.el);
+          const fallbackTarget = best.opensSubflow
+            ? (best.control && best.control !== primaryTarget ? best.control : best.el)
+            : (best.root && best.root !== primaryTarget ? best.root : best.el);
           activate(primaryTarget);
           let selectedAfterTap = checkedStateForOption(best.control || best.el, best.root);
           if (!selectedAfterTap && fallbackTarget && fallbackTarget !== primaryTarget) {
@@ -4938,38 +4950,33 @@ struct MemlaBrowserView: View {
     private func pendingDoorDashStepConfirmed(in state: WebsiteC2AState, signature: String) -> Bool {
         switch pendingStepActionRole {
         case "dd_modifier_option":
+            let activeGroupKey = state.serviceFacts["dd_active_group_key"] ?? ""
+            let activeGroupLabel = normalizedCommerceTerm(state.serviceFacts["dd_active_group_label"] ?? "")
+            let targetGroupKey = pendingStepTargetGroupKey
+            let targetGroupLabel = normalizedCommerceTerm(pendingStepTargetGroupLabel)
+            let previousGroupLabel = normalizedCommerceTerm(pendingStepObservedGroupLabel)
+            let changedFromTargetGroup = (!targetGroupKey.isEmpty && !activeGroupKey.isEmpty && activeGroupKey != targetGroupKey)
+                || (!targetGroupLabel.isEmpty && !activeGroupLabel.isEmpty && activeGroupLabel != targetGroupLabel)
+            let changedFromObservedGroup = (!pendingStepObservedGroupKey.isEmpty && !activeGroupKey.isEmpty && activeGroupKey != pendingStepObservedGroupKey)
+                || (!previousGroupLabel.isEmpty && !activeGroupLabel.isEmpty && activeGroupLabel != previousGroupLabel)
+            let advancedSubflow = pendingStepTapAcknowledged
+                && pendingStepTargetOpensSubflow
+                && signature != pendingStepActionSignature
+                && (changedFromTargetGroup || changedFromObservedGroup)
             if let candidate = matchingPendingDoorDashModifierCandidate(in: state), candidate.isSelected {
-                return true
+                if !pendingStepTargetOpensSubflow || advancedSubflow {
+                    return true
+                }
             }
             if pendingStepCommitKind == "requested" {
                 if pendingStepTapVerifiedSelection && signature != pendingStepActionSignature {
                     return true
                 }
-                if pendingStepTapAcknowledged,
-                   pendingStepTargetOpensSubflow,
-                   signature != pendingStepActionSignature
-                {
-                    let activeGroupKey = state.serviceFacts["dd_active_group_key"] ?? ""
-                    let activeGroupLabel = normalizedCommerceTerm(state.serviceFacts["dd_active_group_label"] ?? "")
-                    let targetGroupKey = pendingStepTargetGroupKey
-                    let targetGroupLabel = normalizedCommerceTerm(pendingStepTargetGroupLabel)
-                    let previousGroupLabel = normalizedCommerceTerm(pendingStepObservedGroupLabel)
-                    let changedFromTargetGroup = (!targetGroupKey.isEmpty && !activeGroupKey.isEmpty && activeGroupKey != targetGroupKey)
-                        || (!targetGroupLabel.isEmpty && !activeGroupLabel.isEmpty && activeGroupLabel != targetGroupLabel)
-                    let changedFromObservedGroup = (!pendingStepObservedGroupKey.isEmpty && !activeGroupKey.isEmpty && activeGroupKey != pendingStepObservedGroupKey)
-                        || (!previousGroupLabel.isEmpty && !activeGroupLabel.isEmpty && activeGroupLabel != previousGroupLabel)
-                    if changedFromTargetGroup || changedFromObservedGroup {
-                        return true
-                    }
-                }
-                return false
+                return advancedSubflow
             }
-            let activeGroupKey = state.serviceFacts["dd_active_group_key"] ?? ""
-            let activeGroupLabel = normalizedCommerceTerm(state.serviceFacts["dd_active_group_label"] ?? "")
             if !pendingStepObservedGroupKey.isEmpty, !activeGroupKey.isEmpty, activeGroupKey != pendingStepObservedGroupKey {
                 return true
             }
-            let previousGroupLabel = normalizedCommerceTerm(pendingStepObservedGroupLabel)
             if !previousGroupLabel.isEmpty, !activeGroupLabel.isEmpty, activeGroupLabel != previousGroupLabel, signature != pendingStepActionSignature {
                 return true
             }
