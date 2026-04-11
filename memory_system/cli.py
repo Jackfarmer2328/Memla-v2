@@ -1112,7 +1112,10 @@ def _handle_memla_serve(args: argparse.Namespace) -> int:
     host = str(args.host or "127.0.0.1").strip() or "127.0.0.1"
     port = int(args.port)
     print(f"Serving Memla API at http://{host}:{port}")
+    print("Memla API version: 0.1.1")
     print("Routes: GET /health, GET /state, GET /memory, GET /actions, GET /missions, POST /missions, POST /actions/plan, POST /actions/draft, POST /actions/capsule, POST /run, POST /scout, POST /followup, POST /debug/browser")
+    print("Browser debug upload: enabled at POST /debug/browser")
+    print("If an iPhone debug upload gets HTTP 404 for /debug/browser, restart the server from this repo checkout with `py -3 memla.py serve ...`.")
     print("Press Ctrl+C to stop the local API server.")
     try:
         _serve_memla_api(

@@ -3,7 +3,7 @@ import Foundation
 enum MemlaClientError: Error, LocalizedError {
     case invalidBaseURL
     case invalidServerHost(String)
-    case badResponse
+    case httpStatus(code: Int, path: String, detail: String)
 
     var errorDescription: String? {
         switch self {
@@ -11,8 +11,17 @@ enum MemlaClientError: Error, LocalizedError {
             return "Memla base URL is invalid."
         case .invalidServerHost(let detail):
             return detail
-        case .badResponse:
-            return "Memla returned an unexpected response."
+        case .httpStatus(let code, let path, let detail):
+            if code == 404 && path == "/debug/browser" {
+                if detail.isEmpty {
+                    return "Memla server returned HTTP 404 for /debug/browser. This usually means the running server does not include browser debug uploads yet. Restart the server from this repo checkout with `py -3 memla.py serve ...` and confirm the startup banner lists `POST /debug/browser`."
+                }
+                return "Memla server returned HTTP 404 for /debug/browser (\(detail)). This usually means the running server does not include browser debug uploads yet. Restart the server from this repo checkout with `py -3 memla.py serve ...` and confirm the startup banner lists `POST /debug/browser`."
+            }
+            if detail.isEmpty {
+                return "Memla server returned HTTP \(code) for \(path)."
+            }
+            return "Memla server returned HTTP \(code) for \(path): \(detail)"
         }
     }
 }
@@ -121,7 +130,7 @@ actor MemlaClient {
         let request = try URLRequest(url: endpoint(path: path, baseURL: baseURL))
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw MemlaClientError.badResponse
+            throw httpError(response: response, data: data, path: path)
         }
         return try JSONDecoder().decode(T.self, from: data)
     }
@@ -133,9 +142,43 @@ actor MemlaClient {
         request.httpBody = try JSONEncoder().encode(payload)
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw MemlaClientError.badResponse
+            throw httpError(response: response, data: data, path: path)
         }
         return try JSONDecoder().decode(T.self, from: data)
+    }
+
+    private func httpError(response: URLResponse, data: Data, path: String) -> MemlaClientError {
+        guard let http = response as? HTTPURLResponse else {
+            return .httpStatus(code: -1, path: path, detail: "unexpected response type")
+        }
+        let detail = responseDetail(from: data)
+        return .httpStatus(code: http.statusCode, path: path, detail: detail)
+    }
+
+    private func responseDetail(from data: Data) -> String {
+        guard !data.isEmpty else {
+            return ""
+        }
+        if let anyObject = try? JSONSerialization.jsonObject(with: data),
+           let object = anyObject as? [String: Any] {
+            if let detail = object["detail"] as? String, !detail.isEmpty {
+                return detail
+            }
+            if let message = object["message"] as? String, !message.isEmpty {
+                return message
+            }
+            if let error = object["error"] as? String, !error.isEmpty {
+                return error
+            }
+        }
+        let raw = String(data: data, encoding: .utf8)?
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if raw.count <= 180 {
+            return raw
+        }
+        let index = raw.index(raw.startIndex, offsetBy: 180)
+        return String(raw[..<index]) + "..."
     }
 
     private func endpoint(path: String, baseURL: String) throws -> URL {

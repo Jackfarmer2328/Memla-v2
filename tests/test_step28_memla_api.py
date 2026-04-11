@@ -28,8 +28,50 @@ def test_memla_api_health_exposes_runtime_defaults():
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is True
+    assert payload["api_version"] == "0.1.1"
+    assert payload["capabilities"]["browser_debug_upload"] is True
     assert payload["runtime_defaults"]["model"] == "phi3:mini"
     assert payload["runtime_defaults"]["heuristic_only"] is True
+
+
+def test_memla_api_browser_debug_endpoint_logs_payload(capsys):
+    app = create_memla_app(default_heuristic_only=True)
+    client = TestClient(app)
+
+    response = client.post(
+        "/debug/browser",
+        json={
+            "source": "ios_browser",
+            "reason": "pre_action:dd_modifier_option:Large",
+            "title": "Build Your Own Pizza",
+            "url": "https://www.doordash.com/store/example",
+            "page_kind": "dd_item_modal",
+            "inspection_status": "Inspecting...",
+            "button_action_status": "Selecting Large...",
+            "auto_drive_enabled": True,
+            "auto_drive_status": "Selecting Large...",
+            "pending_step": {"role": "dd_modifier_option", "label": "Large"},
+            "top_candidates": [
+                {
+                    "role": "dd_modifier_option",
+                    "label": "Large",
+                    "score": 9.8,
+                    "group_key": "size",
+                    "group_label": "Choose your size",
+                    "selected": False,
+                    "opens_subflow": True,
+                }
+            ],
+            "agency_trace": ["[00:00:01] Action: dd_modifier_option -> Large"],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    captured = capsys.readouterr()
+    assert "[Memla Browser Debug]" in captured.out
+    assert "pre_action:dd_modifier_option:Large" in captured.out
 
 
 def test_memla_api_state_reads_browser_state(tmp_path):

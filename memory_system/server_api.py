@@ -287,6 +287,10 @@ def create_memla_app(
         return {
             "ok": True,
             "service": "memla-api",
+            "api_version": app.version,
+            "capabilities": {
+                "browser_debug_upload": True,
+            },
             "runtime_defaults": {
                 "model": defaults["model"],
                 "provider": defaults["provider"],
