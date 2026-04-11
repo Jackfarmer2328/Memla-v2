@@ -24,10 +24,10 @@ struct WebsiteC2ACandidate: Identifiable {
     let tapSafety: String
     let tapReason: String
     let reason: String
-    let groupKey: String = ""
-    let groupLabel: String = ""
-    let groupRequired: Bool = false
-    let tapFingerprint: String = ""
+    let groupKey: String
+    let groupLabel: String
+    let groupRequired: Bool
+    let tapFingerprint: String
 
     init(
         id: String,
