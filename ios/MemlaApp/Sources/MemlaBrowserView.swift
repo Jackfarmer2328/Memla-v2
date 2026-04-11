@@ -3866,6 +3866,9 @@ struct MemlaBrowserView: View {
     @State private var lastModifierSelectionAt = Date.distantPast
     @State private var pendingStepActionRole = ""
     @State private var pendingStepActionLabel = ""
+    @State private var pendingStepTargetGroupKey = ""
+    @State private var pendingStepTargetGroupLabel = ""
+    @State private var pendingStepTargetTapFingerprint = ""
     @State private var pendingStepActionSignature = ""
     @State private var pendingStepActionAt = Date.distantPast
     @State private var pendingStepTapAcknowledged = false
@@ -3952,6 +3955,9 @@ struct MemlaBrowserView: View {
                 lastDoorDashPlannerMarker = ""
                 pendingStepActionRole = ""
                 pendingStepActionLabel = ""
+                pendingStepTargetGroupKey = ""
+                pendingStepTargetGroupLabel = ""
+                pendingStepTargetTapFingerprint = ""
                 pendingStepActionSignature = ""
                 pendingStepActionAt = .distantPast
                 pendingStepTapAcknowledged = false
@@ -4245,6 +4251,9 @@ struct MemlaBrowserView: View {
         lastModifierSelectionAt = .distantPast
         pendingStepActionRole = ""
         pendingStepActionLabel = ""
+        pendingStepTargetGroupKey = ""
+        pendingStepTargetGroupLabel = ""
+        pendingStepTargetTapFingerprint = ""
         pendingStepActionSignature = ""
         pendingStepActionAt = .distantPast
         pendingStepTapAcknowledged = false
@@ -4631,6 +4640,9 @@ struct MemlaBrowserView: View {
         lastModifierSelectionAt = .distantPast
         pendingStepActionRole = ""
         pendingStepActionLabel = ""
+        pendingStepTargetGroupKey = ""
+        pendingStepTargetGroupLabel = ""
+        pendingStepTargetTapFingerprint = ""
         pendingStepActionSignature = ""
         pendingStepActionAt = .distantPast
         pendingStepTapAcknowledged = false
@@ -4645,6 +4657,9 @@ struct MemlaBrowserView: View {
     private func clearPendingStepAction() {
         pendingStepActionRole = ""
         pendingStepActionLabel = ""
+        pendingStepTargetGroupKey = ""
+        pendingStepTargetGroupLabel = ""
+        pendingStepTargetTapFingerprint = ""
         pendingStepActionSignature = ""
         pendingStepActionAt = .distantPast
         pendingStepTapAcknowledged = false
@@ -4659,6 +4674,7 @@ struct MemlaBrowserView: View {
     private func recordPendingDoorDashStep(
         role: String,
         label: String,
+        candidate: WebsiteC2ACandidate?,
         signature: String,
         state: WebsiteC2AState,
         consumedTerms: Set<String>,
@@ -4666,6 +4682,9 @@ struct MemlaBrowserView: View {
     ) {
         pendingStepActionRole = role
         pendingStepActionLabel = label
+        pendingStepTargetGroupKey = candidate?.groupKey ?? ""
+        pendingStepTargetGroupLabel = candidate?.groupLabel ?? ""
+        pendingStepTargetTapFingerprint = candidate?.tapFingerprint ?? ""
         pendingStepActionSignature = signature
         pendingStepActionAt = Date()
         pendingStepTapAcknowledged = false
@@ -4679,7 +4698,10 @@ struct MemlaBrowserView: View {
 
     private func matchingPendingDoorDashModifierCandidate(in state: WebsiteC2AState) -> WebsiteC2ACandidate? {
         let targetLabel = normalizedCommerceTerm(pendingStepActionLabel)
-        let targetGroupLabel = normalizedCommerceTerm(pendingStepObservedGroupLabel)
+        let targetGroupKey = pendingStepTargetGroupKey
+        let targetGroupLabel = normalizedCommerceTerm(pendingStepTargetGroupLabel)
+        let targetFingerprint = normalizedCommerceTerm(pendingStepTargetTapFingerprint)
+        let observedGroupLabel = normalizedCommerceTerm(pendingStepObservedGroupLabel)
         return state.candidates.first { candidate in
             guard candidate.role == "dd_modifier_option", !candidate.blocked else {
                 return false
@@ -4687,13 +4709,27 @@ struct MemlaBrowserView: View {
             guard normalizedCommerceTerm(candidate.label) == targetLabel else {
                 return false
             }
-            if !pendingStepObservedGroupKey.isEmpty, candidate.groupKey == pendingStepObservedGroupKey {
+            if !targetFingerprint.isEmpty,
+               normalizedCommerceTerm(candidate.tapFingerprint) == targetFingerprint {
+                return true
+            }
+            if !targetGroupKey.isEmpty, candidate.groupKey == targetGroupKey {
                 return true
             }
             if !targetGroupLabel.isEmpty, normalizedCommerceTerm(candidate.groupLabel) == targetGroupLabel {
                 return true
             }
-            return pendingStepObservedGroupKey.isEmpty && targetGroupLabel.isEmpty
+            if !pendingStepObservedGroupKey.isEmpty, candidate.groupKey == pendingStepObservedGroupKey {
+                return true
+            }
+            if !observedGroupLabel.isEmpty, normalizedCommerceTerm(candidate.groupLabel) == observedGroupLabel {
+                return true
+            }
+            return pendingStepObservedGroupKey.isEmpty
+                && observedGroupLabel.isEmpty
+                && targetGroupKey.isEmpty
+                && targetGroupLabel.isEmpty
+                && targetFingerprint.isEmpty
         }
     }
 
@@ -4702,6 +4738,9 @@ struct MemlaBrowserView: View {
         case "dd_modifier_option":
             if let candidate = matchingPendingDoorDashModifierCandidate(in: state), candidate.isSelected {
                 return true
+            }
+            if pendingStepCommitKind == "requested" {
+                return false
             }
             let activeGroupKey = state.serviceFacts["dd_active_group_key"] ?? ""
             let activeGroupLabel = normalizedCommerceTerm(state.serviceFacts["dd_active_group_label"] ?? "")
@@ -7120,6 +7159,7 @@ struct MemlaBrowserView: View {
             recordPendingDoorDashStep(
                 role: action.candidate.role,
                 label: action.candidate.label,
+                candidate: action.candidate,
                 signature: signature,
                 state: state,
                 consumedTerms: Set(action.consumedTerms),
@@ -7129,6 +7169,7 @@ struct MemlaBrowserView: View {
             recordPendingDoorDashStep(
                 role: action.candidate.role,
                 label: action.candidate.label,
+                candidate: action.candidate,
                 signature: signature,
                 state: state,
                 consumedTerms: [],
