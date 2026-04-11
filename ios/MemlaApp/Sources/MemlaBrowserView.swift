@@ -3914,6 +3914,7 @@ struct MemlaBrowserView: View {
     @State private var lastAgencyPageMarker = ""
     @State private var lastDoorDashPlannerMarker = ""
     @State private var lastModifierSelectionLabel = ""
+    @State private var lastModifierSelectionGroupKey = ""
     @State private var lastModifierSelectionAt = Date.distantPast
     @State private var pendingStepActionRole = ""
     @State private var pendingStepActionLabel = ""
@@ -3998,6 +3999,7 @@ struct MemlaBrowserView: View {
                 doorDashModifierCommitPending = false
                 doorDashPendingCommitKind = ""
                 lastModifierSelectionLabel = ""
+                lastModifierSelectionGroupKey = ""
                 lastModifierSelectionAt = .distantPast
                 primaryFoodItemAdded = false
                 pendingFoodAddOns = initialFoodAddOns(from: route.capsule)
@@ -4304,6 +4306,7 @@ struct MemlaBrowserView: View {
         doorDashModifierCommitPending = false
         doorDashPendingCommitKind = ""
         lastModifierSelectionLabel = ""
+        lastModifierSelectionGroupKey = ""
         lastModifierSelectionAt = .distantPast
         pendingStepActionRole = ""
         pendingStepActionLabel = ""
@@ -4463,6 +4466,72 @@ struct MemlaBrowserView: View {
         }
     }
 
+    private func requestedDoorDashSizeTerm() -> String? {
+        guard let capsule = route.capsule else {
+            return nil
+        }
+        let specSizes = orderSpecValues { $0.size }
+        guard let size = specSizes.first ?? capsule.slots["size"], !size.isEmpty else {
+            return nil
+        }
+        let normalized = normalizedCommerceTerm(size)
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    private func preservedDoorDashGroupKinds(for stage: FoodModifierStage) -> Set<DoorDashCustomizerGroupKind> {
+        var groups = Set<DoorDashCustomizerGroupKind>()
+        if requestedDoorDashSizeTerm() != nil, stage != .size {
+            groups.insert(.size)
+        }
+        return groups
+    }
+
+    private func unresolvedRequiredDoorDashGroup(
+        in candidates: [WebsiteC2ACandidate],
+        excluding excludedGroups: Set<DoorDashCustomizerGroupKind>
+    ) -> (kind: DoorDashCustomizerGroupKind, label: String)? {
+        struct GroupStats {
+            var label: String
+            var required: Bool
+            var hasSelected: Bool
+            var order: Int
+        }
+
+        var statsByGroup: [DoorDashCustomizerGroupKind: GroupStats] = [:]
+        for (index, candidate) in candidates.enumerated() {
+            guard candidate.role == "dd_modifier_option", !candidate.blocked else {
+                continue
+            }
+            let kind = doorDashGroupKind(for: candidate)
+            guard kind != .unknown, !excludedGroups.contains(kind) else {
+                continue
+            }
+            var stats = statsByGroup[kind] ?? GroupStats(
+                label: candidate.groupLabel,
+                required: candidate.groupRequired,
+                hasSelected: candidate.isSelected,
+                order: index
+            )
+            if stats.label.isEmpty {
+                stats.label = candidate.groupLabel
+            }
+            stats.required = stats.required || candidate.groupRequired
+            stats.hasSelected = stats.hasSelected || candidate.isSelected
+            statsByGroup[kind] = stats
+        }
+
+        return statsByGroup
+            .filter { $0.value.required && !$0.value.hasSelected }
+            .sorted { left, right in
+                if left.value.order == right.value.order {
+                    return left.key.rawValue < right.key.rawValue
+                }
+                return left.value.order < right.value.order
+            }
+            .map { (kind: $0.key, label: $0.value.label) }
+            .first
+    }
+
     private func expandedCommerceTerms(from rawTerms: [String]) -> [String] {
         var ordered: [String] = []
         for raw in rawTerms {
@@ -4619,12 +4688,25 @@ struct MemlaBrowserView: View {
         return (best.0, best.1)
     }
 
-    private func shouldSaveAfterModifierSelection(saveCandidate: WebsiteC2ACandidate?, requestedTerms: [String]) -> Bool {
+    private func shouldSaveAfterModifierSelection(
+        saveCandidate: WebsiteC2ACandidate?,
+        requestedTerms: [String],
+        activeGroup: DoorDashCustomizerGroupKind,
+        activeGroupRequired: Bool,
+        preservedGroups: Set<DoorDashCustomizerGroupKind>
+    ) -> Bool {
         guard saveCandidate != nil else {
             return false
         }
         let recentLabel = normalizedCommerceTerm(lastModifierSelectionLabel)
         guard !recentLabel.isEmpty else {
+            return false
+        }
+        let recentGroup = doorDashGroupKind(from: lastModifierSelectionGroupKey)
+        if preservedGroups.contains(recentGroup) {
+            return false
+        }
+        if activeGroupRequired, activeGroup != .unknown, recentGroup != activeGroup {
             return false
         }
         guard Date().timeIntervalSince(lastModifierSelectionAt) < 4.0 else {
@@ -4637,7 +4719,8 @@ struct MemlaBrowserView: View {
 
     private func fallbackDoorDashModifierCandidate(
         in candidates: [WebsiteC2ACandidate],
-        activeGroup: DoorDashCustomizerGroupKind = .unknown
+        activeGroup: DoorDashCustomizerGroupKind = .unknown,
+        disallowedGroups: Set<DoorDashCustomizerGroupKind> = []
     ) -> WebsiteC2ACandidate? {
         let ignoredLabels = Set([
             "choose your size",
@@ -4651,6 +4734,7 @@ struct MemlaBrowserView: View {
            let whole = candidates.first(where: {
                $0.role == "dd_modifier_option"
                    && !$0.blocked
+                   && !disallowedGroups.contains(doorDashGroupKind(for: $0))
                    && normalizedCommerceTerm($0.label) == "whole"
            }) {
             return whole
@@ -4660,12 +4744,16 @@ struct MemlaBrowserView: View {
                candidate.role == "dd_modifier_option"
                    && !candidate.blocked
                    && doorDashGroupKind(for: candidate) == activeGroup
+                   && !disallowedGroups.contains(doorDashGroupKind(for: candidate))
                    && !ignoredLabels.contains(normalizedCommerceTerm(candidate.label))
            }) {
             return groupScoped
         }
         return candidates.first { candidate in
             guard candidate.role == "dd_modifier_option", !candidate.blocked else {
+                return false
+            }
+            if disallowedGroups.contains(doorDashGroupKind(for: candidate)) {
                 return false
             }
             let label = normalizedCommerceTerm(candidate.label)
@@ -4694,6 +4782,7 @@ struct MemlaBrowserView: View {
         doorDashModifierCommitPending = false
         doorDashPendingCommitKind = ""
         lastModifierSelectionLabel = ""
+        lastModifierSelectionGroupKey = ""
         lastModifierSelectionAt = .distantPast
         pendingStepActionRole = ""
         pendingStepActionLabel = ""
@@ -4841,6 +4930,7 @@ struct MemlaBrowserView: View {
             doorDashModifierCommitPending = true
             doorDashPendingCommitKind = pendingStepCommitKind
             lastModifierSelectionLabel = pendingStepActionLabel
+            lastModifierSelectionGroupKey = pendingStepTargetGroupKey
             lastModifierSelectionAt = Date()
         case "dd_modifier_save":
             if !inFlightModifierTerms.isEmpty {
@@ -4850,6 +4940,7 @@ struct MemlaBrowserView: View {
             doorDashModifierCommitPending = false
             doorDashPendingCommitKind = ""
             lastModifierSelectionLabel = ""
+            lastModifierSelectionGroupKey = ""
             lastModifierSelectionAt = .distantPast
         default:
             break
@@ -5438,9 +5529,11 @@ struct MemlaBrowserView: View {
         let focusKind: DoorDashCustomizerFocusKind
         let activeGroupKind: DoorDashCustomizerGroupKind
         let activeGroupLabel: String
+        let activeGroupRequired: Bool
         let stage: FoodModifierStage
         let remainingTerms: [String]
         let requestedTerms: [String]
+        let preservedGroups: Set<DoorDashCustomizerGroupKind>
         let focusLabel: String
         let targetCandidate: WebsiteC2ACandidate?
         let prerequisiteCandidate: WebsiteC2ACandidate?
@@ -5456,6 +5549,9 @@ struct MemlaBrowserView: View {
         let requestedModifierTerms = allRequestedModifierTerms()
         let detectedActiveGroupKind = doorDashActiveGroupKind(from: state, candidates: candidates)
         let detectedActiveGroupLabel = doorDashActiveGroupLabel(from: state, candidates: candidates)
+        let detectedActiveGroupRequired = state.serviceFacts["dd_active_group_required"] == "true"
+        let preservedGroups = preservedDoorDashGroupKinds(for: modifierTargets.stage)
+        let unresolvedRequiredGroup = unresolvedRequiredDoorDashGroup(in: candidates, excluding: preservedGroups)
         let saveCandidate = candidates.first(where: { $0.role == "dd_modifier_save" && !$0.blocked })
         let addCandidate: WebsiteC2ACandidate?
         if let existingAddCandidate = candidates.first(where: { $0.role == "dd_add_to_cart" && !$0.blocked }) {
@@ -5491,32 +5587,68 @@ struct MemlaBrowserView: View {
         let preferredGroups = preferredDoorDashGroupKinds(for: modifierTargets.stage)
         let activeGroupKind: DoorDashCustomizerGroupKind
         let activeGroupLabel: String
+        let activeGroupRequired: Bool
         if let initialTargetCandidate {
             let targetGroupKind = doorDashGroupKind(for: initialTargetCandidate)
             if targetGroupKind != .unknown, preferredGroups.contains(targetGroupKind), targetGroupKind != detectedActiveGroupKind {
                 activeGroupKind = targetGroupKind
                 activeGroupLabel = initialTargetCandidate.groupLabel.isEmpty ? detectedActiveGroupLabel : initialTargetCandidate.groupLabel
+                activeGroupRequired = unresolvedRequiredGroup?.kind == targetGroupKind || detectedActiveGroupRequired
+            } else if let unresolvedRequiredGroup,
+                      unresolvedRequiredGroup.kind != .unknown,
+                      (detectedActiveGroupKind == .unknown
+                        || preservedGroups.contains(detectedActiveGroupKind)
+                        || !detectedActiveGroupRequired) {
+                activeGroupKind = unresolvedRequiredGroup.kind
+                activeGroupLabel = unresolvedRequiredGroup.label.isEmpty ? detectedActiveGroupLabel : unresolvedRequiredGroup.label
+                activeGroupRequired = true
             } else {
                 activeGroupKind = detectedActiveGroupKind
                 activeGroupLabel = detectedActiveGroupLabel
+                activeGroupRequired = detectedActiveGroupRequired
             }
+        } else if let unresolvedRequiredGroup,
+                  unresolvedRequiredGroup.kind != .unknown,
+                  (detectedActiveGroupKind == .unknown
+                    || preservedGroups.contains(detectedActiveGroupKind)
+                    || !detectedActiveGroupRequired) {
+            activeGroupKind = unresolvedRequiredGroup.kind
+            activeGroupLabel = unresolvedRequiredGroup.label.isEmpty ? detectedActiveGroupLabel : unresolvedRequiredGroup.label
+            activeGroupRequired = true
         } else {
             activeGroupKind = detectedActiveGroupKind
             activeGroupLabel = detectedActiveGroupLabel
+            activeGroupRequired = detectedActiveGroupRequired
         }
         let targetCandidate = bestDoorDashModifierCandidate(
             in: candidates,
             targetTerms: remainingModifierTerms,
             preferredGroup: activeGroupKind
         )?.candidate
-        let prerequisiteCandidate = fallbackDoorDashModifierCandidate(in: candidates, activeGroup: activeGroupKind)
+        let prerequisiteCandidate = fallbackDoorDashModifierCandidate(
+            in: candidates,
+            activeGroup: activeGroupKind,
+            disallowedGroups: preservedGroups
+        )
 
         let focusKind: DoorDashCustomizerFocusKind
         let focusLabel: String
         let filteredCandidates: [WebsiteC2ACandidate]
 
         if !remainingModifierTerms.isEmpty {
-            if shouldSaveAfterModifierSelection(saveCandidate: saveCandidate, requestedTerms: requestedModifierTerms) {
+            if activeGroupRequired, prerequisiteCandidate == nil {
+                focusKind = .waiting
+                focusLabel = activeGroupLabel.isEmpty
+                    ? "Waiting for required customizer step"
+                    : "Waiting for required \(activeGroupLabel)"
+                filteredCandidates = candidates
+            } else if shouldSaveAfterModifierSelection(
+                saveCandidate: saveCandidate,
+                requestedTerms: requestedModifierTerms,
+                activeGroup: activeGroupKind,
+                activeGroupRequired: activeGroupRequired,
+                preservedGroups: preservedGroups
+            ) {
                 focusKind = .saveStep
                 focusLabel = "Save current customizer step"
                 let saveStep = candidates.filter { ["dd_modifier_save", "dd_modal_close"].contains($0.role) }
@@ -5561,9 +5693,11 @@ struct MemlaBrowserView: View {
             focusKind: focusKind,
             activeGroupKind: activeGroupKind,
             activeGroupLabel: activeGroupLabel,
+            activeGroupRequired: activeGroupRequired,
             stage: modifierTargets.stage,
             remainingTerms: remainingModifierTerms,
             requestedTerms: requestedModifierTerms,
+            preservedGroups: preservedGroups,
             focusLabel: focusLabel,
             targetCandidate: targetCandidate,
             prerequisiteCandidate: prerequisiteCandidate,
@@ -5685,7 +5819,8 @@ struct MemlaBrowserView: View {
                 )
             }
 
-            if let save = snapshot.saveCandidate {
+            if let save = snapshot.saveCandidate,
+               !(snapshot.activeGroupRequired && snapshot.prerequisiteCandidate == nil) {
                 let saveScore: Double
                 if plannerState.lastTransitionKind == .prerequisiteModifier
                     || activeGroup == .unknown
@@ -5896,6 +6031,9 @@ struct MemlaBrowserView: View {
                     return true
                 }
                 let candidateGroup = doorDashGroupKind(for: candidate)
+                if snapshot.preservedGroups.contains(candidateGroup), candidateGroup != snapshot.activeGroupKind {
+                    return false
+                }
                 let preferredGroups = preferredDoorDashGroupKinds(for: snapshot.stage)
                 return snapshot.activeGroupKind == .unknown
                     || candidateGroup == snapshot.activeGroupKind
@@ -6008,6 +6146,7 @@ struct MemlaBrowserView: View {
         let marker = [
             readableDoorDashGroupKind(plan.snapshot.activeGroupKind),
             normalizedCommerceTerm(plan.snapshot.activeGroupLabel),
+            plan.snapshot.activeGroupRequired ? "required" : "optional",
             readableDoorDashFocusKind(plan.focusKind),
             nextRole,
             nextLabel,
@@ -6025,8 +6164,18 @@ struct MemlaBrowserView: View {
             "focus=\(readableDoorDashFocusKind(plan.focusKind))",
             plan.plannerState.commitPending ? "commit=pending" : "commit=clear"
         ]
+        if plan.snapshot.activeGroupRequired {
+            parts.append("groupRequired=true")
+        }
         if !plan.snapshot.activeGroupLabel.isEmpty {
             parts.append("label=\(plan.snapshot.activeGroupLabel)")
+        }
+        if !plan.snapshot.preservedGroups.isEmpty {
+            let preserved = plan.snapshot.preservedGroups
+                .map(readableDoorDashGroupKind)
+                .sorted()
+                .joined(separator: ", ")
+            parts.append("preserve=\(preserved)")
         }
         if let nextCandidate = plan.nextTransition?.candidate {
             parts.append("next=\(nextCandidate.role):\(nextCandidate.label)")
