@@ -28,6 +28,7 @@ struct WebsiteC2ACandidate: Identifiable {
     let groupLabel: String
     let groupRequired: Bool
     let tapFingerprint: String
+    let isSelected: Bool
 
     init(
         id: String,
@@ -45,7 +46,8 @@ struct WebsiteC2ACandidate: Identifiable {
         groupKey: String = "",
         groupLabel: String = "",
         groupRequired: Bool = false,
-        tapFingerprint: String = ""
+        tapFingerprint: String = "",
+        isSelected: Bool = false
     ) {
         self.id = id
         self.domIndex = domIndex
@@ -63,6 +65,7 @@ struct WebsiteC2ACandidate: Identifiable {
         self.groupLabel = groupLabel
         self.groupRequired = groupRequired
         self.tapFingerprint = tapFingerprint
+        self.isSelected = isSelected
     }
 }
 
@@ -844,9 +847,13 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         let activeGroupKey = stringValue(payload["doordash_customizer_active_group_key"])
         let activeGroupLabel = stringValue(payload["doordash_customizer_active_group_label"])
         let activeGroupRequired = payload["doordash_customizer_active_group_required"] as? Bool ?? false
+        let checkedRadioCount = payload["doordash_customizer_checked_radio_count"] as? Int ?? 0
+        let checkedCheckboxCount = payload["doordash_customizer_checked_checkbox_count"] as? Int ?? 0
         facts["dd_has_add_to_cart"] = hasAddToCart ? "true" : "false"
         facts["dd_has_cart_cta"] = hasCartCTA ? "true" : "false"
         facts["dd_has_continue_cta"] = hasContinueCTA ? "true" : "false"
+        facts["dd_checked_radio_count"] = String(checkedRadioCount)
+        facts["dd_checked_checkbox_count"] = String(checkedCheckboxCount)
         if !addToCartLabel.isEmpty {
             facts["dd_add_to_cart_label"] = addToCartLabel
         }
@@ -1438,6 +1445,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             let groupLabel = stringValue(raw["group_label"])
             let groupRequired = stringValue(raw["group_required"]) == "true"
             let tapFingerprint = stringValue(raw["tap_fingerprint"])
+            let isSelected = stringValue(raw["selected"]) == "true"
             guard !label.isEmpty || !url.isEmpty else {
                 return nil
             }
@@ -1473,7 +1481,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
                 groupKey: groupKey,
                 groupLabel: groupLabel,
                 groupRequired: groupRequired,
-                tapFingerprint: tapFingerprint
+                tapFingerprint: tapFingerprint,
+                isSelected: isSelected
             )
         }
         var seenKeys = Set<String>()
@@ -2445,6 +2454,25 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             }
             return el.closest('label,[role="radio"],[role="checkbox"]') || el;
           };
+          const checkedStateForOption = (el, root) => {
+            const nodes = [el, root].filter(Boolean);
+            for (const node of nodes) {
+              const ariaChecked = clean((node.getAttribute && node.getAttribute('aria-checked')) || '').toLowerCase();
+              if (ariaChecked === 'true') {
+                return true;
+              }
+              if (node.matches && node.matches('input[type="radio"],input[type="checkbox"]') && node.checked) {
+                return true;
+              }
+              const checkedDescendant = node.querySelector
+                ? node.querySelector('input[type="radio"]:checked,input[type="checkbox"]:checked,[role="radio"][aria-checked="true"],[role="checkbox"][aria-checked="true"]')
+                : null;
+              if (checkedDescendant) {
+                return true;
+              }
+            }
+            return false;
+          };
 
           const optionGroupCache = new WeakMap();
           const groupDescriptorForNode = (node) => {
@@ -2504,6 +2532,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             const resolvedGroupLabel = clean(group?.header || '');
             const resolvedGroupKey = clean(group?.groupKey || inferGroupKey(resolvedGroupLabel, resolvedLabel));
             const fingerprint = fingerprintFor('dd_modifier_option', resolvedLabel, resolvedGroupKey, resolvedGroupLabel);
+            const isSelected = checkedStateForOption(el, root);
             let score = 0;
             const normalizedLabel = normalized(resolvedLabel);
             const normalizedTarget = normalized(targetLabel);
@@ -2512,12 +2541,21 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             if (targetGroupKey && resolvedGroupKey === targetGroupKey) score += 110;
             if (targetGroupLabel && normalized(resolvedGroupLabel) === normalized(targetGroupLabel)) score += 70;
             if (targetFingerprint && fingerprint === normalized(targetFingerprint)) score += 180;
-            return { el, root, resolvedLabel, resolvedGroupKey, resolvedGroupLabel, fingerprint, score };
+            return { el, root, resolvedLabel, resolvedGroupKey, resolvedGroupLabel, fingerprint, isSelected, score };
           }).filter(Boolean).sort((left, right) => right.score - left.score);
 
           const best = scored.find((item) => item.score >= 120);
           if (!best) {
             return { ok: false, reason: 'doordash_modifier_option_not_found' };
+          }
+          if (best.isSelected) {
+            return {
+              ok: true,
+              reason: 'doordash_modifier_already_selected',
+              label: best.resolvedLabel,
+              group_key: best.resolvedGroupKey,
+              group_label: best.resolvedGroupLabel
+            };
           }
 
           const activate = (node) => {
@@ -2547,8 +2585,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             }
           };
 
-          activate(best.root);
-          activate(best.el);
+          const tapTarget = best.root && best.root !== itemModal ? best.root : best.el;
+          activate(tapTarget);
           return {
             ok: true,
             reason: 'tapped_doordash_modifier_option',
@@ -2698,7 +2736,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
       });
       const elementIndex = (el) => Number(el?.dataset?.memlaIndex ?? interactiveElements.indexOf(el));
       const labelForElement = (el) => clean(el?.innerText || el?.value || el?.getAttribute?.('aria-label') || el?.getAttribute?.('title') || absoluteHref(el));
-      const contextForElement = (el, rootOverride) => clean((rootOverride || el.closest('article,li,section,div,[role="dialog"]'))?.innerText || '').slice(0, 420);
+      const contextForElement = (el, rootOverride) => clean((rootOverride || el.closest('article,li,section,div,[role="dialog"]'))?.textContent || '').slice(0, 420);
       const candidateFromElement = (el, role, rootOverride, overrideLabel, metadata = {}) => ({
         id: String(elementIndex(el)),
         kind: el.matches('a[href]') ? 'link' : 'button',
@@ -2709,7 +2747,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         group_key: clean(metadata.groupKey || ''),
         group_label: clean(metadata.groupLabel || ''),
         group_required: metadata.groupRequired ? 'true' : 'false',
-        tap_fingerprint: clean(metadata.tapFingerprint || '')
+        tap_fingerprint: clean(metadata.tapFingerprint || ''),
+        selected: metadata.selected ? 'true' : 'false'
       });
       const collectText = (selector, limit, mapper, root = document) => Array.from(root.querySelectorAll(selector))
         .filter(visible)
@@ -2809,7 +2848,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           let node = el;
           let fallback = el;
           while (node && node !== document.body) {
-            const length = clean(node.innerText || '').length;
+            const length = clean(node.textContent || node.innerText || '').length;
             if (length >= minLength && length <= maxLength) {
               return node;
             }
@@ -3117,6 +3156,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             const group = groupForOptionRoot(root);
             const groupKey = group?.groupKey || inferDoorDashGroupKey(group?.header || '', clean([label, contextForElement(el, root)].join(' ')));
             const groupLabel = group?.header || '';
+            const selected = checkedStateForOption(el, root);
             const groupMapKey = group ? groupMapKeyFor(group) : '';
             if (group) {
               const stats = customizerGroupStats.get(groupMapKey) || {
@@ -3145,6 +3185,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
                 groupKey,
                 groupLabel,
                 groupRequired: Boolean(group?.required),
+                selected,
                 tapFingerprint: fingerprintForCandidate({
                   role: 'dd_modifier_option',
                   label,
@@ -3547,7 +3588,10 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         }
       }
 
-      const text = clean(document.body ? document.body.innerText : '');
+      const textRoot = (doordashActiveLayer === 'item_modal' || doordashActiveLayer === 'cart_drawer' || doordashActiveLayer === 'payment_sheet')
+        ? activeRoot
+        : document.body;
+      const text = clean(textRoot ? (textRoot.textContent || textRoot.innerText || '') : '');
       return {
         title: document.title || '',
         url: location.href,
@@ -3653,11 +3697,14 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
       const visibleControls = Array.from(document.querySelectorAll('h1,h2,h3,button,a[href],[role="dialog"],[aria-modal="true"]'))
         .filter(visible)
         .slice(0, 14)
-        .map((el) => clean(el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title')))
+        .map((el) => clean(el.textContent || el.innerText || el.getAttribute('aria-label') || el.getAttribute('title')))
         .filter(Boolean)
         .join(' | ')
         .slice(0, 320);
-      const bodyText = clean(document.body ? document.body.innerText : '').slice(0, 320);
+      const activeModal = Array.from(document.querySelectorAll('[data-testid="ItemModal"],[role="dialog"],[aria-modal="true"]'))
+        .filter(visible)[0] || null;
+      const textRoot = activeModal || document.body;
+      const bodyText = clean(textRoot ? (textRoot.textContent || textRoot.innerText || '') : '').slice(0, 320);
       return {
         fingerprint: [location.href, document.title || '', visibleControls, bodyText].join(' || ')
       };
@@ -3711,6 +3758,11 @@ struct MemlaBrowserView: View {
     @State private var pendingStepActionLabel = ""
     @State private var pendingStepActionSignature = ""
     @State private var pendingStepActionAt = Date.distantPast
+    @State private var pendingStepTapAcknowledged = false
+    @State private var pendingStepObservedGroupKey = ""
+    @State private var pendingStepObservedGroupLabel = ""
+    @State private var pendingStepObservedCheckedRadioCount = 0
+    @State private var pendingStepObservedCheckedCheckboxCount = 0
     @State private var pendingStepConsumedTerms: Set<String> = []
     @State private var pendingStepCommitKind = ""
     @State private var autoDriveEpoch = 0
@@ -3792,6 +3844,11 @@ struct MemlaBrowserView: View {
                 pendingStepActionLabel = ""
                 pendingStepActionSignature = ""
                 pendingStepActionAt = .distantPast
+                pendingStepTapAcknowledged = false
+                pendingStepObservedGroupKey = ""
+                pendingStepObservedGroupLabel = ""
+                pendingStepObservedCheckedRadioCount = 0
+                pendingStepObservedCheckedCheckboxCount = 0
                 pendingStepConsumedTerms = []
                 pendingStepCommitKind = ""
                 autoDriveEpoch = 0
@@ -3825,12 +3882,14 @@ struct MemlaBrowserView: View {
                     || lowered.contains("policy")
                 let succeeded = lowered.contains("tapped ")
                     || lowered.contains("save option")
+                    || lowered.contains("already selected")
                     || lowered.contains("field focused")
                 if pendingStepActionRole.hasPrefix("dd_modifier") {
                     if failed {
                         rollbackPendingDoorDashStepFailure()
                     } else if succeeded {
-                        applyPendingDoorDashStepSuccess()
+                        pendingStepTapAcknowledged = true
+                        appendAgencyTrace("DoorDash tap acknowledged. Waiting for mirror confirmation.")
                     }
                 }
             }
@@ -4078,6 +4137,11 @@ struct MemlaBrowserView: View {
         pendingStepActionLabel = ""
         pendingStepActionSignature = ""
         pendingStepActionAt = .distantPast
+        pendingStepTapAcknowledged = false
+        pendingStepObservedGroupKey = ""
+        pendingStepObservedGroupLabel = ""
+        pendingStepObservedCheckedRadioCount = 0
+        pendingStepObservedCheckedCheckboxCount = 0
         pendingStepConsumedTerms = []
         pendingStepCommitKind = ""
         autoDriveEpoch += 1
@@ -4115,6 +4179,10 @@ struct MemlaBrowserView: View {
         if agencyTrace.count > 60 {
             agencyTrace = Array(agencyTrace.prefix(60))
         }
+    }
+
+    private func doorDashFactInt(_ state: WebsiteC2AState, key: String) -> Int {
+        Int(state.serviceFacts[key] ?? "") ?? 0
     }
 
     private func initialFoodAddOns(from capsule: ActionCapsule?) -> [String] {
@@ -4455,6 +4523,11 @@ struct MemlaBrowserView: View {
         pendingStepActionLabel = ""
         pendingStepActionSignature = ""
         pendingStepActionAt = .distantPast
+        pendingStepTapAcknowledged = false
+        pendingStepObservedGroupKey = ""
+        pendingStepObservedGroupLabel = ""
+        pendingStepObservedCheckedRadioCount = 0
+        pendingStepObservedCheckedCheckboxCount = 0
         pendingStepConsumedTerms = []
         pendingStepCommitKind = ""
     }
@@ -4464,8 +4537,90 @@ struct MemlaBrowserView: View {
         pendingStepActionLabel = ""
         pendingStepActionSignature = ""
         pendingStepActionAt = .distantPast
+        pendingStepTapAcknowledged = false
+        pendingStepObservedGroupKey = ""
+        pendingStepObservedGroupLabel = ""
+        pendingStepObservedCheckedRadioCount = 0
+        pendingStepObservedCheckedCheckboxCount = 0
         pendingStepConsumedTerms = []
         pendingStepCommitKind = ""
+    }
+
+    private func recordPendingDoorDashStep(
+        role: String,
+        label: String,
+        signature: String,
+        state: WebsiteC2AState,
+        consumedTerms: Set<String>,
+        commitKind: String
+    ) {
+        pendingStepActionRole = role
+        pendingStepActionLabel = label
+        pendingStepActionSignature = signature
+        pendingStepActionAt = Date()
+        pendingStepTapAcknowledged = false
+        pendingStepObservedGroupKey = state.serviceFacts["dd_active_group_key"] ?? ""
+        pendingStepObservedGroupLabel = state.serviceFacts["dd_active_group_label"] ?? ""
+        pendingStepObservedCheckedRadioCount = doorDashFactInt(state, key: "dd_checked_radio_count")
+        pendingStepObservedCheckedCheckboxCount = doorDashFactInt(state, key: "dd_checked_checkbox_count")
+        pendingStepConsumedTerms = consumedTerms
+        pendingStepCommitKind = commitKind
+    }
+
+    private func matchingPendingDoorDashModifierCandidate(in state: WebsiteC2AState) -> WebsiteC2ACandidate? {
+        let targetLabel = normalizedCommerceTerm(pendingStepActionLabel)
+        let targetGroupLabel = normalizedCommerceTerm(pendingStepObservedGroupLabel)
+        return state.candidates.first { candidate in
+            guard candidate.role == "dd_modifier_option", !candidate.blocked else {
+                return false
+            }
+            guard normalizedCommerceTerm(candidate.label) == targetLabel else {
+                return false
+            }
+            if !pendingStepObservedGroupKey.isEmpty, candidate.groupKey == pendingStepObservedGroupKey {
+                return true
+            }
+            if !targetGroupLabel.isEmpty, normalizedCommerceTerm(candidate.groupLabel) == targetGroupLabel {
+                return true
+            }
+            return pendingStepObservedGroupKey.isEmpty && targetGroupLabel.isEmpty
+        }
+    }
+
+    private func pendingDoorDashStepConfirmed(in state: WebsiteC2AState, signature: String) -> Bool {
+        switch pendingStepActionRole {
+        case "dd_modifier_option":
+            if let candidate = matchingPendingDoorDashModifierCandidate(in: state), candidate.isSelected {
+                return true
+            }
+            let activeGroupKey = state.serviceFacts["dd_active_group_key"] ?? ""
+            let activeGroupLabel = normalizedCommerceTerm(state.serviceFacts["dd_active_group_label"] ?? "")
+            if !pendingStepObservedGroupKey.isEmpty, !activeGroupKey.isEmpty, activeGroupKey != pendingStepObservedGroupKey {
+                return true
+            }
+            let previousGroupLabel = normalizedCommerceTerm(pendingStepObservedGroupLabel)
+            if !previousGroupLabel.isEmpty, !activeGroupLabel.isEmpty, activeGroupLabel != previousGroupLabel, signature != pendingStepActionSignature {
+                return true
+            }
+            let checkedRadioCount = doorDashFactInt(state, key: "dd_checked_radio_count")
+            let checkedCheckboxCount = doorDashFactInt(state, key: "dd_checked_checkbox_count")
+            return checkedRadioCount > pendingStepObservedCheckedRadioCount
+                || checkedCheckboxCount > pendingStepObservedCheckedCheckboxCount
+        case "dd_modifier_save":
+            if state.pageKind != "dd_item_modal" {
+                return true
+            }
+            if !state.candidates.contains(where: { $0.role == "dd_modifier_save" && !$0.blocked }) {
+                return true
+            }
+            let activeGroupKey = state.serviceFacts["dd_active_group_key"] ?? ""
+            if !pendingStepObservedGroupKey.isEmpty, !activeGroupKey.isEmpty, activeGroupKey != pendingStepObservedGroupKey {
+                return true
+            }
+            return state.candidates.contains(where: { $0.role == "dd_add_to_cart" && !$0.blocked })
+        default:
+            return false
+        }
     }
 
     private func applyPendingDoorDashStepSuccess() {
@@ -6654,22 +6809,27 @@ struct MemlaBrowserView: View {
         }
 
         if !pendingStepActionRole.isEmpty {
-            let actionSettled = signature != pendingStepActionSignature
-                || Date().timeIntervalSince(pendingStepActionAt) >= 1.8
-            if actionSettled {
-                if signature == pendingStepActionSignature {
-                    appendAgencyTrace("DoorDash step settled without a fresh mirror signature. Rechecking the current customizer state.")
-                } else {
-                    appendAgencyTrace("DoorDash customizer transition detected. Re-evaluating the current step.")
-                }
+            if pendingStepTapAcknowledged, pendingDoorDashStepConfirmed(in: state, signature: signature) {
+                appendAgencyTrace("DoorDash step confirmed from mirror.")
+                applyPendingDoorDashStepSuccess()
                 clearPendingStepAction()
                 lastAutoDriveSignature = ""
                 lastDoorDashPlannerMarker = ""
             } else {
-                autoDriveStatus = "Waiting for DoorDash customizer transition..."
-                appendAgencyTrace(autoDriveStatus)
-                lastAutoDriveSignature = signature
-                return
+                let confirmationDeadline = pendingStepActionRole == "dd_modifier_save" ? 4.8 : 4.0
+                if Date().timeIntervalSince(pendingStepActionAt) >= confirmationDeadline {
+                    appendAgencyTrace("DoorDash step never confirmed from mirror. Re-planning from current state.")
+                    rollbackPendingDoorDashStepFailure()
+                    lastAutoDriveSignature = ""
+                    lastDoorDashPlannerMarker = ""
+                } else {
+                    autoDriveStatus = pendingStepTapAcknowledged
+                        ? "Waiting for DoorDash mirror confirmation..."
+                        : "Waiting for DoorDash customizer transition..."
+                    appendAgencyTrace(autoDriveStatus)
+                    lastAutoDriveSignature = signature
+                    return
+                }
             }
         }
 
@@ -6826,19 +6986,23 @@ struct MemlaBrowserView: View {
         lastAutoDriveSignature = signature
         autoDriveStatus = action.status
         if action.candidate.role == "dd_modifier_option" {
-            pendingStepActionRole = action.candidate.role
-            pendingStepActionLabel = action.candidate.label
-            pendingStepActionSignature = signature
-            pendingStepActionAt = Date()
-            pendingStepConsumedTerms = Set(action.consumedTerms)
-            pendingStepCommitKind = action.consumedTerms.isEmpty ? "prerequisite" : "requested"
+            recordPendingDoorDashStep(
+                role: action.candidate.role,
+                label: action.candidate.label,
+                signature: signature,
+                state: state,
+                consumedTerms: Set(action.consumedTerms),
+                commitKind: action.consumedTerms.isEmpty ? "prerequisite" : "requested"
+            )
         } else if action.candidate.role == "dd_modifier_save" {
-            pendingStepActionRole = action.candidate.role
-            pendingStepActionLabel = action.candidate.label
-            pendingStepActionSignature = signature
-            pendingStepActionAt = Date()
-            pendingStepConsumedTerms = []
-            pendingStepCommitKind = "save"
+            recordPendingDoorDashStep(
+                role: action.candidate.role,
+                label: action.candidate.label,
+                signature: signature,
+                state: state,
+                consumedTerms: [],
+                commitKind: "save"
+            )
         } else {
             clearPendingStepAction()
         }
