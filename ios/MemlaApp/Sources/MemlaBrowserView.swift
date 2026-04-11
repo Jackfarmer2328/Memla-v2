@@ -3007,7 +3007,28 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           };
 
           const customizerGroups = new Map();
+          const customizerGroupStats = new Map();
           const optionGroupCache = new WeakMap();
+          const groupMapKeyFor = (group) => [clean(group?.header || '').toLowerCase(), group?.groupKey || 'unknown'].join('|');
+          const checkedStateForOption = (el, root) => {
+            const nodes = [el, root].filter(Boolean);
+            for (const node of nodes) {
+              const ariaChecked = clean((node.getAttribute && node.getAttribute('aria-checked')) || '').toLowerCase();
+              if (ariaChecked === 'true') {
+                return true;
+              }
+              if (node.matches && node.matches('input[type="radio"],input[type="checkbox"]') && node.checked) {
+                return true;
+              }
+              const checkedDescendant = node.querySelector
+                ? node.querySelector('input[type="radio"]:checked,input[type="checkbox"]:checked,[role="radio"][aria-checked="true"],[role="checkbox"][aria-checked="true"]')
+                : null;
+              if (checkedDescendant) {
+                return true;
+              }
+            }
+            return false;
+          };
           const groupDescriptorForNode = (node) => {
             if (!node || !visible(node)) return null;
             const text = clean(node.textContent || '');
@@ -3049,7 +3070,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             }
             optionGroupCache.set(root, group);
             if (group) {
-              const groupMapKey = [group.header.toLowerCase(), group.groupKey].join('|');
+              const groupMapKey = groupMapKeyFor(group);
               if (!customizerGroups.has(groupMapKey)) {
                 customizerGroups.set(groupMapKey, group);
               }
@@ -3096,6 +3117,22 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             const group = groupForOptionRoot(root);
             const groupKey = group?.groupKey || inferDoorDashGroupKey(group?.header || '', clean([label, contextForElement(el, root)].join(' ')));
             const groupLabel = group?.header || '';
+            const groupMapKey = group ? groupMapKeyFor(group) : '';
+            if (group) {
+              const stats = customizerGroupStats.get(groupMapKey) || {
+                groupKey,
+                groupLabel,
+                required: Boolean(group?.required),
+                optionCount: 0,
+                checkedCount: 0,
+                order: customizerGroupStats.size
+              };
+              stats.optionCount += 1;
+              if (checkedStateForOption(el, root)) {
+                stats.checkedCount += 1;
+              }
+              customizerGroupStats.set(groupMapKey, stats);
+            }
             if (!doordashCustomizerActiveGroupKey) {
               doordashCustomizerActiveGroupKey = groupKey;
               doordashCustomizerActiveGroupLabel = groupLabel;
@@ -3117,6 +3154,17 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
               })
             );
           });
+          const orderedCustomizerGroups = Array.from(customizerGroupStats.values()).sort((left, right) => left.order - right.order);
+          const preferredActiveGroup = orderedCustomizerGroups.find((group) => group.required && group.optionCount > 0 && group.checkedCount === 0)
+            || orderedCustomizerGroups.find((group) => group.groupKey !== 'unknown' && group.optionCount > 0 && group.checkedCount === 0)
+            || orderedCustomizerGroups.find((group) => group.required && group.optionCount > 0)
+            || orderedCustomizerGroups.find((group) => group.groupKey !== 'unknown' && group.optionCount > 0)
+            || orderedCustomizerGroups[0];
+          if (preferredActiveGroup) {
+            doordashCustomizerActiveGroupKey = preferredActiveGroup.groupKey;
+            doordashCustomizerActiveGroupLabel = preferredActiveGroup.groupLabel;
+            doordashCustomizerActiveGroupRequired = Boolean(preferredActiveGroup.required);
+          }
           doordashCustomizerGroupCount = customizerGroups.size;
           doordashCustomizerRequiredGroupCount = Array.from(customizerGroups.values()).filter((group) => group.required).length;
         } else if (!cartDrawer) {
@@ -3656,6 +3704,7 @@ struct MemlaBrowserView: View {
     @State private var pendingFoodAddOperation = ""
     @State private var agencyTrace: [String] = []
     @State private var lastAgencyPageMarker = ""
+    @State private var lastDoorDashPlannerMarker = ""
     @State private var lastModifierSelectionLabel = ""
     @State private var lastModifierSelectionAt = Date.distantPast
     @State private var pendingStepActionRole = ""
@@ -3738,6 +3787,7 @@ struct MemlaBrowserView: View {
                 pendingFoodAddOperation = ""
                 agencyTrace = []
                 lastAgencyPageMarker = ""
+                lastDoorDashPlannerMarker = ""
                 pendingStepActionRole = ""
                 pendingStepActionLabel = ""
                 pendingStepActionSignature = ""
@@ -4035,6 +4085,7 @@ struct MemlaBrowserView: View {
         pendingFoodAddOns = initialFoodAddOns(from: route.capsule)
         preferCartProgress = false
         lastAgencyPageMarker = ""
+        lastDoorDashPlannerMarker = ""
         autoDriveStatus = autoDriveEnabled
             ? "Agency is active. Memla will drive to cart review."
             : "Manual Mirror mode. Tap the distilled controls yourself."
@@ -5566,6 +5617,46 @@ struct MemlaBrowserView: View {
         }
     }
 
+    private func maybeTraceDoorDashWorkflowPlan(_ plan: DoorDashWorkflowPlan) {
+        let nextRole = plan.nextTransition?.candidate?.role ?? "none"
+        let nextLabel = normalizedCommerceTerm(plan.nextTransition?.candidate?.label ?? readableDoorDashFocusKind(plan.focusKind))
+        let marker = [
+            readableDoorDashGroupKind(plan.snapshot.activeGroupKind),
+            normalizedCommerceTerm(plan.snapshot.activeGroupLabel),
+            readableDoorDashFocusKind(plan.focusKind),
+            nextRole,
+            nextLabel,
+            plan.plannerState.remainingTerms.joined(separator: ","),
+            plan.plannerState.inFlightTerms.joined(separator: ","),
+            plan.plannerState.commitPending ? "commit_pending" : "commit_clear"
+        ].joined(separator: "|")
+        guard marker != lastDoorDashPlannerMarker else {
+            return
+        }
+        lastDoorDashPlannerMarker = marker
+
+        var parts = [
+            "Planner: group=\(readableDoorDashGroupKind(plan.snapshot.activeGroupKind))",
+            "focus=\(readableDoorDashFocusKind(plan.focusKind))",
+            plan.plannerState.commitPending ? "commit=pending" : "commit=clear"
+        ]
+        if !plan.snapshot.activeGroupLabel.isEmpty {
+            parts.append("label=\(plan.snapshot.activeGroupLabel)")
+        }
+        if let nextCandidate = plan.nextTransition?.candidate {
+            parts.append("next=\(nextCandidate.role):\(nextCandidate.label)")
+        } else {
+            parts.append("next=none")
+        }
+        if !plan.plannerState.remainingTerms.isEmpty {
+            parts.append("remaining=\(plan.plannerState.remainingTerms.joined(separator: ", "))")
+        }
+        if !plan.plannerState.inFlightTerms.isEmpty {
+            parts.append("inFlight=\(plan.plannerState.inFlightTerms.joined(separator: ", "))")
+        }
+        appendAgencyTrace(parts.joined(separator: " • "))
+    }
+
     private func mirrorFacts(for state: WebsiteC2AState) -> [WebsiteMirrorFact] {
         var facts: [WebsiteMirrorFact] = [
             WebsiteMirrorFact(id: "page", title: "Page", value: readableRequirement(state.pageKind)),
@@ -6553,12 +6644,27 @@ struct MemlaBrowserView: View {
 
         let signature = doorDashAutoDriveSignature(for: state)
         let candidates = mirrorCandidates(for: state)
+        let doorDashPlan = state.pageKind == "dd_item_modal"
+            ? planDoorDashCustomizerWorkflow(from: candidates, state: state)
+            : nil
+        if let doorDashPlan {
+            maybeTraceDoorDashWorkflowPlan(doorDashPlan)
+        } else {
+            lastDoorDashPlannerMarker = ""
+        }
 
         if !pendingStepActionRole.isEmpty {
             let actionSettled = signature != pendingStepActionSignature
                 || Date().timeIntervalSince(pendingStepActionAt) >= 1.8
             if actionSettled {
+                if signature == pendingStepActionSignature {
+                    appendAgencyTrace("DoorDash step settled without a fresh mirror signature. Rechecking the current customizer state.")
+                } else {
+                    appendAgencyTrace("DoorDash customizer transition detected. Re-evaluating the current step.")
+                }
                 clearPendingStepAction()
+                lastAutoDriveSignature = ""
+                lastDoorDashPlannerMarker = ""
             } else {
                 autoDriveStatus = "Waiting for DoorDash customizer transition..."
                 appendAgencyTrace(autoDriveStatus)
@@ -6687,7 +6793,13 @@ struct MemlaBrowserView: View {
 
         guard let action = doorDashAutoAction(for: state, candidates: candidates) else {
             lastAutoDriveSignature = signature
-            if state.pageKind == "dd_storefront" {
+            if let doorDashPlan {
+                let group = readableDoorDashGroupKind(doorDashPlan.snapshot.activeGroupKind)
+                let focus = readableDoorDashFocusKind(doorDashPlan.focusKind)
+                autoDriveStatus = focus == "waiting"
+                    ? "Waiting for DoorDash customizer transition..."
+                    : "Waiting on DoorDash \(focus) in \(group)..."
+            } else if state.pageKind == "dd_storefront" {
                 autoDriveStatus = "Waiting for DoorDash menu items..."
             } else if state.pageKind == "ue_storefront" {
                 autoDriveStatus = "Waiting for Uber Eats menu items..."
@@ -6761,6 +6873,12 @@ struct MemlaBrowserView: View {
             .prefix(4)
             .map { "\($0.role):\($0.label)" }
             .joined(separator: "|")
+        let doorDashLayerState = [
+            state.serviceFacts["dd_active_layer"] ?? "",
+            state.serviceFacts["dd_active_group_key"] ?? "",
+            state.serviceFacts["dd_active_group_label"] ?? "",
+            state.serviceFacts["dd_active_group_required"] ?? ""
+        ].joined(separator: "|")
         let agencyState = [
             primaryFoodItemAdded ? "primary_added" : "primary_pending",
             pendingFoodAddOns.first ?? "",
@@ -6769,7 +6887,7 @@ struct MemlaBrowserView: View {
             doorDashModifierCommitPending ? "commit_pending" : "commit_clear",
             doorDashPendingCommitKind
         ].joined(separator: "|")
-        return [state.pageKind, browser.currentURL, candidateSlice, agencyState].joined(separator: "||")
+        return [state.pageKind, browser.currentURL, doorDashLayerState, candidateSlice, agencyState].joined(separator: "||")
     }
 
     private func doorDashAutoAction(for state: WebsiteC2AState, candidates: [WebsiteC2ACandidate]) -> MirrorAutoDriveAction? {
