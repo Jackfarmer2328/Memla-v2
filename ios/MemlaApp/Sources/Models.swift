@@ -296,6 +296,7 @@ struct ActionCapsule: Codable, Identifiable {
     let verifierRequirements: [String]
     let autoSubmitBlockers: [String]
     let residualConstraints: [String]
+    let orderSpec: OrderSpec?
 
     enum CodingKeys: String, CodingKey {
         case prompt
@@ -319,6 +320,47 @@ struct ActionCapsule: Codable, Identifiable {
         case verifierRequirements = "verifier_requirements"
         case autoSubmitBlockers = "auto_submit_blockers"
         case residualConstraints = "residual_constraints"
+        case orderSpec = "order_spec"
+    }
+}
+
+struct OrderSpec: Codable {
+    let kind: String
+    let service: OrderSpecField
+    let restaurant: OrderSpecField
+    let item: OrderSpecField
+    let size: OrderSpecField
+    let toppings: OrderSpecField
+    let addOns: OrderSpecField
+    let tip: OrderSpecField
+    let clarificationBlockers: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case kind
+        case service
+        case restaurant
+        case item
+        case size
+        case toppings
+        case addOns = "add_ons"
+        case tip
+        case clarificationBlockers = "clarification_blockers"
+    }
+}
+
+struct OrderSpecField: Codable {
+    let values: [String]
+    let confidence: Double
+    let criticality: String
+    let source: String
+    let needsClarification: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case values
+        case confidence
+        case criticality
+        case source
+        case needsClarification = "needs_clarification"
     }
 }
 

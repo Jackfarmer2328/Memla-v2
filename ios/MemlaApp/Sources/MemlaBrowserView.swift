@@ -24,6 +24,10 @@ struct WebsiteC2ACandidate: Identifiable {
     let tapSafety: String
     let tapReason: String
     let reason: String
+    let groupKey: String = ""
+    let groupLabel: String = ""
+    let groupRequired: Bool = false
+    let tapFingerprint: String = ""
 }
 
 struct WebsiteC2AState {
@@ -335,6 +339,48 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
                             }
                             self.inspectPage(capsule: capsule)
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    func tapDoorDashResolvedModifierOption(_ candidate: WebsiteC2ACandidate, capsule: ActionCapsule?) {
+        isRunningButtonAction = true
+        buttonActionStatus = "Tapping reviewed button..."
+        let script = Self.doorDashModifierOptionTapScript(
+            label: candidate.label,
+            groupKey: candidate.groupKey,
+            groupLabel: candidate.groupLabel,
+            tapFingerprint: candidate.tapFingerprint
+        )
+        webView.evaluateJavaScript(script) { [weak self] result, error in
+            DispatchQueue.main.async {
+                guard let self = self else {
+                    return
+                }
+                self.isRunningButtonAction = false
+                if let error = error {
+                    self.buttonActionStatus = error.localizedDescription
+                    return
+                }
+                guard let payload = result as? [String: Any] else {
+                    self.buttonActionStatus = "Button tap returned no page result."
+                    return
+                }
+                let reason = Self.stringValue(payload["reason"]).replacingOccurrences(of: "_", with: " ")
+                let ok = payload["ok"] as? Bool ?? false
+                self.buttonActionStatus = ok ? reason.capitalized : "Button tap blocked: \(reason)"
+                if ok {
+                    let inspectDelay: TimeInterval = 1.35
+                    DispatchQueue.main.asyncAfter(deadline: .now() + inspectDelay) {
+                        self.inspectPage(capsule: capsule)
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + inspectDelay + 0.95) {
+                        guard !self.isInspecting, !self.isLoading else {
+                            return
+                        }
+                        self.inspectPage(capsule: capsule)
                     }
                 }
             }
@@ -700,6 +746,9 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         let hasContinueCTA = payload["doordash_has_continue_cta"] as? Bool ?? false
         let activeLayer = stringValue(payload["doordash_active_layer"])
         let modalTitle = stringValue(payload["doordash_modal_title"])
+        let activeGroupKey = stringValue(payload["doordash_customizer_active_group_key"])
+        let activeGroupLabel = stringValue(payload["doordash_customizer_active_group_label"])
+        let activeGroupRequired = payload["doordash_customizer_active_group_required"] as? Bool ?? false
         facts["dd_has_add_to_cart"] = hasAddToCart ? "true" : "false"
         facts["dd_has_cart_cta"] = hasCartCTA ? "true" : "false"
         facts["dd_has_continue_cta"] = hasContinueCTA ? "true" : "false"
@@ -712,6 +761,13 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         if !modalTitle.isEmpty {
             facts["dd_modal_title"] = modalTitle
         }
+        if !activeGroupKey.isEmpty {
+            facts["dd_active_group_key"] = activeGroupKey
+        }
+        if !activeGroupLabel.isEmpty {
+            facts["dd_active_group_label"] = activeGroupLabel
+        }
+        facts["dd_active_group_required"] = activeGroupRequired ? "true" : "false"
         return facts
     }
 
@@ -1246,6 +1302,15 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         return ""
     }
 
+    private static func javaScriptStringLiteral(_ value: String) -> String {
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+            .replacingOccurrences(of: "\r", with: "")
+            .replacingOccurrences(of: "\n", with: "\\n")
+        return "'\(escaped)'"
+    }
+
     private static func stringArray(_ value: Any?) -> [String] {
         guard let items = value as? [Any] else {
             return []
@@ -1274,6 +1339,10 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             let context = stringValue(raw["context"])
             let domIndex = Int(stringValue(raw["id"])) ?? index
             let serviceRole = stringValue(raw["service_role"])
+            let groupKey = stringValue(raw["group_key"])
+            let groupLabel = stringValue(raw["group_label"])
+            let groupRequired = stringValue(raw["group_required"]) == "true"
+            let tapFingerprint = stringValue(raw["tap_fingerprint"])
             guard !label.isEmpty || !url.isEmpty else {
                 return nil
             }
@@ -1305,12 +1374,16 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
                 blocked: blocked,
                 tapSafety: tapPolicy.safety,
                 tapReason: tapPolicy.reason,
-                reason: reason
+                reason: reason,
+                groupKey: groupKey,
+                groupLabel: groupLabel,
+                groupRequired: groupRequired,
+                tapFingerprint: tapFingerprint
             )
         }
         var seenKeys = Set<String>()
         let deduped = candidates.filter { candidate in
-            let key = [candidate.role, normalizedText(candidate.label), candidate.url].joined(separator: "|")
+            let key = [candidate.role, normalizedText(candidate.label), candidate.groupKey, candidate.url].joined(separator: "|")
             if seenKeys.contains(key) {
                 return false
             }
@@ -2209,6 +2282,159 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         """
     }
 
+    private static func doorDashModifierOptionTapScript(
+        label: String,
+        groupKey: String,
+        groupLabel: String,
+        tapFingerprint: String
+    ) -> String {
+        let labelLiteral = javaScriptStringLiteral(label)
+        let groupKeyLiteral = javaScriptStringLiteral(groupKey)
+        let groupLabelLiteral = javaScriptStringLiteral(groupLabel)
+        let fingerprintLiteral = javaScriptStringLiteral(tapFingerprint)
+        return """
+        (() => {
+          const targetLabel = \(labelLiteral);
+          const targetGroupKey = \(groupKeyLiteral);
+          const targetGroupLabel = \(groupLabelLiteral);
+          const targetFingerprint = \(fingerprintLiteral);
+          const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+          const normalized = (value) => clean(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+          const visible = (el) => {
+            if (!el) return false;
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden') return false;
+            const rect = el.getBoundingClientRect();
+            return rect.width > 1 && rect.height > 1;
+          };
+          const itemModal = Array.from(document.querySelectorAll('[data-testid="ItemModal"], [role="dialog"]'))
+            .filter(visible)[0];
+          if (!itemModal) {
+            return { ok: false, reason: 'doordash_item_modal_not_found' };
+          }
+
+          const inferGroupKey = (header, text = '') => {
+            const combined = clean([header, text].join(' ')).toLowerCase();
+            if (!combined) return 'unknown';
+            if (/topping side|left half|right half|whole/.test(combined)) return 'topping_side';
+            if (/choose your size|\\bsize\\b|\\b10"\\b|\\b12"\\b|\\b14"\\b|\\b16"\\b/.test(combined)) return 'size';
+            if (/\\bcrust\\b|hand tossed|thin crust|brooklyn|gluten free/.test(combined)) return 'crust';
+            if (/topping|premium chicken|pineapple|pepperoni|beef|ham|bacon|olive|mushroom|onion|sausage/.test(combined)) return 'topping';
+            if (/preferences|special instructions/.test(combined)) return 'preferences';
+            return 'unknown';
+          };
+
+          const customizerGroups = [];
+          Array.from(itemModal.querySelectorAll('fieldset,section,div'))
+            .filter(visible)
+            .forEach((el) => {
+              const text = clean(el.innerText || '');
+              if (!text || text.length < 12 || text.length > 900) return;
+              if (/^your recommended options\\b/i.test(text)) return;
+              if (!/(required|optional).*(select|choose)|preferences\\s*\\(optional\\)|choose your|topping side|crust|toppings?/i.test(text)) return;
+              const headerMatch = text.match(/^(.{1,120}?)(?:\\s+(?:Required|\\(Optional\\)|Optional)\\b)/i);
+              const header = clean(headerMatch ? headerMatch[1] : (/^preferences\\b/i.test(text) ? 'Preferences' : ''));
+              if (!header || /^required$/i.test(header) || /^optional$/i.test(header)) return;
+              customizerGroups.push({
+                header,
+                groupKey: inferGroupKey(header, text),
+                root: el,
+                text
+              });
+            });
+
+          const optionRootForElement = (el) => {
+            if (!el) return null;
+            const id = clean((el.getAttribute && el.getAttribute('id')) || '');
+            if (id) {
+              try {
+                const boundLabel = itemModal.querySelector(`label[for="${CSS.escape(id)}"]`);
+                if (boundLabel && visible(boundLabel)) {
+                  return boundLabel;
+                }
+              } catch (_) {}
+            }
+            return el.closest('label,[role="radio"],[role="checkbox"]') || el;
+          };
+
+          const groupForRoot = (root) => {
+            if (!root) return null;
+            return customizerGroups
+              .filter((group) => group.root && group.root.contains(root))
+              .sort((left, right) => clean(left.text || '').length - clean(right.text || '').length)[0] || null;
+          };
+
+          const fingerprintFor = (role, label, groupKey, groupLabel) =>
+            clean([role, groupKey, groupLabel, label].join(' | ')).toLowerCase();
+
+          const optionElements = Array.from(itemModal.querySelectorAll('label,input[type="radio"],input[type="checkbox"],[role="radio"],[role="checkbox"]'))
+            .filter(visible);
+
+          const scored = optionElements.map((el) => {
+            const root = optionRootForElement(el);
+            if (!root || !visible(root)) return null;
+            const resolvedLabel = clean(root.innerText || el.innerText || el.textContent || '');
+            if (!resolvedLabel) return null;
+            const group = groupForRoot(root);
+            const resolvedGroupLabel = clean(group?.header || '');
+            const resolvedGroupKey = clean(group?.groupKey || inferGroupKey(resolvedGroupLabel, resolvedLabel));
+            const fingerprint = fingerprintFor('dd_modifier_option', resolvedLabel, resolvedGroupKey, resolvedGroupLabel);
+            let score = 0;
+            const normalizedLabel = normalized(resolvedLabel);
+            const normalizedTarget = normalized(targetLabel);
+            if (normalizedLabel === normalizedTarget) score += 120;
+            else if (normalizedLabel.includes(normalizedTarget) || normalizedTarget.includes(normalizedLabel)) score += 80;
+            if (targetGroupKey && resolvedGroupKey === targetGroupKey) score += 110;
+            if (targetGroupLabel && normalized(resolvedGroupLabel) === normalized(targetGroupLabel)) score += 70;
+            if (targetFingerprint && fingerprint === normalized(targetFingerprint)) score += 180;
+            return { el, root, resolvedLabel, resolvedGroupKey, resolvedGroupLabel, fingerprint, score };
+          }).filter(Boolean).sort((left, right) => right.score - left.score);
+
+          const best = scored.find((item) => item.score >= 120);
+          if (!best) {
+            return { ok: false, reason: 'doordash_modifier_option_not_found' };
+          }
+
+          const activate = (node) => {
+            if (!node) return;
+            try { node.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
+            const rect = typeof node.getBoundingClientRect === 'function'
+              ? node.getBoundingClientRect()
+              : { left: 0, top: 0, width: 0, height: 0 };
+            const pointInit = {
+              bubbles: true,
+              cancelable: true,
+              composed: true,
+              clientX: rect.left + rect.width / 2,
+              clientY: rect.top + rect.height / 2
+            };
+            try { node.dispatchEvent(new PointerEvent('pointerdown', { ...pointInit, pointerId: 1, pointerType: 'touch', isPrimary: true })); } catch (_) {}
+            try { node.dispatchEvent(new TouchEvent('touchstart', { bubbles: true, cancelable: true, composed: true })); } catch (_) {}
+            try { node.dispatchEvent(new PointerEvent('pointerup', { ...pointInit, pointerId: 1, pointerType: 'touch', isPrimary: true })); } catch (_) {}
+            try { node.dispatchEvent(new TouchEvent('touchend', { bubbles: true, cancelable: true, composed: true })); } catch (_) {}
+            ['mousedown', 'mouseup', 'click'].forEach((type) => {
+              try {
+                node.dispatchEvent(new MouseEvent(type, { ...pointInit, view: window }));
+              } catch (_) {}
+            });
+            if (typeof node.click === 'function') {
+              try { node.click(); } catch (_) {}
+            }
+          };
+
+          activate(best.root);
+          activate(best.el);
+          return {
+            ok: true,
+            reason: 'tapped_doordash_modifier_option',
+            label: best.resolvedLabel,
+            group_key: best.resolvedGroupKey,
+            group_label: best.resolvedGroupLabel
+          };
+        })();
+        """
+    }
+
     private static let doorDashModifierSaveScript = """
     (() => {
       const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
@@ -2348,13 +2574,17 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
       const elementIndex = (el) => Number(el?.dataset?.memlaIndex ?? interactiveElements.indexOf(el));
       const labelForElement = (el) => clean(el?.innerText || el?.value || el?.getAttribute?.('aria-label') || el?.getAttribute?.('title') || absoluteHref(el));
       const contextForElement = (el, rootOverride) => clean((rootOverride || el.closest('article,li,section,div,[role="dialog"]'))?.innerText || '').slice(0, 420);
-      const candidateFromElement = (el, role, rootOverride, overrideLabel) => ({
+      const candidateFromElement = (el, role, rootOverride, overrideLabel, metadata = {}) => ({
         id: String(elementIndex(el)),
         kind: el.matches('a[href]') ? 'link' : 'button',
         label: clean(overrideLabel || labelForElement(el)),
         url: absoluteHref(el),
         context: contextForElement(el, rootOverride),
-        service_role: role
+        service_role: role,
+        group_key: clean(metadata.groupKey || ''),
+        group_label: clean(metadata.groupLabel || ''),
+        group_required: metadata.groupRequired ? 'true' : 'false',
+        tap_fingerprint: clean(metadata.tapFingerprint || '')
       });
       const collectText = (selector, limit, mapper, root = document) => Array.from(root.querySelectorAll(selector))
         .filter(visible)
@@ -2394,6 +2624,9 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
       let doordashCustomizerRecommendedPresetCount = 0;
       let doordashCustomizerHasSpecialInstructions = false;
       let doordashCustomizerAddToCartLabel = '';
+      let doordashCustomizerActiveGroupKey = '';
+      let doordashCustomizerActiveGroupLabel = '';
+      let doordashCustomizerActiveGroupRequired = false;
       let doordashHasCartCTA = false;
       let doordashHasContinueCTA = false;
       let doordashHasAddToCartCTA = false;
@@ -2498,6 +2731,18 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           return false;
         };
         const isDoorDashNoise = (text) => /open app|login|log in|become a dasher|merchant|gift cards|notification bell|save$|see all$|pricing & fees|open menu/i.test(text);
+        const inferDoorDashGroupKey = (header, text = '') => {
+          const combined = clean([header, text].join(' ')).toLowerCase();
+          if (!combined) return 'unknown';
+          if (/topping side|left half|right half|whole/.test(combined)) return 'topping_side';
+          if (/choose your size|\\bsize\\b|\\b10\"\\b|\\b12\"\\b|\\b14\"\\b|\\b16\"\\b/.test(combined)) return 'size';
+          if (/\\bcrust\\b|hand tossed|thin crust|brooklyn|gluten free/.test(combined)) return 'crust';
+          if (/topping|premium chicken|pineapple|pepperoni|beef|ham|bacon|olive|mushroom|onion|sausage/.test(combined)) return 'topping';
+          if (/preferences|special instructions/.test(combined)) return 'preferences';
+          return 'unknown';
+        };
+        const fingerprintForCandidate = ({ role, label, groupKey, groupLabel }) =>
+          clean([role, groupKey, groupLabel, label].join(' | ')).toLowerCase();
 
         const continueAnchor = Array.from(document.querySelectorAll('a[href*="/consumer/checkout"]'))
           .filter(visible)
@@ -2577,7 +2822,16 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           addToCartButtons.forEach((button) => {
             doordashHasAddToCartCTA = true;
             const root = sharedAncestor(itemModal, button) || closestWithText(button, 18, 240);
-            pushUnique(doordashCandidates, candidateFromElement(button, 'dd_add_to_cart', root, 'Add to cart'));
+            pushUnique(doordashCandidates, candidateFromElement(button, 'dd_add_to_cart', root, 'Add to cart', {
+              groupKey: 'review',
+              groupLabel: 'Add to cart',
+              tapFingerprint: fingerprintForCandidate({
+                role: 'dd_add_to_cart',
+                label: 'Add to cart',
+                groupKey: 'review',
+                groupLabel: 'Add to cart'
+              })
+            }));
           });
 
           const checkedRadios = Array.from(itemModal.querySelectorAll('input[type="radio"]:checked')).filter(visible);
@@ -2601,7 +2855,16 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           saveFooterButtons.forEach((button) => {
             const root = sharedAncestor(itemModal, button) || closestWithText(button, 8, 220);
             const label = clean(labelForElement(button)) || 'Save';
-            pushUnique(doordashCandidates, candidateFromElement(button, 'dd_modifier_save', root, label));
+            pushUnique(doordashCandidates, candidateFromElement(button, 'dd_modifier_save', root, label, {
+              groupKey: 'save',
+              groupLabel: 'Save',
+              tapFingerprint: fingerprintForCandidate({
+                role: 'dd_modifier_save',
+                label,
+                groupKey: 'save',
+                groupLabel: 'Save'
+              })
+            }));
           });
 
           const customizerGroups = new Map();
@@ -2611,7 +2874,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
               const text = clean(el.innerText || '');
               if (!text || text.length < 12 || text.length > 900) return;
               if (/^your recommended options\\b/i.test(text)) return;
-              if (!/(required|optional).*(select|choose)|preferences\\s*\\(optional\\)/i.test(text)) return;
+              if (!/(required|optional).*(select|choose)|preferences\\s*\\(optional\\)|choose your|topping side|crust|toppings?/i.test(text)) return;
               const headerMatch = text.match(/^(.{1,120}?)(?:\\s+(?:Required|\\(Optional\\)|Optional)\\b)/i);
               const header = clean(headerMatch ? headerMatch[1] : (/^preferences\\b/i.test(text) ? 'Preferences' : ''));
               if (!header || /^required$/i.test(header) || /^optional$/i.test(header)) return;
@@ -2620,8 +2883,10 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
               if (!existing || text.length > existing.text.length) {
                 customizerGroups.set(key, {
                   header,
+                  groupKey: inferDoorDashGroupKey(header, text),
                   required: /\\brequired\\b/i.test(text),
-                  text
+                  text,
+                  root: el
                 });
               }
             });
@@ -2640,6 +2905,14 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
               } catch (_) {}
             }
             return el.closest('label,[role="radio"],[role="checkbox"]') || closestWithText(el, 6, 180);
+          };
+
+          const groupForOptionRoot = (root) => {
+            if (!root) return null;
+            const matching = Array.from(customizerGroups.values())
+              .filter((group) => group.root && group.root.contains(root))
+              .sort((left, right) => clean(left.text || '').length - clean(right.text || '').length);
+            return matching[0] || null;
           };
 
           const modalOptionButtons = Array.from(itemModal.querySelectorAll('label,input[type="radio"],input[type="checkbox"],[role="radio"],[role="checkbox"]'))
@@ -2677,8 +2950,29 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             const root = optionRootForElement(el) || closestWithText(el, 6, 180);
             const label = firstMeaningfulTextLine(root) || labelForElement(root) || labelForElement(el);
             if (!label) return;
+            const group = groupForOptionRoot(root);
+            const groupKey = group?.groupKey || inferDoorDashGroupKey(group?.header || '', clean([label, contextForElement(el, root)].join(' ')));
+            const groupLabel = group?.header || '';
+            if (!doordashCustomizerActiveGroupKey) {
+              doordashCustomizerActiveGroupKey = groupKey;
+              doordashCustomizerActiveGroupLabel = groupLabel;
+              doordashCustomizerActiveGroupRequired = Boolean(group?.required);
+            }
             doordashItemCardCount += 1;
-            pushUnique(doordashCandidates, candidateFromElement(el, 'dd_modifier_option', root, label));
+            pushUnique(
+              doordashCandidates,
+              candidateFromElement(el, 'dd_modifier_option', root, label, {
+                groupKey,
+                groupLabel,
+                groupRequired: Boolean(group?.required),
+                tapFingerprint: fingerprintForCandidate({
+                  role: 'dd_modifier_option',
+                  label,
+                  groupKey,
+                  groupLabel
+                })
+              })
+            );
           });
         } else if (!cartDrawer) {
           const explicitMenuCards = Array.from(document.querySelectorAll('[data-testid="MenuItem"][data-item-id]'))
@@ -3084,6 +3378,9 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         doordash_customizer_recommended_preset_count: doordashCustomizerRecommendedPresetCount,
         doordash_customizer_has_special_instructions: doordashCustomizerHasSpecialInstructions,
         doordash_customizer_add_to_cart_label: doordashCustomizerAddToCartLabel,
+        doordash_customizer_active_group_key: doordashCustomizerActiveGroupKey,
+        doordash_customizer_active_group_label: doordashCustomizerActiveGroupLabel,
+        doordash_customizer_active_group_required: doordashCustomizerActiveGroupRequired,
         doordash_has_cart_cta: doordashHasCartCTA,
         doordash_has_continue_cta: doordashHasContinueCTA,
         doordash_has_add_to_cart_cta: doordashHasAddToCartCTA,
@@ -3647,12 +3944,25 @@ struct MemlaBrowserView: View {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func currentFoodTargetTerms() -> [String] {
-        guard let capsule = route.capsule else {
+    private func orderSpecValues(_ extractor: (OrderSpec) -> OrderSpecField) -> [String] {
+        guard let spec = route.capsule?.orderSpec else {
             return []
         }
+        return extractor(spec).values
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    private func currentFoodTargetTerms() -> [String] {
         if primaryFoodItemAdded, let addOn = pendingFoodAddOns.first {
             return expandedCommerceTerms(from: splitCommerceTerms(addOn))
+        }
+        let specItems = orderSpecValues { $0.item }
+        if !specItems.isEmpty {
+            return expandedCommerceTerms(from: specItems)
+        }
+        guard let capsule = route.capsule else {
+            return []
         }
         return expandedCommerceTerms(from: splitCommerceTerms(capsule.slots["item"] ?? ""))
     }
@@ -3671,7 +3981,8 @@ struct MemlaBrowserView: View {
         if primaryFoodItemAdded {
             return (.none, [])
         }
-        if let size = capsule.slots["size"], !size.isEmpty {
+        let specSizes = orderSpecValues { $0.size }
+        if let size = specSizes.first ?? capsule.slots["size"], !size.isEmpty {
             let normalizedSize = normalizedCommerceTerm(size)
             if !normalizedSize.isEmpty
                 && !completedModifierTerms.contains(normalizedSize)
@@ -3680,8 +3991,9 @@ struct MemlaBrowserView: View {
                 return (.size, [normalizedSize])
             }
         }
-        if let toppings = capsule.slots["toppings"], !toppings.isEmpty {
-            let remainingToppings = splitCommerceTerms(toppings)
+        let specToppings = orderSpecValues { $0.toppings }
+        if !specToppings.isEmpty || !(capsule.slots["toppings"] ?? "").isEmpty {
+            let remainingToppings = (specToppings.isEmpty ? splitCommerceTerms(capsule.slots["toppings"] ?? "") : specToppings)
                 .map(normalizedCommerceTerm)
                 .filter { !$0.isEmpty && !completedModifierTerms.contains($0) && !inFlightModifierTerms.contains($0) }
             if let nextTopping = remainingToppings.first {
@@ -3718,16 +4030,52 @@ struct MemlaBrowserView: View {
             return []
         }
         var requested: [String] = []
-        if let size = capsule.slots["size"], !size.isEmpty {
+        let specSizes = orderSpecValues { $0.size }
+        if let size = specSizes.first ?? capsule.slots["size"], !size.isEmpty {
             requested.append(contentsOf: expandedCommerceTerms(from: [size]))
         }
-        if let toppings = capsule.slots["toppings"], !toppings.isEmpty {
+        let specToppings = orderSpecValues { $0.toppings }
+        if !specToppings.isEmpty {
+            requested.append(contentsOf: expandedCommerceTerms(from: specToppings))
+        } else if let toppings = capsule.slots["toppings"], !toppings.isEmpty {
             requested.append(contentsOf: expandedCommerceTerms(from: splitCommerceTerms(toppings)))
         } else if let modifiers = capsule.slots["modifiers"], !modifiers.isEmpty {
             requested.append(contentsOf: expandedCommerceTerms(from: splitCommerceTerms(modifiers)))
         }
         var seen = Set<String>()
         return requested.filter { seen.insert($0).inserted }
+    }
+
+    private func doorDashGroupKind(from raw: String) -> DoorDashCustomizerGroupKind {
+        DoorDashCustomizerGroupKind(rawValue: raw) ?? .unknown
+    }
+
+    private func doorDashGroupKind(for candidate: WebsiteC2ACandidate) -> DoorDashCustomizerGroupKind {
+        doorDashGroupKind(from: candidate.groupKey)
+    }
+
+    private func doorDashActiveGroupKind(from state: WebsiteC2AState, candidates: [WebsiteC2ACandidate]) -> DoorDashCustomizerGroupKind {
+        let explicit = doorDashGroupKind(from: state.serviceFacts["dd_active_group_key"] ?? "")
+        if explicit != .unknown {
+            return explicit
+        }
+        let grouped = Dictionary(grouping: candidates.filter { $0.role == "dd_modifier_option" && !$0.groupKey.isEmpty }) { candidate in
+            candidate.groupKey
+        }
+        let best = grouped.max { left, right in
+            if left.value.count == right.value.count {
+                return left.key < right.key
+            }
+            return left.value.count < right.value.count
+        }?.key ?? ""
+        return doorDashGroupKind(from: best)
+    }
+
+    private func doorDashActiveGroupLabel(from state: WebsiteC2AState, candidates: [WebsiteC2ACandidate]) -> String {
+        if let explicit = state.serviceFacts["dd_active_group_label"], !explicit.isEmpty {
+            return explicit
+        }
+        return candidates.first(where: { $0.role == "dd_modifier_option" && !$0.groupLabel.isEmpty })?.groupLabel ?? ""
     }
 
     private func candidateMatchedTargetTerms(_ candidate: WebsiteC2ACandidate, targetTerms: [String]) -> [String] {
@@ -3792,7 +4140,8 @@ struct MemlaBrowserView: View {
 
     private func bestDoorDashModifierCandidate(
         in candidates: [WebsiteC2ACandidate],
-        targetTerms: [String]
+        targetTerms: [String],
+        preferredGroup: DoorDashCustomizerGroupKind = .unknown
     ) -> (candidate: WebsiteC2ACandidate, matched: [String])? {
         let relevant = candidates.filter { $0.role == "dd_modifier_option" && !$0.blocked }
         guard !relevant.isEmpty else {
@@ -3802,12 +4151,14 @@ struct MemlaBrowserView: View {
             let matched = candidateMatchedModifierTerms(candidate, targetTerms: targetTerms)
             guard !matched.isEmpty else { return nil }
             let label = normalizedCommerceTerm(candidate.label)
+            let groupKind = doorDashGroupKind(for: candidate)
             let specificity = matched.reduce(0.0) { partial, term in
                 if label == term { return partial + 6.0 }
                 if label.contains(term) || term.contains(label) { return partial + 4.0 }
                 return partial + 2.0
             }
-            return (candidate, matched, candidate.score + specificity)
+            let groupBonus = preferredGroup != .unknown && groupKind == preferredGroup ? 16.0 : 0.0
+            return (candidate, matched, candidate.score + specificity + groupBonus)
         }
         guard let best = scored.max(by: { left, right in left.2 < right.2 }) else {
             return nil
@@ -3831,7 +4182,10 @@ struct MemlaBrowserView: View {
         })
     }
 
-    private func fallbackDoorDashModifierCandidate(in candidates: [WebsiteC2ACandidate]) -> WebsiteC2ACandidate? {
+    private func fallbackDoorDashModifierCandidate(
+        in candidates: [WebsiteC2ACandidate],
+        activeGroup: DoorDashCustomizerGroupKind = .unknown
+    ) -> WebsiteC2ACandidate? {
         let ignoredLabels = Set([
             "choose your size",
             "topping side",
@@ -3840,12 +4194,22 @@ struct MemlaBrowserView: View {
             "required",
             "optional",
         ])
-        if let whole = candidates.first(where: {
-            $0.role == "dd_modifier_option"
-                && !$0.blocked
-                && normalizedCommerceTerm($0.label) == "whole"
-        }) {
+        if activeGroup == .toppingSide,
+           let whole = candidates.first(where: {
+               $0.role == "dd_modifier_option"
+                   && !$0.blocked
+                   && normalizedCommerceTerm($0.label) == "whole"
+           }) {
             return whole
+        }
+        if activeGroup != .unknown,
+           let groupScoped = candidates.first(where: { candidate in
+               candidate.role == "dd_modifier_option"
+                   && !candidate.blocked
+                   && doorDashGroupKind(for: candidate) == activeGroup
+                   && !ignoredLabels.contains(normalizedCommerceTerm(candidate.label))
+           }) {
+            return groupScoped
         }
         return candidates.first { candidate in
             guard candidate.role == "dd_modifier_option", !candidate.blocked else {
@@ -4479,6 +4843,16 @@ struct MemlaBrowserView: View {
         }
     }
 
+    private enum DoorDashCustomizerGroupKind: String {
+        case size
+        case crust
+        case topping
+        case toppingSide = "topping_side"
+        case preferences
+        case review
+        case unknown
+    }
+
     private enum DoorDashCustomizerFocusKind {
         case requestedModifier
         case prerequisiteModifier
@@ -4489,6 +4863,8 @@ struct MemlaBrowserView: View {
 
     private struct DoorDashCustomizerSnapshot {
         let focusKind: DoorDashCustomizerFocusKind
+        let activeGroupKind: DoorDashCustomizerGroupKind
+        let activeGroupLabel: String
         let stage: FoodModifierStage
         let remainingTerms: [String]
         let requestedTerms: [String]
@@ -4505,6 +4881,8 @@ struct MemlaBrowserView: View {
         let modifierTargets = currentModifierTargets()
         let remainingModifierTerms = modifierTargets.terms
         let requestedModifierTerms = allRequestedModifierTerms()
+        let activeGroupKind = doorDashActiveGroupKind(from: state, candidates: candidates)
+        let activeGroupLabel = doorDashActiveGroupLabel(from: state, candidates: candidates)
         let saveCandidate = candidates.first(where: { $0.role == "dd_modifier_save" && !$0.blocked })
         let addCandidate = candidates.first(where: { $0.role == "dd_add_to_cart" && !$0.blocked })
             ?? {
@@ -4524,11 +4902,19 @@ struct MemlaBrowserView: View {
                     blocked: false,
                     tapSafety: "caution",
                     tapReason: "Needs user review before Memla taps",
-                    reason: "DoorDash add-to-cart control"
+                    reason: "DoorDash add-to-cart control",
+                    groupKey: DoorDashCustomizerGroupKind.review.rawValue,
+                    groupLabel: "Add to cart",
+                    groupRequired: false,
+                    tapFingerprint: "dd_add_to_cart | review | add to cart | add to cart"
                 )
             }()
-        let targetCandidate = bestDoorDashModifierCandidate(in: candidates, targetTerms: remainingModifierTerms)?.candidate
-        let prerequisiteCandidate = fallbackDoorDashModifierCandidate(in: candidates)
+        let targetCandidate = bestDoorDashModifierCandidate(
+            in: candidates,
+            targetTerms: remainingModifierTerms,
+            preferredGroup: activeGroupKind
+        )?.candidate
+        let prerequisiteCandidate = fallbackDoorDashModifierCandidate(in: candidates, activeGroup: activeGroupKind)
 
         let focusKind: DoorDashCustomizerFocusKind
         let focusLabel: String
@@ -4578,6 +4964,8 @@ struct MemlaBrowserView: View {
 
         return DoorDashCustomizerSnapshot(
             focusKind: focusKind,
+            activeGroupKind: activeGroupKind,
+            activeGroupLabel: activeGroupLabel,
             stage: modifierTargets.stage,
             remainingTerms: remainingModifierTerms,
             requestedTerms: requestedModifierTerms,
@@ -4608,6 +4996,7 @@ struct MemlaBrowserView: View {
     }
 
     private struct DoorDashWorkflowPlan {
+        let snapshot: DoorDashCustomizerSnapshot
         let plannerState: DoorDashWorkflowPlannerState
         let focusKind: DoorDashCustomizerFocusKind
         let focusLabel: String
@@ -4657,9 +5046,11 @@ struct MemlaBrowserView: View {
         plannerState: DoorDashWorkflowPlannerState
     ) -> [DoorDashWorkflowTransition] {
         var transitions: [DoorDashWorkflowTransition] = []
+        let activeGroup = snapshot.activeGroupKind
 
         if plannerState.commitPending {
             if plannerState.lastTransitionKind == .requestedModifier,
+               activeGroup == .toppingSide,
                let prerequisite = snapshot.prerequisiteCandidate
             {
                 transitions.append(
@@ -4678,9 +5069,32 @@ struct MemlaBrowserView: View {
                 )
             }
 
+            if plannerState.lastTransitionKind == .requestedModifier,
+               activeGroup == .crust,
+               let prerequisite = snapshot.prerequisiteCandidate
+            {
+                transitions.append(
+                    DoorDashWorkflowTransition(
+                        kind: .prerequisiteModifier,
+                        candidate: prerequisite,
+                        consumedTerms: [],
+                        score: 150,
+                        nextState: makeDoorDashWorkflowPlannerState(
+                            remainingTerms: plannerState.remainingTerms,
+                            inFlightTerms: plannerState.inFlightTerms,
+                            commitPending: true,
+                            lastTransitionKind: .prerequisiteModifier
+                        )
+                    )
+                )
+            }
+
             if let save = snapshot.saveCandidate {
                 let saveScore: Double
-                if plannerState.lastTransitionKind == .prerequisiteModifier || snapshot.prerequisiteCandidate == nil {
+                if plannerState.lastTransitionKind == .prerequisiteModifier
+                    || activeGroup == .unknown
+                    || snapshot.prerequisiteCandidate == nil
+                {
                     saveScore = 155
                 } else {
                     saveScore = 65
@@ -4701,7 +5115,7 @@ struct MemlaBrowserView: View {
                 )
             }
 
-            if transitions.isEmpty, let prerequisite = snapshot.prerequisiteCandidate {
+            if transitions.isEmpty, let prerequisite = snapshot.prerequisiteCandidate, activeGroup == .crust || activeGroup == .toppingSide {
                 transitions.append(
                     DoorDashWorkflowTransition(
                         kind: .prerequisiteModifier,
@@ -4718,17 +5132,23 @@ struct MemlaBrowserView: View {
                 )
             }
         } else {
-            if let target = snapshot.targetCandidate {
+            if let target = snapshot.targetCandidate,
+               activeGroup == .unknown
+                    || activeGroup == .size
+                    || activeGroup == .topping
+                    || activeGroup == .preferences
+            {
                 let matched = candidateMatchedModifierTerms(target, targetTerms: plannerState.remainingTerms)
                 if !matched.isEmpty {
                     let nextRemaining = plannerState.remainingTerms.filter { !matched.contains($0) }
                     let nextInFlight = Array(Set(plannerState.inFlightTerms).union(matched)).sorted()
+                    let scoreBase: Double = activeGroup == .size || activeGroup == .topping ? 182 : 170
                     transitions.append(
                         DoorDashWorkflowTransition(
                             kind: .requestedModifier,
                             candidate: target,
                             consumedTerms: matched,
-                            score: 170 + Double(matched.count * 10),
+                            score: scoreBase + Double(matched.count * 10),
                             nextState: makeDoorDashWorkflowPlannerState(
                                 remainingTerms: nextRemaining,
                                 inFlightTerms: nextInFlight,
@@ -4741,7 +5161,7 @@ struct MemlaBrowserView: View {
             }
 
             if plannerState.remainingTerms.isEmpty && plannerState.inFlightTerms.isEmpty {
-                if let add = snapshot.addCandidate {
+                if let add = snapshot.addCandidate, activeGroup == .review || activeGroup == .unknown {
                     transitions.append(
                         DoorDashWorkflowTransition(
                             kind: .reviewStep,
@@ -4756,7 +5176,7 @@ struct MemlaBrowserView: View {
                             )
                         )
                     )
-                } else if let save = snapshot.saveCandidate {
+                } else if let save = snapshot.saveCandidate, activeGroup != .review {
                     transitions.append(
                         DoorDashWorkflowTransition(
                             kind: .saveStep,
@@ -4772,7 +5192,10 @@ struct MemlaBrowserView: View {
                         )
                     )
                 }
-            } else if snapshot.targetCandidate == nil, let prerequisite = snapshot.prerequisiteCandidate {
+            } else if snapshot.targetCandidate == nil,
+                      let prerequisite = snapshot.prerequisiteCandidate,
+                      activeGroup == .crust || activeGroup == .toppingSide || activeGroup == .unknown
+            {
                 transitions.append(
                     DoorDashWorkflowTransition(
                         kind: .prerequisiteModifier,
@@ -4862,7 +5285,15 @@ struct MemlaBrowserView: View {
         let filtered: [WebsiteC2ACandidate]
         switch focusKind {
         case .requestedModifier, .prerequisiteModifier:
-            filtered = candidatePool.filter { ["dd_modifier_option", "dd_modal_close"].contains($0.role) }
+            filtered = candidatePool.filter { candidate in
+                guard ["dd_modifier_option", "dd_modal_close"].contains(candidate.role) else {
+                    return false
+                }
+                if candidate.role != "dd_modifier_option" {
+                    return true
+                }
+                return snapshot.activeGroupKind == .unknown || doorDashGroupKind(for: candidate) == snapshot.activeGroupKind
+            }
         case .saveStep:
             filtered = candidatePool.filter { ["dd_modifier_save", "dd_modal_close"].contains($0.role) }
         case .reviewStep:
@@ -4881,6 +5312,9 @@ struct MemlaBrowserView: View {
         switch focusKind {
         case .requestedModifier:
             if !plannerState.remainingTerms.isEmpty {
+                if !snapshot.activeGroupLabel.isEmpty {
+                    return "\(snapshot.activeGroupLabel): \(plannerState.remainingTerms.joined(separator: ", "))"
+                }
                 return "Resolve \(plannerState.remainingTerms.joined(separator: ", "))"
             }
             return "Resolve requested modifier"
@@ -4914,6 +5348,7 @@ struct MemlaBrowserView: View {
             plannerState: plannerState
         )
         return DoorDashWorkflowPlan(
+            snapshot: snapshot,
             plannerState: plannerState,
             focusKind: focusKind,
             focusLabel: focusLabel,
@@ -4941,6 +5376,25 @@ struct MemlaBrowserView: View {
         }
     }
 
+    private func readableDoorDashGroupKind(_ kind: DoorDashCustomizerGroupKind) -> String {
+        switch kind {
+        case .size:
+            return "size"
+        case .crust:
+            return "crust"
+        case .topping:
+            return "topping"
+        case .toppingSide:
+            return "topping side"
+        case .preferences:
+            return "preferences"
+        case .review:
+            return "review"
+        case .unknown:
+            return "unknown"
+        }
+    }
+
     private func mirrorFacts(for state: WebsiteC2AState) -> [WebsiteMirrorFact] {
         var facts: [WebsiteMirrorFact] = [
             WebsiteMirrorFact(id: "page", title: "Page", value: readableRequirement(state.pageKind)),
@@ -4951,6 +5405,10 @@ struct MemlaBrowserView: View {
             let plan = planDoorDashCustomizerWorkflow(from: state.candidates, state: state)
             facts.append(WebsiteMirrorFact(id: "focus", title: "Focus", value: plan.focusLabel))
             facts.append(WebsiteMirrorFact(id: "step", title: "Step", value: readableDoorDashFocusKind(plan.focusKind)))
+            facts.append(WebsiteMirrorFact(id: "group", title: "Group", value: readableDoorDashGroupKind(plan.snapshot.activeGroupKind)))
+            if !plan.snapshot.activeGroupLabel.isEmpty {
+                facts.append(WebsiteMirrorFact(id: "group_label", title: "Group Label", value: plan.snapshot.activeGroupLabel))
+            }
             if !plan.plannerState.remainingTerms.isEmpty {
                 facts.append(WebsiteMirrorFact(id: "remaining", title: "Remaining", value: plan.plannerState.remainingTerms.joined(separator: ", ")))
             }
@@ -6449,6 +6907,10 @@ struct MemlaBrowserView: View {
         }
         if candidate.role == "ub_dropoff_input" {
             browser.focusUberRideField(isPickup: false, capsule: route.capsule)
+            return
+        }
+        if candidate.role == "dd_modifier_option" {
+            browser.tapDoorDashResolvedModifierOption(candidate, capsule: route.capsule)
             return
         }
         if candidate.role == "dd_modifier_save" {

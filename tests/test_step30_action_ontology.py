@@ -114,4 +114,24 @@ def test_action_capsule_v1_extracts_size_toppings_and_add_ons_from_food_prompt()
     assert capsule.slots["toppings"] == "chicken, pineapple"
     assert capsule.slots["modifiers"] == "chicken, pineapple"
     assert capsule.slots["add_ons"] == "coke"
+    assert capsule.order_spec is not None
+    assert capsule.order_spec.kind == "food_order"
+    assert capsule.order_spec.restaurant.values == ["Domino's"]
+    assert capsule.order_spec.restaurant.confidence >= 0.95
+    assert capsule.order_spec.item.values == ["cheese pizza"]
+    assert capsule.order_spec.size.values == ["Large"]
+    assert capsule.order_spec.toppings.values == ["chicken", "pineapple"]
+    assert capsule.order_spec.add_ons.values == ["coke"]
+    assert capsule.order_spec.clarification_blockers == []
     assert "Domino%27s%20cheese%20pizza" in capsule.bridge_options[0].url
+
+
+def test_action_capsule_v1_blocks_food_bridge_when_critical_order_fields_are_missing():
+    capsule = create_action_capsule("DoorDash a large cheese pizza")
+
+    assert capsule.action_id == "food_order_quote"
+    assert capsule.order_spec is not None
+    assert "clarify_restaurant" in capsule.order_spec.clarification_blockers
+    assert capsule.status == "needs_order_clarification"
+    assert capsule.bridge_options == []
+    assert "order_spec:clarify_restaurant" in capsule.auto_submit_blockers

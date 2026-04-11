@@ -20,6 +20,28 @@ class ActionBridgeOption:
 
 
 @dataclass(frozen=True)
+class OrderSpecField:
+    values: list[str] = field(default_factory=list)
+    confidence: float = 0.0
+    criticality: str = "optional"
+    source: str = ""
+    needs_clarification: bool = False
+
+
+@dataclass(frozen=True)
+class OrderSpec:
+    kind: str = ""
+    service: OrderSpecField = field(default_factory=OrderSpecField)
+    restaurant: OrderSpecField = field(default_factory=OrderSpecField)
+    item: OrderSpecField = field(default_factory=OrderSpecField)
+    size: OrderSpecField = field(default_factory=OrderSpecField)
+    toppings: OrderSpecField = field(default_factory=OrderSpecField)
+    add_ons: OrderSpecField = field(default_factory=OrderSpecField)
+    tip: OrderSpecField = field(default_factory=OrderSpecField)
+    clarification_blockers: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class ActionCapsule:
     prompt: str
     capsule_id: str
@@ -42,6 +64,7 @@ class ActionCapsule:
     verifier_requirements: list[str] = field(default_factory=list)
     auto_submit_blockers: list[str] = field(default_factory=list)
     residual_constraints: list[str] = field(default_factory=list)
+    order_spec: OrderSpec | None = None
 
 
 _UBER_DEFAULT_PICKUP_PROFILE: dict[str, Any] = {
@@ -218,6 +241,112 @@ def _extract_food_slots(prompt: str) -> dict[str, str]:
         slots["tip"] = f"${amount}"
 
     return slots
+
+
+def _order_spec_field(
+    values: list[str] | None,
+    *,
+    confidence: float,
+    criticality: str,
+    source: str,
+    needs_clarification: bool = False,
+) -> OrderSpecField:
+    clean_values = [_clean_text(value) for value in (values or []) if _clean_text(value)]
+    return OrderSpecField(
+        values=clean_values,
+        confidence=round(max(0.0, min(1.0, confidence)), 2),
+        criticality=criticality,
+        source=source,
+        needs_clarification=needs_clarification,
+    )
+
+
+def _compile_food_order_spec(prompt: str, slots: dict[str, str]) -> OrderSpec:
+    normalized = _normalize_text(prompt)
+    service = slots.get("service", "")
+    restaurant = slots.get("restaurant", "")
+    item = slots.get("item", "")
+    size = slots.get("size", "")
+    toppings = _split_food_list(slots.get("toppings", ""))
+    add_ons = _split_food_list(slots.get("add_ons", ""))
+    tip = slots.get("tip", "")
+
+    explicit_service = "doordash" in normalized or "uber eats" in normalized
+    explicit_order_phrase = bool(re.search(r"\b(?:get|order|want|buy|grab)\b", prompt, flags=re.IGNORECASE))
+    explicit_toppings = bool(re.search(r"\b(?:make(?:\s+the)?\s+toppings?|toppings?|top(?:\s+it)?(?:\s+with)?)\b", prompt, flags=re.IGNORECASE))
+    explicit_add_ons = bool(re.search(r"\b(?:and\s+)?add\b", prompt, flags=re.IGNORECASE))
+    explicit_tip = bool(re.search(r"\btip\b|\$\d+(?:\.\d{1,2})?", prompt, flags=re.IGNORECASE))
+
+    service_field = _order_spec_field(
+        [service] if service else [],
+        confidence=0.99 if explicit_service and service else (0.75 if service else 0.0),
+        criticality="required",
+        source="explicit_service" if explicit_service else "default_service_inference",
+        needs_clarification=not service,
+    )
+    restaurant_field = _order_spec_field(
+        [restaurant] if restaurant else [],
+        confidence=0.99 if restaurant else 0.0,
+        criticality="required",
+        source="from_clause" if restaurant else "missing",
+        needs_clarification=not restaurant,
+    )
+    item_field = _order_spec_field(
+        [item] if item else [],
+        confidence=0.99 if item and explicit_order_phrase else (0.72 if item else 0.0),
+        criticality="required",
+        source="explicit_order_phrase" if item and explicit_order_phrase else ("fallback_item_inference" if item else "missing"),
+        needs_clarification=not item,
+    )
+    size_explicit = bool(size and _extract_food_size(prompt))
+    size_field = _order_spec_field(
+        [size] if size else [],
+        confidence=0.99 if size_explicit else (0.0 if not size else 0.7),
+        criticality="important",
+        source="explicit_size" if size_explicit else ("size_inference" if size else "missing"),
+        needs_clarification=False,
+    )
+    toppings_field = _order_spec_field(
+        toppings,
+        confidence=0.95 if toppings and explicit_toppings else (0.88 if toppings else 0.0),
+        criticality="optional",
+        source="explicit_toppings" if toppings and explicit_toppings else ("modifier_inference" if toppings else "missing"),
+        needs_clarification=False,
+    )
+    add_ons_field = _order_spec_field(
+        add_ons,
+        confidence=0.92 if add_ons and explicit_add_ons else (0.85 if add_ons else 0.0),
+        criticality="optional",
+        source="explicit_add_on" if add_ons and explicit_add_ons else ("add_on_inference" if add_ons else "missing"),
+        needs_clarification=False,
+    )
+    tip_field = _order_spec_field(
+        [tip] if tip else [],
+        confidence=0.99 if tip and explicit_tip else (0.0 if not tip else 0.7),
+        criticality="optional",
+        source="explicit_tip" if tip and explicit_tip else ("tip_inference" if tip else "missing"),
+        needs_clarification=False,
+    )
+
+    clarification_blockers: list[str] = []
+    if not restaurant_field.values or restaurant_field.confidence < 0.65:
+        clarification_blockers.append("clarify_restaurant")
+    if not item_field.values or item_field.confidence < 0.65:
+        clarification_blockers.append("clarify_item")
+    if explicit_service and (not service_field.values or service_field.confidence < 0.65):
+        clarification_blockers.append("clarify_service")
+
+    return OrderSpec(
+        kind="food_order",
+        service=service_field,
+        restaurant=restaurant_field,
+        item=item_field,
+        size=size_field,
+        toppings=toppings_field,
+        add_ons=add_ons_field,
+        tip=tip_field,
+        clarification_blockers=list(dict.fromkeys(clarification_blockers)),
+    )
 
 
 def _extract_ride_slots(prompt: str) -> dict[str, str]:
@@ -434,12 +563,14 @@ def _message_capsule(prompt: str, draft: ActionDraftPayload) -> ActionCapsule:
 
 def _food_capsule(prompt: str, draft: ActionDraftPayload) -> ActionCapsule:
     slots = _extract_food_slots(prompt)
+    order_spec = _compile_food_order_spec(prompt, slots)
     service = slots.get("service", "food delivery")
     item = slots.get("item", "")
     restaurant = slots.get("restaurant", "")
     search_query = _food_search_query(restaurant=restaurant, item=item)
-    bridge_options = _service_bridge_options(service, search_query)
-    bridge_url = bridge_options[0].url if bridge_options else _service_search_url(service, search_query)
+    clarification_blockers = [f"order_spec:{item}" for item in order_spec.clarification_blockers]
+    bridge_options = [] if clarification_blockers else _service_bridge_options(service, search_query)
+    bridge_url = bridge_options[0].url if bridge_options else ("" if clarification_blockers else _service_search_url(service, search_query))
     blockers = [
         "consumer_ordering_bridge_not_implemented",
         "price_not_verified",
@@ -451,6 +582,13 @@ def _food_capsule(prompt: str, draft: ActionDraftPayload) -> ActionCapsule:
         blockers.insert(0, "missing_item")
     if not restaurant:
         blockers.insert(0, "missing_restaurant")
+    if clarification_blockers:
+        blockers = clarification_blockers + blockers
+    summary = (
+        "Food order spec compiled, but Memla needs to clarify the order before opening the service bridge."
+        if clarification_blockers
+        else "Food order capsule prepared. Memla can structure the cart intent, but checkout must stay user-confirmed until the service bridge and price verifiers exist."
+    )
     return ActionCapsule(
         prompt=prompt,
         capsule_id=_capsule_id(draft.action_id, prompt),
@@ -461,18 +599,23 @@ def _food_capsule(prompt: str, draft: ActionDraftPayload) -> ActionCapsule:
         authorization_level="open_confirmation_screen",
         confirmation_required=True,
         auto_submit_allowed=False,
-        status="service_bridge_required",
-        summary="Food order capsule prepared. Memla can structure the cart intent, but checkout must stay user-confirmed until the service bridge and price verifiers exist.",
+        status="needs_order_clarification" if clarification_blockers else "service_bridge_required",
+        summary=summary,
         slots=slots,
         draft_text=_food_draft_text(slots),
         bridge_kind="commerce_bridge_options",
         bridge_url=bridge_url,
-        bridge_label=f"Open {service}",
+        bridge_label="" if clarification_blockers else f"Open {service}",
         bridge_options=bridge_options,
-        bridge_instructions="Use the structured capsule to search/build the cart. Stop at checkout for user review and purchase confirmation.",
+        bridge_instructions=(
+            "Clarify the missing critical order fields before opening the commerce bridge."
+            if clarification_blockers
+            else "Use the structured capsule to search/build the cart. Stop at checkout for user review and purchase confirmation."
+        ),
         verifier_requirements=["restaurant_match", "item_match", "modifier_match", "tip_match", "total_price_limit", "delivery_address_match", "user_checkout_confirmation"],
         auto_submit_blockers=blockers,
-        residual_constraints=draft.residual_constraints,
+        residual_constraints=list(dict.fromkeys(list(draft.residual_constraints) + clarification_blockers)),
+        order_spec=order_spec,
     )
 
 
