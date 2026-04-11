@@ -3908,6 +3908,7 @@ struct MemlaBrowserView: View {
     @State private var doorDashModifierCommitPending = false
     @State private var doorDashPendingCommitKind = ""
     @State private var primaryFoodItemAdded = false
+    @State private var inProgressPrimaryItemLabel = ""
     @State private var pendingFoodAddOns: [String] = []
     @State private var pendingFoodAddOperation = ""
     @State private var agencyTrace: [String] = []
@@ -4002,6 +4003,7 @@ struct MemlaBrowserView: View {
                 lastModifierSelectionGroupKey = ""
                 lastModifierSelectionAt = .distantPast
                 primaryFoodItemAdded = false
+                inProgressPrimaryItemLabel = ""
                 pendingFoodAddOns = initialFoodAddOns(from: route.capsule)
                 pendingFoodAddOperation = ""
                 agencyTrace = []
@@ -4308,6 +4310,7 @@ struct MemlaBrowserView: View {
         lastModifierSelectionLabel = ""
         lastModifierSelectionGroupKey = ""
         lastModifierSelectionAt = .distantPast
+        inProgressPrimaryItemLabel = ""
         pendingStepActionRole = ""
         pendingStepActionLabel = ""
         pendingStepTargetGroupKey = ""
@@ -4397,6 +4400,15 @@ struct MemlaBrowserView: View {
     }
 
     private func currentFoodTargetTerms() -> [String] {
+        let unfinishedPrimaryCustomizer = !primaryFoodItemAdded
+            && !inProgressPrimaryItemLabel.isEmpty
+            && (!completedModifierTerms.isEmpty
+                || !inFlightModifierTerms.isEmpty
+                || doorDashModifierCommitPending
+                || pendingStepActionRole.hasPrefix("dd_modifier"))
+        if unfinishedPrimaryCustomizer {
+            return expandedCommerceTerms(from: [inProgressPrimaryItemLabel])
+        }
         if primaryFoodItemAdded, let addOn = pendingFoodAddOns.first {
             return expandedCommerceTerms(from: splitCommerceTerms(addOn))
         }
@@ -4767,6 +4779,7 @@ struct MemlaBrowserView: View {
     private func finalizePendingFoodAdd() {
         if pendingFoodAddOperation == "primary" {
             primaryFoodItemAdded = true
+            inProgressPrimaryItemLabel = ""
             preferCartProgress = pendingFoodAddOns.isEmpty
         } else if pendingFoodAddOperation == "addon" {
             if !pendingFoodAddOns.isEmpty {
@@ -7388,6 +7401,9 @@ struct MemlaBrowserView: View {
             clearPendingStepAction()
         }
         appendAgencyTrace("Action: \(action.candidate.role) → \(action.candidate.label)")
+        if action.candidate.role == "dd_item_card", !primaryFoodItemAdded {
+            inProgressPrimaryItemLabel = action.candidate.label
+        }
         if action.pendingRole == "dd_add_to_cart" || action.pendingRole == "ue_add_to_cart" {
             pendingDoorDashRole = action.pendingRole
             pendingDoorDashLabel = action.candidate.label
@@ -7579,6 +7595,12 @@ struct MemlaBrowserView: View {
                 )
             }
         case "dd_storefront":
+            let unfinishedPrimaryCustomizer = !primaryFoodItemAdded
+                && !inProgressPrimaryItemLabel.isEmpty
+                && (!completedModifierTerms.isEmpty
+                    || !inFlightModifierTerms.isEmpty
+                    || doorDashModifierCommitPending
+                    || pendingStepActionRole.hasPrefix("dd_modifier"))
             if primaryFoodItemAdded, !pendingFoodAddOns.isEmpty,
                let targetedAddOn = bestCandidate(role: "dd_item_card", in: candidates, targetTerms: currentFoodTargetTerms()) {
                 return MirrorAutoDriveAction(
@@ -7618,6 +7640,9 @@ struct MemlaBrowserView: View {
                     status: "Opening \(targetedItem.candidate.label)...",
                     pendingRole: ""
                 )
+            }
+            if unfinishedPrimaryCustomizer {
+                return nil
             }
             if let item = candidates.first(where: { $0.role == "dd_item_card" && !$0.blocked }) {
                 return MirrorAutoDriveAction(
