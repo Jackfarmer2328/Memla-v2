@@ -276,11 +276,18 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
                     self.flushQueuedInspectIfNeeded()
                     return
                 }
-                let state = Self.buildWebsiteState(payload: payload, capsule: capsule)
-                self.websiteState = state
-                self.inspectionStatus = "Page inspected."
-                self.maybeWarmDoorDashStorefront(payload: payload, state: state, capsule: capsule)
-                self.flushQueuedInspectIfNeeded()
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let state = Self.buildWebsiteState(payload: payload, capsule: capsule)
+                    DispatchQueue.main.async {
+                        guard self.activeInspectToken == nil || self.activeInspectToken == inspectToken else {
+                            return
+                        }
+                        self.websiteState = state
+                        self.inspectionStatus = "Page inspected."
+                        self.maybeWarmDoorDashStorefront(payload: payload, state: state, capsule: capsule)
+                        self.flushQueuedInspectIfNeeded()
+                    }
+                }
             }
         }
     }
@@ -2968,32 +2975,6 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             }));
           });
 
-          const customizerGroups = new Map();
-          Array.from(itemModal.querySelectorAll('fieldset,section,div'))
-            .filter(visible)
-            .forEach((el) => {
-              const text = clean(el.innerText || '');
-              if (!text || text.length < 12 || text.length > 900) return;
-              if (/^your recommended options\\b/i.test(text)) return;
-              if (!/(required|optional).*(select|choose)|preferences\\s*\\(optional\\)|choose your|topping side|crust|toppings?/i.test(text)) return;
-              const headerMatch = text.match(/^(.{1,120}?)(?:\\s+(?:Required|\\(Optional\\)|Optional)\\b)/i);
-              const header = clean(headerMatch ? headerMatch[1] : (/^preferences\\b/i.test(text) ? 'Preferences' : ''));
-              if (!header || /^required$/i.test(header) || /^optional$/i.test(header)) return;
-              const key = header.toLowerCase();
-              const existing = customizerGroups.get(key);
-              if (!existing || text.length > existing.text.length) {
-                customizerGroups.set(key, {
-                  header,
-                  groupKey: inferDoorDashGroupKey(header, text),
-                  required: /\\brequired\\b/i.test(text),
-                  text,
-                  root: el
-                });
-              }
-            });
-          doordashCustomizerGroupCount = customizerGroups.size;
-          doordashCustomizerRequiredGroupCount = Array.from(customizerGroups.values()).filter((group) => group.required).length;
-
           const optionRootForElement = (el) => {
             if (!el) return null;
             const id = clean((el.getAttribute && el.getAttribute('id')) || '');
@@ -3008,12 +2989,55 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             return el.closest('label,[role="radio"],[role="checkbox"]') || closestWithText(el, 6, 180);
           };
 
+          const customizerGroups = new Map();
+          const optionGroupCache = new WeakMap();
+          const groupDescriptorForNode = (node) => {
+            if (!node || !visible(node)) return null;
+            const text = clean(node.innerText || '');
+            if (!text || text.length < 12 || text.length > 900) return null;
+            if (/^your recommended options\\b/i.test(text)) return null;
+            if (!/(required|optional).*(select|choose)|preferences\\s*\\(optional\\)|choose your|topping side|crust|toppings?/i.test(text)) return null;
+            const headerNode = node.querySelector('h1,h2,h3,h4,[role="heading"]');
+            const heading = clean(headerNode?.innerText || '');
+            const firstLine = clean((text.split('\\n').find(Boolean)) || '');
+            const source = heading || text;
+            const headerMatch = source.match(/^(.{1,120}?)(?:\\s+(?:Required|\\(Optional\\)|Optional)\\b)/i);
+            const header = clean(
+              headerMatch
+                ? headerMatch[1]
+                : (/^preferences\\b/i.test(source) ? 'Preferences' : heading || firstLine)
+            );
+            if (!header || /^required$/i.test(header) || /^optional$/i.test(header)) return null;
+            return {
+              header,
+              groupKey: inferDoorDashGroupKey(header, text),
+              required: /\\brequired\\b/i.test(text),
+              text,
+              root: node
+            };
+          };
+
           const groupForOptionRoot = (root) => {
             if (!root) return null;
-            const matching = Array.from(customizerGroups.values())
-              .filter((group) => group.root && group.root.contains(root))
-              .sort((left, right) => clean(left.text || '').length - clean(right.text || '').length);
-            return matching[0] || null;
+            if (optionGroupCache.has(root)) {
+              return optionGroupCache.get(root);
+            }
+            let node = root;
+            let group = null;
+            for (let depth = 0; node && node !== itemModal && depth < 8; depth += 1, node = node.parentElement) {
+              group = groupDescriptorForNode(node);
+              if (group) {
+                break;
+              }
+            }
+            optionGroupCache.set(root, group);
+            if (group) {
+              const groupMapKey = [group.header.toLowerCase(), group.groupKey].join('|');
+              if (!customizerGroups.has(groupMapKey)) {
+                customizerGroups.set(groupMapKey, group);
+              }
+            }
+            return group;
           };
 
           const modalOptionButtons = Array.from(itemModal.querySelectorAll('label,input[type="radio"],input[type="checkbox"],[role="radio"],[role="checkbox"]'))
@@ -3028,6 +3052,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
                 return false;
               }
               const label = firstMeaningfulTextLine(root) || labelForElement(root) || labelForElement(el);
+              const group = groupForOptionRoot(root);
               const text = clean([label, contextForElement(el, root)].join(' '));
               if (!text || isDoorDashNoise(text) || /close|dismiss|add special instructions|add to cart/i.test(text)) {
                 return false;
@@ -3038,7 +3063,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
               if (/recommended|featured|favorites|cookie brownie|lava crunch|parmesan bites|stuffed cheesy bread/i.test(text)) {
                 return false;
               }
-              if (customizerGroups.has(clean(label).toLowerCase())) {
+              if (group && clean(label).toLowerCase() === clean(group.header).toLowerCase()) {
                 return false;
               }
               if (/required|optional|choose|select|preferences$/i.test(label)) {
@@ -3075,6 +3100,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
               })
             );
           });
+          doordashCustomizerGroupCount = customizerGroups.size;
+          doordashCustomizerRequiredGroupCount = Array.from(customizerGroups.values()).filter((group) => group.required).length;
         } else if (!cartDrawer) {
           const explicitMenuCards = Array.from(document.querySelectorAll('[data-testid="MenuItem"][data-item-id]'))
             .filter(visible)
