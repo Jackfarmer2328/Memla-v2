@@ -282,6 +282,11 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
                     self.flushQueuedInspectIfNeeded()
                     return
                 }
+                if let jsError = Self.javaScriptPayloadError(payload) {
+                    self.inspectionStatus = jsError
+                    self.flushQueuedInspectIfNeeded()
+                    return
+                }
                 DispatchQueue.global(qos: .userInitiated).async {
                     let state = Self.buildWebsiteState(payload: payload, capsule: capsule)
                     DispatchQueue.main.async {
@@ -442,6 +447,10 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
                     self.buttonActionStatus = "Button tap returned no page result."
                     return
                 }
+                if let jsError = Self.javaScriptPayloadError(payload) {
+                    self.buttonActionStatus = jsError
+                    return
+                }
                 let reason = Self.stringValue(payload["reason"]).replacingOccurrences(of: "_", with: " ")
                 let ok = payload["ok"] as? Bool ?? false
                 self.buttonActionStatus = ok ? reason.capitalized : "Button tap blocked: \(reason)"
@@ -512,6 +521,10 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
                     self.buttonActionStatus = "Save tap returned no page result."
                     return
                 }
+                if let jsError = Self.javaScriptPayloadError(payload) {
+                    self.buttonActionStatus = jsError
+                    return
+                }
                 let reason = Self.stringValue(payload["reason"]).replacingOccurrences(of: "_", with: " ")
                 let ok = payload["ok"] as? Bool ?? false
                 self.buttonActionStatus = ok ? reason.capitalized : "Save tap blocked: \(reason)"
@@ -537,6 +550,10 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
                 }
                 guard let payload = result as? [String: Any] else {
                     self.buttonActionStatus = "Add-to-cart tap returned no page result."
+                    return
+                }
+                if let jsError = Self.javaScriptPayloadError(payload) {
+                    self.buttonActionStatus = jsError
                     return
                 }
                 let reason = Self.stringValue(payload["reason"]).replacingOccurrences(of: "_", with: " ")
@@ -2075,6 +2092,26 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         }
     }
 
+    private static func javaScriptPayloadError(_ payload: [String: Any]) -> String? {
+        let message = stringValue(payload["memla_js_error"])
+        guard !message.isEmpty else {
+            return nil
+        }
+        let script = stringValue(payload["memla_js_script"])
+        let stack = stringValue(payload["memla_js_stack"])
+        let firstStackLine = stack
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map(String.init)
+            .first ?? ""
+        if !script.isEmpty, !firstStackLine.isEmpty {
+            return "\(script): \(message) [\(firstStackLine)]"
+        }
+        if !script.isEmpty {
+            return "\(script): \(message)"
+        }
+        return message
+    }
+
     private static func javascriptStringLiteral(_ value: String) -> String {
         guard let data = try? JSONSerialization.data(withJSONObject: [value], options: []),
               let encodedArray = String(data: data, encoding: .utf8),
@@ -2398,6 +2435,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         let fingerprintLiteral = javaScriptStringLiteral(tapFingerprint)
         return """
         (() => {
+          try {
           const targetLabel = \(labelLiteral);
           const targetGroupKey = \(groupKeyLiteral);
           const targetGroupLabel = \(groupLabelLiteral);
@@ -2600,12 +2638,22 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             group_key: best.resolvedGroupKey,
             group_label: best.resolvedGroupLabel
           };
+          } catch (error) {
+            return {
+              ok: false,
+              reason: 'memla_js_exception',
+              memla_js_script: 'dd_modifier_option_tap',
+              memla_js_error: String(error),
+              memla_js_stack: String((error && error.stack) || '')
+            };
+          }
         })();
         """
     }
 
     private static let doorDashModifierSaveScript = """
     (() => {
+      try {
       const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
       const visible = (el) => {
         if (!el) return false;
@@ -2665,11 +2713,21 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
       activate(footer);
       activate(button);
       return { ok: true, reason: 'tapped_doordash_modifier_save', label: clean(button.innerText || button.textContent || '') };
+      } catch (error) {
+        return {
+          ok: false,
+          reason: 'memla_js_exception',
+          memla_js_script: 'dd_modifier_save_tap',
+          memla_js_error: String(error),
+          memla_js_stack: String((error && error.stack) || '')
+        };
+      }
     })();
     """
 
     private static let doorDashAddToCartScript = """
     (() => {
+      try {
       const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
       const visible = (el) => {
         if (!el) return false;
@@ -2724,11 +2782,21 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
       activate(footer);
       activate(button);
       return { ok: true, reason: 'tapped_doordash_add_to_cart', label: clean(button.innerText || button.textContent || '') };
+      } catch (error) {
+        return {
+          ok: false,
+          reason: 'memla_js_exception',
+          memla_js_script: 'dd_add_to_cart_tap',
+          memla_js_error: String(error),
+          memla_js_stack: String((error && error.stack) || '')
+        };
+      }
     })();
     """
 
     private static let pageInspectionScript = """
     (() => {
+      try {
       const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
       const visible = (el) => {
         if (!el) return false;
@@ -3667,11 +3735,19 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         uber_has_see_prices_cta: uberHasSeePricesCTA,
         uber_has_request_cta: uberHasRequestCTA
       };
+      } catch (error) {
+        return {
+          memla_js_script: 'page_inspection',
+          memla_js_error: String(error),
+          memla_js_stack: String((error && error.stack) || '')
+        };
+      }
     })();
     """
 
     private static let doorDashStorefrontPeekScript = """
     (() => {
+      try {
       const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
       const visible = (el) => {
         if (!el) return false;
@@ -3699,11 +3775,21 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
       }
       window.scrollBy(0, Math.min(Math.max(window.innerHeight * 0.9, 320), 720));
       return { ok: true, reason: 'scrolled_storefront_down' };
+      } catch (error) {
+        return {
+          ok: false,
+          reason: 'memla_js_exception',
+          memla_js_script: 'dd_storefront_peek',
+          memla_js_error: String(error),
+          memla_js_stack: String((error && error.stack) || '')
+        };
+      }
     })();
     """
 
     private static let pageGroundingProbeScript = """
     (() => {
+      try {
       const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
       const visible = (el) => {
         if (!el) return false;
@@ -3726,6 +3812,11 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
       return {
         fingerprint: [location.href, document.title || '', visibleControls, bodyText].join(' || ')
       };
+      } catch (_) {
+        return {
+          fingerprint: ''
+        };
+      }
     })();
     """
 }
