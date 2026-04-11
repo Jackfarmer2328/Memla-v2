@@ -28,6 +28,42 @@ struct WebsiteC2ACandidate: Identifiable {
     let groupLabel: String = ""
     let groupRequired: Bool = false
     let tapFingerprint: String = ""
+
+    init(
+        id: String,
+        domIndex: Int,
+        label: String,
+        url: String,
+        kind: String,
+        role: String,
+        score: Double,
+        matchedTerms: [String],
+        blocked: Bool,
+        tapSafety: String,
+        tapReason: String,
+        reason: String,
+        groupKey: String = "",
+        groupLabel: String = "",
+        groupRequired: Bool = false,
+        tapFingerprint: String = ""
+    ) {
+        self.id = id
+        self.domIndex = domIndex
+        self.label = label
+        self.url = url
+        self.kind = kind
+        self.role = role
+        self.score = score
+        self.matchedTerms = matchedTerms
+        self.blocked = blocked
+        self.tapSafety = tapSafety
+        self.tapReason = tapReason
+        self.reason = reason
+        self.groupKey = groupKey
+        self.groupLabel = groupLabel
+        self.groupRequired = groupRequired
+        self.tapFingerprint = tapFingerprint
+    }
 }
 
 struct WebsiteC2AState {
@@ -4884,31 +4920,32 @@ struct MemlaBrowserView: View {
         let activeGroupKind = doorDashActiveGroupKind(from: state, candidates: candidates)
         let activeGroupLabel = doorDashActiveGroupLabel(from: state, candidates: candidates)
         let saveCandidate = candidates.first(where: { $0.role == "dd_modifier_save" && !$0.blocked })
-        let addCandidate = candidates.first(where: { $0.role == "dd_add_to_cart" && !$0.blocked })
-            ?? {
-                guard state.serviceFacts["dd_has_add_to_cart"] == "true" else {
-                    return nil
-                }
-                let label = state.serviceFacts["dd_add_to_cart_label"] ?? "Add to cart"
-                return WebsiteC2ACandidate(
-                    id: "synthetic-dd-item-modal-add-to-cart",
-                    domIndex: -1,
-                    label: label,
-                    url: "",
-                    kind: "button",
-                    role: "dd_add_to_cart",
-                    score: 5.1,
-                    matchedTerms: [],
-                    blocked: false,
-                    tapSafety: "caution",
-                    tapReason: "Needs user review before Memla taps",
-                    reason: "DoorDash add-to-cart control",
-                    groupKey: DoorDashCustomizerGroupKind.review.rawValue,
-                    groupLabel: "Add to cart",
-                    groupRequired: false,
-                    tapFingerprint: "dd_add_to_cart | review | add to cart | add to cart"
-                )
-            }()
+        let addCandidate: WebsiteC2ACandidate?
+        if let existingAddCandidate = candidates.first(where: { $0.role == "dd_add_to_cart" && !$0.blocked }) {
+            addCandidate = existingAddCandidate
+        } else if state.serviceFacts["dd_has_add_to_cart"] == "true" {
+            let label = state.serviceFacts["dd_add_to_cart_label"] ?? "Add to cart"
+            addCandidate = WebsiteC2ACandidate(
+                id: "synthetic-dd-item-modal-add-to-cart",
+                domIndex: -1,
+                label: label,
+                url: "",
+                kind: "button",
+                role: "dd_add_to_cart",
+                score: 5.1,
+                matchedTerms: [],
+                blocked: false,
+                tapSafety: "caution",
+                tapReason: "Needs user review before Memla taps",
+                reason: "DoorDash add-to-cart control",
+                groupKey: DoorDashCustomizerGroupKind.review.rawValue,
+                groupLabel: "Add to cart",
+                groupRequired: false,
+                tapFingerprint: "dd_add_to_cart | review | add to cart | add to cart"
+            )
+        } else {
+            addCandidate = nil
+        }
         let targetCandidate = bestDoorDashModifierCandidate(
             in: candidates,
             targetTerms: remainingModifierTerms,
