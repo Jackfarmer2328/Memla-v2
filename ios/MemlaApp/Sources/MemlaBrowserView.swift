@@ -4942,7 +4942,27 @@ struct MemlaBrowserView: View {
                 return true
             }
             if pendingStepCommitKind == "requested" {
-                return pendingStepTapVerifiedSelection && signature != pendingStepActionSignature
+                if pendingStepTapVerifiedSelection && signature != pendingStepActionSignature {
+                    return true
+                }
+                if pendingStepTapAcknowledged,
+                   pendingStepTargetOpensSubflow,
+                   signature != pendingStepActionSignature
+                {
+                    let activeGroupKey = state.serviceFacts["dd_active_group_key"] ?? ""
+                    let activeGroupLabel = normalizedCommerceTerm(state.serviceFacts["dd_active_group_label"] ?? "")
+                    let targetGroupKey = pendingStepTargetGroupKey
+                    let targetGroupLabel = normalizedCommerceTerm(pendingStepTargetGroupLabel)
+                    let previousGroupLabel = normalizedCommerceTerm(pendingStepObservedGroupLabel)
+                    let changedFromTargetGroup = (!targetGroupKey.isEmpty && !activeGroupKey.isEmpty && activeGroupKey != targetGroupKey)
+                        || (!targetGroupLabel.isEmpty && !activeGroupLabel.isEmpty && activeGroupLabel != targetGroupLabel)
+                    let changedFromObservedGroup = (!pendingStepObservedGroupKey.isEmpty && !activeGroupKey.isEmpty && activeGroupKey != pendingStepObservedGroupKey)
+                        || (!previousGroupLabel.isEmpty && !activeGroupLabel.isEmpty && activeGroupLabel != previousGroupLabel)
+                    if changedFromTargetGroup || changedFromObservedGroup {
+                        return true
+                    }
+                }
+                return false
             }
             let activeGroupKey = state.serviceFacts["dd_active_group_key"] ?? ""
             let activeGroupLabel = normalizedCommerceTerm(state.serviceFacts["dd_active_group_label"] ?? "")
