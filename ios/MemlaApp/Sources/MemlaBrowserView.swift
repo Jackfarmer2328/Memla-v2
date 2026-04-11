@@ -3220,6 +3220,9 @@ struct MemlaBrowserView: View {
     @State private var pendingStepActionLabel = ""
     @State private var pendingStepActionSignature = ""
     @State private var pendingStepActionAt = Date.distantPast
+    @State private var pendingStepConsumedTerms: Set<String> = []
+    @State private var pendingStepCommitKind = ""
+    @State private var autoDriveEpoch = 0
 
     private struct MirrorAutoDriveAction {
         let candidate: WebsiteC2ACandidate
@@ -3297,6 +3300,9 @@ struct MemlaBrowserView: View {
                 pendingStepActionLabel = ""
                 pendingStepActionSignature = ""
                 pendingStepActionAt = .distantPast
+                pendingStepConsumedTerms = []
+                pendingStepCommitKind = ""
+                autoDriveEpoch = 0
                 browser.startGrounding(capsule: route.capsule)
                 if browser.currentURL.isEmpty {
                     browser.navigate(to: route.url, autoInspect: true, capsule: route.capsule)
@@ -3320,6 +3326,21 @@ struct MemlaBrowserView: View {
                     return
                 }
                 appendAgencyTrace("Button: \(status)")
+                let lowered = status.lowercased()
+                let failed = lowered.contains("blocked")
+                    || lowered.contains("returned no page result")
+                    || lowered.contains("not found")
+                    || lowered.contains("policy")
+                let succeeded = lowered.contains("tapped ")
+                    || lowered.contains("save option")
+                    || lowered.contains("field focused")
+                if pendingStepActionRole.hasPrefix("dd_modifier") {
+                    if failed {
+                        rollbackPendingDoorDashStepFailure()
+                    } else if succeeded {
+                        applyPendingDoorDashStepSuccess()
+                    }
+                }
             }
             .onReceive(browser.$searchActionStatus.removeDuplicates()) { status in
                 guard autoDriveEnabled, !status.isEmpty else {
@@ -3565,6 +3586,9 @@ struct MemlaBrowserView: View {
         pendingStepActionLabel = ""
         pendingStepActionSignature = ""
         pendingStepActionAt = .distantPast
+        pendingStepConsumedTerms = []
+        pendingStepCommitKind = ""
+        autoDriveEpoch += 1
         primaryFoodItemAdded = false
         pendingFoodAddOns = initialFoodAddOns(from: route.capsule)
         preferCartProgress = false
@@ -3858,6 +3882,49 @@ struct MemlaBrowserView: View {
         pendingStepActionLabel = ""
         pendingStepActionSignature = ""
         pendingStepActionAt = .distantPast
+        pendingStepConsumedTerms = []
+        pendingStepCommitKind = ""
+    }
+
+    private func clearPendingStepAction() {
+        pendingStepActionRole = ""
+        pendingStepActionLabel = ""
+        pendingStepActionSignature = ""
+        pendingStepActionAt = .distantPast
+        pendingStepConsumedTerms = []
+        pendingStepCommitKind = ""
+    }
+
+    private func applyPendingDoorDashStepSuccess() {
+        switch pendingStepActionRole {
+        case "dd_modifier_option":
+            if !pendingStepConsumedTerms.isEmpty {
+                inFlightModifierTerms.formUnion(pendingStepConsumedTerms)
+            }
+            doorDashModifierCommitPending = true
+            doorDashPendingCommitKind = pendingStepCommitKind
+            lastModifierSelectionLabel = pendingStepActionLabel
+            lastModifierSelectionAt = Date()
+        case "dd_modifier_save":
+            if !inFlightModifierTerms.isEmpty {
+                completedModifierTerms.formUnion(inFlightModifierTerms)
+                inFlightModifierTerms.removeAll()
+            }
+            doorDashModifierCommitPending = false
+            doorDashPendingCommitKind = ""
+            lastModifierSelectionLabel = ""
+            lastModifierSelectionAt = .distantPast
+        default:
+            break
+        }
+    }
+
+    private func rollbackPendingDoorDashStepFailure() {
+        if pendingStepActionRole == "dd_modifier_save" {
+            // Save never committed, so preserve the in-flight constraint and keep the commit boundary active.
+            doorDashModifierCommitPending = !inFlightModifierTerms.isEmpty || doorDashModifierCommitPending
+        }
+        clearPendingStepAction()
     }
 
     private var browserToolbar: some View {
@@ -5862,10 +5929,7 @@ struct MemlaBrowserView: View {
             let actionSettled = signature != pendingStepActionSignature
                 || Date().timeIntervalSince(pendingStepActionAt) >= 1.8
             if actionSettled {
-                pendingStepActionRole = ""
-                pendingStepActionLabel = ""
-                pendingStepActionSignature = ""
-                pendingStepActionAt = .distantPast
+                clearPendingStepAction()
             } else {
                 autoDriveStatus = "Waiting for DoorDash customizer transition..."
                 appendAgencyTrace(autoDriveStatus)
@@ -5900,7 +5964,11 @@ struct MemlaBrowserView: View {
                 addToCartRetryCount += 1
                 autoDriveStatus = "Retrying Add to cart..."
                 appendAgencyTrace(autoDriveStatus)
+                let actionEpoch = autoDriveEpoch
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+                    guard actionEpoch == autoDriveEpoch, autoDriveEnabled else {
+                        return
+                    }
                     performAutoDriveAction(retryCandidate, allowCaution: true)
                 }
                 return
@@ -5938,7 +6006,11 @@ struct MemlaBrowserView: View {
                 addToCartRetryCount += 1
                 autoDriveStatus = "Retrying destination entry..."
                 appendAgencyTrace(autoDriveStatus)
+                let actionEpoch = autoDriveEpoch
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
+                    guard actionEpoch == autoDriveEpoch, autoDriveEnabled else {
+                        return
+                    }
                     browser.fillUberRideLocation(destination, isPickup: false, capsule: route.capsule)
                 }
                 return
@@ -5974,7 +6046,11 @@ struct MemlaBrowserView: View {
             addToCartRetryCount = 0
             autoDriveStatus = "Typing destination..."
             appendAgencyTrace(autoDriveStatus)
+            let actionEpoch = autoDriveEpoch
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                guard actionEpoch == autoDriveEpoch, autoDriveEnabled else {
+                    return
+                }
                 browser.fillUberRideLocation(destination, isPickup: false, capsule: route.capsule)
             }
             return
@@ -6009,35 +6085,21 @@ struct MemlaBrowserView: View {
         lastAutoDriveSignature = signature
         autoDriveStatus = action.status
         if action.candidate.role == "dd_modifier_option" {
-            if !action.consumedTerms.isEmpty {
-                inFlightModifierTerms.formUnion(action.consumedTerms)
-            }
-            doorDashModifierCommitPending = true
-            doorDashPendingCommitKind = action.consumedTerms.isEmpty ? "prerequisite" : "requested"
-            lastModifierSelectionLabel = action.candidate.label
-            lastModifierSelectionAt = Date()
             pendingStepActionRole = action.candidate.role
             pendingStepActionLabel = action.candidate.label
             pendingStepActionSignature = signature
             pendingStepActionAt = Date()
+            pendingStepConsumedTerms = Set(action.consumedTerms)
+            pendingStepCommitKind = action.consumedTerms.isEmpty ? "prerequisite" : "requested"
         } else if action.candidate.role == "dd_modifier_save" {
-            if !inFlightModifierTerms.isEmpty {
-                completedModifierTerms.formUnion(inFlightModifierTerms)
-                inFlightModifierTerms.removeAll()
-            }
-            doorDashModifierCommitPending = false
-            doorDashPendingCommitKind = ""
-            lastModifierSelectionLabel = ""
-            lastModifierSelectionAt = .distantPast
             pendingStepActionRole = action.candidate.role
             pendingStepActionLabel = action.candidate.label
             pendingStepActionSignature = signature
             pendingStepActionAt = Date()
+            pendingStepConsumedTerms = []
+            pendingStepCommitKind = "save"
         } else {
-            pendingStepActionRole = ""
-            pendingStepActionLabel = ""
-            pendingStepActionSignature = ""
-            pendingStepActionAt = .distantPast
+            clearPendingStepAction()
         }
         appendAgencyTrace("Action: \(action.candidate.role) → \(action.candidate.label)")
         if action.pendingRole == "dd_add_to_cart" || action.pendingRole == "ue_add_to_cart" {
@@ -6056,7 +6118,11 @@ struct MemlaBrowserView: View {
         default:
             autoDriveDelay = 0.45
         }
+        let actionEpoch = autoDriveEpoch
         DispatchQueue.main.asyncAfter(deadline: .now() + autoDriveDelay) {
+            guard actionEpoch == autoDriveEpoch, autoDriveEnabled else {
+                return
+            }
             performAutoDriveAction(action.candidate, allowCaution: action.allowCaution)
         }
     }
