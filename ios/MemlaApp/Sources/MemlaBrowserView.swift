@@ -131,6 +131,11 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
     private var pageObservationTimer: Timer?
     private var lastObservedFingerprint: String = ""
     private var isAutoInspectQueued = false
+    private var queuedInspectRequested = false
+    private var queuedInspectCapsule: ActionCapsule?
+    private var inspectSequence = 0
+    private var activeInspectToken: Int?
+    private var inspectTimeoutWorkItem: DispatchWorkItem?
     private var lastDoorDashStorefrontWarmupURL: String = ""
     private var doorDashStorefrontWarmupAttempts = 0
 
@@ -144,6 +149,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
 
     deinit {
         pageObservationTimer?.invalidate()
+        inspectTimeoutWorkItem?.cancel()
     }
 
     func load(_ url: URL) {
@@ -170,6 +176,11 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         pageObservationTimer = nil
         lastObservedFingerprint = ""
         isAutoInspectQueued = false
+        queuedInspectRequested = false
+        queuedInspectCapsule = nil
+        activeInspectToken = nil
+        inspectTimeoutWorkItem?.cancel()
+        inspectTimeoutWorkItem = nil
         lastDoorDashStorefrontWarmupURL = ""
         doorDashStorefrontWarmupAttempts = 0
     }
@@ -183,6 +194,11 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         autoInspectCapsule = capsule
         observationCapsule = capsule
         lastObservedFingerprint = ""
+        queuedInspectRequested = false
+        queuedInspectCapsule = nil
+        activeInspectToken = nil
+        inspectTimeoutWorkItem?.cancel()
+        inspectTimeoutWorkItem = nil
         lastDoorDashStorefrontWarmupURL = ""
         doorDashStorefrontWarmupAttempts = 0
         webView.load(URLRequest(url: url))
@@ -210,28 +226,77 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
 
     func inspectPage(capsule: ActionCapsule?) {
         observationCapsule = capsule
+        if isInspecting {
+            queuedInspectRequested = true
+            if let capsule {
+                queuedInspectCapsule = capsule
+            }
+            if inspectionStatus.isEmpty {
+                inspectionStatus = "Inspect queued while the current page read finishes..."
+            }
+            return
+        }
+        inspectSequence += 1
+        let inspectToken = inspectSequence
+        activeInspectToken = inspectToken
+        inspectTimeoutWorkItem?.cancel()
         isInspecting = true
         inspectionStatus = "Inspecting page..."
         syncState()
+        let timeoutWorkItem = DispatchWorkItem { [weak self] in
+            guard let self = self, self.activeInspectToken == inspectToken else {
+                return
+            }
+            self.activeInspectToken = nil
+            self.isInspecting = false
+            self.inspectionStatus = "Inspect timed out. Mirror will retry when the page settles."
+            self.flushQueuedInspectIfNeeded()
+        }
+        inspectTimeoutWorkItem = timeoutWorkItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6.0, execute: timeoutWorkItem)
         webView.evaluateJavaScript(Self.pageInspectionScript) { [weak self] result, error in
             DispatchQueue.main.async {
                 guard let self = self else {
                     return
                 }
+                guard self.activeInspectToken == inspectToken else {
+                    return
+                }
+                self.activeInspectToken = nil
+                self.inspectTimeoutWorkItem?.cancel()
+                self.inspectTimeoutWorkItem = nil
                 self.isInspecting = false
                 if let error = error {
                     self.inspectionStatus = error.localizedDescription
+                    self.flushQueuedInspectIfNeeded()
                     return
                 }
                 guard let payload = result as? [String: Any] else {
                     self.inspectionStatus = "Memla could not read this page yet."
+                    self.flushQueuedInspectIfNeeded()
                     return
                 }
                 let state = Self.buildWebsiteState(payload: payload, capsule: capsule)
                 self.websiteState = state
                 self.inspectionStatus = "Page inspected."
                 self.maybeWarmDoorDashStorefront(payload: payload, state: state, capsule: capsule)
+                self.flushQueuedInspectIfNeeded()
             }
+        }
+    }
+
+    private func flushQueuedInspectIfNeeded() {
+        guard queuedInspectRequested else {
+            return
+        }
+        queuedInspectRequested = false
+        let capsule = queuedInspectCapsule ?? observationCapsule
+        queuedInspectCapsule = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self = self, !self.isInspecting else {
+                return
+            }
+            self.inspectPage(capsule: capsule)
         }
     }
 
