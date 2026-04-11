@@ -4217,7 +4217,7 @@ struct MemlaBrowserView: View {
         let candidatePool = stateScoped.isEmpty ? visibleCandidates : stateScoped
         let focusedPool: [WebsiteC2ACandidate]
         if state.pageKind == "dd_item_modal" {
-            focusedPool = focusedDoorDashItemModalCandidates(from: candidatePool)
+            focusedPool = focusedDoorDashItemModalCandidates(from: candidatePool, state: state)
         } else {
             focusedPool = candidatePool
         }
@@ -4397,28 +4397,135 @@ struct MemlaBrowserView: View {
         }
     }
 
-    private func focusedDoorDashItemModalCandidates(from candidates: [WebsiteC2ACandidate]) -> [WebsiteC2ACandidate] {
-        let remainingModifierTerms = currentModifierTargets().terms
+    private enum DoorDashCustomizerFocusKind {
+        case requestedModifier
+        case prerequisiteModifier
+        case saveStep
+        case reviewStep
+        case waiting
+    }
+
+    private struct DoorDashCustomizerSnapshot {
+        let focusKind: DoorDashCustomizerFocusKind
+        let stage: FoodModifierStage
+        let remainingTerms: [String]
+        let requestedTerms: [String]
+        let focusLabel: String
+        let targetCandidate: WebsiteC2ACandidate?
+        let prerequisiteCandidate: WebsiteC2ACandidate?
+        let saveCandidate: WebsiteC2ACandidate?
+        let addCandidate: WebsiteC2ACandidate?
+        let filteredCandidates: [WebsiteC2ACandidate]
+        let addToCartAllowed: Bool
+    }
+
+    private func doorDashCustomizerSnapshot(from candidates: [WebsiteC2ACandidate], state: WebsiteC2AState) -> DoorDashCustomizerSnapshot {
+        let modifierTargets = currentModifierTargets()
+        let remainingModifierTerms = modifierTargets.terms
         let requestedModifierTerms = allRequestedModifierTerms()
         let saveCandidate = candidates.first(where: { $0.role == "dd_modifier_save" && !$0.blocked })
-        let hasAddToCart = candidates.contains(where: { $0.role == "dd_add_to_cart" && !$0.blocked })
+        let addCandidate = candidates.first(where: { $0.role == "dd_add_to_cart" && !$0.blocked })
+            ?? {
+                guard state.serviceFacts["dd_has_add_to_cart"] == "true" else {
+                    return nil
+                }
+                let label = state.serviceFacts["dd_add_to_cart_label"] ?? "Add to cart"
+                return WebsiteC2ACandidate(
+                    id: "synthetic-dd-item-modal-add-to-cart",
+                    domIndex: -1,
+                    label: label,
+                    url: "",
+                    kind: "button",
+                    role: "dd_add_to_cart",
+                    score: 5.1,
+                    matchedTerms: [],
+                    blocked: false,
+                    tapSafety: "caution",
+                    tapReason: "Needs user review before Memla taps",
+                    reason: "DoorDash add-to-cart control"
+                )
+            }()
+        let targetCandidate = bestDoorDashModifierCandidate(in: candidates, targetTerms: remainingModifierTerms)?.candidate
+        let prerequisiteCandidate = fallbackDoorDashModifierCandidate(in: candidates)
+
+        let focusKind: DoorDashCustomizerFocusKind
+        let focusLabel: String
+        let filteredCandidates: [WebsiteC2ACandidate]
 
         if !remainingModifierTerms.isEmpty {
             if shouldSaveAfterModifierSelection(saveCandidate: saveCandidate, requestedTerms: requestedModifierTerms) {
+                focusKind = .saveStep
+                focusLabel = "Save current customizer step"
                 let saveStep = candidates.filter { ["dd_modifier_save", "dd_modal_close"].contains($0.role) }
-                return saveStep.isEmpty ? candidates : saveStep
+                filteredCandidates = saveStep.isEmpty ? candidates : saveStep
+            } else if let targetCandidate {
+                focusKind = .requestedModifier
+                focusLabel = "Resolve \(remainingModifierTerms.joined(separator: ", "))"
+                let stepCandidates = candidates.filter { ["dd_modifier_option", "dd_modal_close"].contains($0.role) }
+                filteredCandidates = stepCandidates.isEmpty ? candidates : stepCandidates
+            } else if let prerequisiteCandidate {
+                focusKind = .prerequisiteModifier
+                focusLabel = "Clear prerequisite: \(prerequisiteCandidate.label)"
+                let stepCandidates = candidates.filter { ["dd_modifier_option", "dd_modal_close"].contains($0.role) }
+                filteredCandidates = stepCandidates.isEmpty ? candidates : stepCandidates
+            } else if saveCandidate != nil {
+                focusKind = .saveStep
+                focusLabel = "Save current customizer step"
+                let saveStep = candidates.filter { ["dd_modifier_save", "dd_modal_close"].contains($0.role) }
+                filteredCandidates = saveStep.isEmpty ? candidates : saveStep
+            } else {
+                focusKind = .waiting
+                focusLabel = "Waiting for next customizer step"
+                filteredCandidates = candidates
             }
-            let stepCandidates = candidates.filter { ["dd_modifier_option", "dd_modifier_save", "dd_modal_close"].contains($0.role) }
-            return stepCandidates.isEmpty ? candidates : stepCandidates
-        }
-
-        if saveCandidate != nil && !hasAddToCart {
+        } else if saveCandidate != nil && addCandidate == nil {
+            focusKind = .saveStep
+            focusLabel = "Save current customizer step"
             let saveStep = candidates.filter { ["dd_modifier_save", "dd_modal_close"].contains($0.role) }
-            return saveStep.isEmpty ? candidates : saveStep
+            filteredCandidates = saveStep.isEmpty ? candidates : saveStep
+        } else if addCandidate != nil {
+            focusKind = .reviewStep
+            focusLabel = "Add to cart"
+            let reviewStep = candidates.filter { ["dd_add_to_cart", "dd_cart_cta", "dd_modal_close"].contains($0.role) }
+            filteredCandidates = reviewStep.isEmpty ? candidates : reviewStep
+        } else {
+            focusKind = .waiting
+            focusLabel = "Waiting for next customizer step"
+            filteredCandidates = candidates
         }
 
-        let reviewStep = candidates.filter { ["dd_add_to_cart", "dd_cart_cta", "dd_modal_close"].contains($0.role) }
-        return reviewStep.isEmpty ? candidates : reviewStep
+        return DoorDashCustomizerSnapshot(
+            focusKind: focusKind,
+            stage: modifierTargets.stage,
+            remainingTerms: remainingModifierTerms,
+            requestedTerms: requestedModifierTerms,
+            focusLabel: focusLabel,
+            targetCandidate: targetCandidate,
+            prerequisiteCandidate: prerequisiteCandidate,
+            saveCandidate: saveCandidate,
+            addCandidate: addCandidate,
+            filteredCandidates: filteredCandidates,
+            addToCartAllowed: remainingModifierTerms.isEmpty
+        )
+    }
+
+    private func focusedDoorDashItemModalCandidates(from candidates: [WebsiteC2ACandidate], state: WebsiteC2AState) -> [WebsiteC2ACandidate] {
+        return doorDashCustomizerSnapshot(from: candidates, state: state).filteredCandidates
+    }
+
+    private func readableDoorDashFocusKind(_ kind: DoorDashCustomizerFocusKind) -> String {
+        switch kind {
+        case .requestedModifier:
+            return "requested modifier"
+        case .prerequisiteModifier:
+            return "prerequisite modifier"
+        case .saveStep:
+            return "save step"
+        case .reviewStep:
+            return "review step"
+        case .waiting:
+            return "waiting"
+        }
     }
 
     private func mirrorFacts(for state: WebsiteC2AState) -> [WebsiteMirrorFact] {
@@ -4428,16 +4535,12 @@ struct MemlaBrowserView: View {
             WebsiteMirrorFact(id: "actions", title: "Moves", value: "\(state.safeActions.count)")
         ]
         if state.pageKind == "dd_item_modal" {
-            let remainingModifierTerms = currentModifierTargets().terms
-            let focusValue: String
-            if !remainingModifierTerms.isEmpty {
-                focusValue = remainingModifierTerms.joined(separator: ", ")
-            } else if state.serviceFacts["dd_has_add_to_cart"] == "true" {
-                focusValue = "add to cart"
-            } else {
-                focusValue = "save current step"
+            let snapshot = doorDashCustomizerSnapshot(from: state.candidates, state: state)
+            facts.append(WebsiteMirrorFact(id: "focus", title: "Focus", value: snapshot.focusLabel))
+            facts.append(WebsiteMirrorFact(id: "step", title: "Step", value: readableDoorDashFocusKind(snapshot.focusKind)))
+            if !snapshot.remainingTerms.isEmpty {
+                facts.append(WebsiteMirrorFact(id: "remaining", title: "Remaining", value: snapshot.remainingTerms.joined(separator: ", ")))
             }
-            facts.append(WebsiteMirrorFact(id: "focus", title: "Focus", value: focusValue))
         }
         if let verification = state.capsuleVerification {
             facts.append(WebsiteMirrorFact(id: "matched", title: "Matched", value: "\(verification.matched.count)"))
@@ -5815,60 +5918,30 @@ struct MemlaBrowserView: View {
                 )
             }
         case "dd_item_modal":
-            let remainingModifierTerms = currentModifierTargets().terms
-            let requestedModifierTerms = allRequestedModifierTerms()
-            let addCandidate = candidates.first(where: { $0.role == "dd_add_to_cart" && !$0.blocked })
-                ?? {
-                    guard state.serviceFacts["dd_has_add_to_cart"] == "true" else {
-                        return nil
-                    }
-                    let label = state.serviceFacts["dd_add_to_cart_label"] ?? "Add to cart"
-                    return WebsiteC2ACandidate(
-                        id: "synthetic-dd-item-modal-add-to-cart",
-                        domIndex: -1,
-                        label: label,
-                        url: "",
-                        kind: "button",
-                        role: "dd_add_to_cart",
-                        score: 5.1,
-                        matchedTerms: [],
-                        blocked: false,
-                        tapSafety: "caution",
-                        tapReason: "Needs user review before Memla taps",
-                        reason: "DoorDash add-to-cart control"
-                    )
-                }()
-            let saveCandidate = candidates.first(where: { $0.role == "dd_modifier_save" && !$0.blocked })
-            let fallbackModifier = fallbackDoorDashModifierCandidate(in: candidates)
-
-            if !remainingModifierTerms.isEmpty {
-                if let save = saveCandidate,
-                   shouldSaveAfterModifierSelection(saveCandidate: saveCandidate, requestedTerms: requestedModifierTerms) {
+            let snapshot = doorDashCustomizerSnapshot(from: candidates, state: state)
+            switch snapshot.focusKind {
+            case .requestedModifier:
+                if let target = snapshot.targetCandidate {
+                    let consumed = candidateMatchedModifierTerms(target, targetTerms: snapshot.remainingTerms)
                     return MirrorAutoDriveAction(
-                        candidate: save,
+                        candidate: target,
                         allowCaution: true,
-                        status: "Saving options...",
-                        pendingRole: ""
-                    )
-                }
-                if let targetedModifier = bestDoorDashModifierCandidate(in: candidates, targetTerms: remainingModifierTerms) {
-                    return MirrorAutoDriveAction(
-                        candidate: targetedModifier.candidate,
-                        allowCaution: true,
-                        status: "Selecting \(targetedModifier.candidate.label)...",
+                        status: "Selecting \(target.label)...",
                         pendingRole: "",
-                        consumedTerms: targetedModifier.matched
+                        consumedTerms: consumed
                     )
                 }
-                if let fallbackModifier {
+            case .prerequisiteModifier:
+                if let prerequisite = snapshot.prerequisiteCandidate {
                     return MirrorAutoDriveAction(
-                        candidate: fallbackModifier,
+                        candidate: prerequisite,
                         allowCaution: true,
-                        status: "Continuing through \(fallbackModifier.label)...",
+                        status: "Continuing through \(prerequisite.label)...",
                         pendingRole: ""
                     )
                 }
-                if let save = saveCandidate {
+            case .saveStep:
+                if let save = snapshot.saveCandidate {
                     return MirrorAutoDriveAction(
                         candidate: save,
                         allowCaution: true,
@@ -5876,33 +5949,19 @@ struct MemlaBrowserView: View {
                         pendingRole: ""
                     )
                 }
+            case .reviewStep:
+                if let add = snapshot.addCandidate, snapshot.addToCartAllowed {
+                    return MirrorAutoDriveAction(
+                        candidate: add,
+                        allowCaution: true,
+                        status: "Adding item to cart...",
+                        pendingRole: "dd_add_to_cart"
+                    )
+                }
+            case .waiting:
                 return nil
             }
-
-            if addCandidate == nil, let save = saveCandidate {
-                return MirrorAutoDriveAction(
-                    candidate: save,
-                    allowCaution: true,
-                    status: "Saving options...",
-                    pendingRole: ""
-                )
-            }
-            if addCandidate == nil, let fallbackModifier {
-                return MirrorAutoDriveAction(
-                    candidate: fallbackModifier,
-                    allowCaution: true,
-                    status: "Continuing through \(fallbackModifier.label)...",
-                    pendingRole: ""
-                )
-            }
-            if let add = addCandidate {
-                return MirrorAutoDriveAction(
-                    candidate: add,
-                    allowCaution: true,
-                    status: "Adding item to cart...",
-                    pendingRole: "dd_add_to_cart"
-                )
-            }
+            return nil
         case "dd_cart_drawer", "dd_cart_page":
             if !pendingFoodAddOns.isEmpty,
                let close = candidates.first(where: { $0.role == "dd_modal_close" && !$0.blocked }) {
