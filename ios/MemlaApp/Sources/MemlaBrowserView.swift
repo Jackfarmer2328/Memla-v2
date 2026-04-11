@@ -136,6 +136,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
     private var inspectSequence = 0
     private var activeInspectToken: Int?
     private var inspectTimeoutWorkItem: DispatchWorkItem?
+    private var suppressGroundingUntil: Date = .distantPast
     private var lastDoorDashStorefrontWarmupURL: String = ""
     private var doorDashStorefrontWarmupAttempts = 0
 
@@ -181,6 +182,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         activeInspectToken = nil
         inspectTimeoutWorkItem?.cancel()
         inspectTimeoutWorkItem = nil
+        suppressGroundingUntil = .distantPast
         lastDoorDashStorefrontWarmupURL = ""
         doorDashStorefrontWarmupAttempts = 0
     }
@@ -199,6 +201,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         activeInspectToken = nil
         inspectTimeoutWorkItem?.cancel()
         inspectTimeoutWorkItem = nil
+        suppressGroundingUntil = .distantPast
         lastDoorDashStorefrontWarmupURL = ""
         doorDashStorefrontWarmupAttempts = 0
         webView.load(URLRequest(url: url))
@@ -301,6 +304,16 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         queuedInspectCapsule = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             guard let self = self, !self.isInspecting else {
+                return
+            }
+            self.inspectPage(capsule: capsule)
+        }
+    }
+
+    private func scheduleDoorDashFollowUpInspect(after delay: TimeInterval, capsule: ActionCapsule?, suppressGroundingFor duration: TimeInterval = 2.8) {
+        suppressGroundingUntil = Date().addingTimeInterval(duration)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self = self else {
                 return
             }
             self.inspectPage(capsule: capsule)
@@ -480,16 +493,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
                 let ok = payload["ok"] as? Bool ?? false
                 self.buttonActionStatus = ok ? reason.capitalized : "Button tap blocked: \(reason)"
                 if ok {
-                    let inspectDelay: TimeInterval = 1.35
-                    DispatchQueue.main.asyncAfter(deadline: .now() + inspectDelay) {
-                        self.inspectPage(capsule: capsule)
-                    }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + inspectDelay + 0.95) {
-                        guard !self.isInspecting, !self.isLoading else {
-                            return
-                        }
-                        self.inspectPage(capsule: capsule)
-                    }
+                    self.scheduleDoorDashFollowUpInspect(after: 1.35, capsule: capsule)
                 }
             }
         }
@@ -516,15 +520,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
                 let ok = payload["ok"] as? Bool ?? false
                 self.buttonActionStatus = ok ? reason.capitalized : "Save tap blocked: \(reason)"
                 if ok {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.35) {
-                        self.inspectPage(capsule: capsule)
-                    }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.3) {
-                        guard !self.isInspecting, !self.isLoading else {
-                            return
-                        }
-                        self.inspectPage(capsule: capsule)
-                    }
+                    self.scheduleDoorDashFollowUpInspect(after: 1.35, capsule: capsule, suppressGroundingFor: 3.2)
                 }
             }
         }
@@ -551,15 +547,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
                 let ok = payload["ok"] as? Bool ?? false
                 self.buttonActionStatus = ok ? reason.capitalized : "Add-to-cart tap blocked: \(reason)"
                 if ok {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) {
-                        self.inspectPage(capsule: capsule)
-                    }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                        guard !self.isInspecting, !self.isLoading else {
-                            return
-                        }
-                        self.inspectPage(capsule: capsule)
-                    }
+                    self.scheduleDoorDashFollowUpInspect(after: 1.1, capsule: capsule, suppressGroundingFor: 2.8)
                 }
             }
         }
@@ -613,6 +601,9 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
     }
 
     private func pollForPageChange() {
+        guard Date() >= suppressGroundingUntil else {
+            return
+        }
         guard !isInspecting, !isLoading, webView.url != nil else {
             return
         }
@@ -639,6 +630,9 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
     }
 
     private func queueAutoInspect(reason: String) {
+        guard Date() >= suppressGroundingUntil else {
+            return
+        }
         guard !isAutoInspectQueued, !isInspecting else {
             return
         }
