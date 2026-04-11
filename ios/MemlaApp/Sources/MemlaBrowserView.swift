@@ -3250,6 +3250,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             return group;
           };
 
+          const seenOptionRoots = new WeakSet();
           const modalOptionButtons = Array.from(itemModal.querySelectorAll('label,input[type="radio"],input[type="checkbox"],[role="radio"],[role="checkbox"]'))
             .filter(visible)
             .filter((el) => {
@@ -3261,6 +3262,10 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
               if (!root || !visible(root)) {
                 return false;
               }
+              if (seenOptionRoots.has(root)) {
+                return false;
+              }
+              seenOptionRoots.add(root);
               const label = firstMeaningfulTextLine(root) || labelForElement(root) || labelForElement(el);
               const group = groupForOptionRoot(root);
               const text = clean([label, contextForElement(el, root)].join(' '));
@@ -3281,7 +3286,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
               }
               return text.length <= 260;
             })
-            .slice(0, 24);
+            .slice(0, 48);
           modalOptionButtons.forEach((el) => {
             const root = optionRootForElement(el) || closestWithText(el, 6, 180);
             const label = firstMeaningfulTextLine(root) || labelForElement(root) || labelForElement(el);
