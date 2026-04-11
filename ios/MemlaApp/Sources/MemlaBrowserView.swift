@@ -2526,7 +2526,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           const scored = optionElements.map((el) => {
             const root = optionRootForElement(el);
             if (!root || !visible(root)) return null;
-            const resolvedLabel = firstMeaningfulTextLine(root) || clean(el.getAttribute?.('aria-label') || el.innerText || el.textContent || '');
+            const resolvedLabel = firstMeaningfulTextLine(root) || clean((el.getAttribute ? el.getAttribute('aria-label') : '') || el.innerText || el.textContent || '');
             if (!resolvedLabel) return null;
             const group = groupForRoot(root);
             const resolvedGroupLabel = clean(group?.header || '');
@@ -2571,13 +2571,19 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
               clientX: rect.left + rect.width / 2,
               clientY: rect.top + rect.height / 2
             };
-            try { node.dispatchEvent(new PointerEvent('pointerdown', { ...pointInit, pointerId: 1, pointerType: 'touch', isPrimary: true })); } catch (_) {}
-            try { node.dispatchEvent(new TouchEvent('touchstart', { bubbles: true, cancelable: true, composed: true })); } catch (_) {}
-            try { node.dispatchEvent(new PointerEvent('pointerup', { ...pointInit, pointerId: 1, pointerType: 'touch', isPrimary: true })); } catch (_) {}
-            try { node.dispatchEvent(new TouchEvent('touchend', { bubbles: true, cancelable: true, composed: true })); } catch (_) {}
+            if (typeof node.focus === 'function') {
+              try { node.focus(); } catch (_) {}
+            }
             ['mousedown', 'mouseup', 'click'].forEach((type) => {
               try {
-                node.dispatchEvent(new MouseEvent(type, { ...pointInit, view: window }));
+                node.dispatchEvent(new MouseEvent(type, {
+                  bubbles: pointInit.bubbles,
+                  cancelable: pointInit.cancelable,
+                  composed: pointInit.composed,
+                  clientX: pointInit.clientX,
+                  clientY: pointInit.clientY,
+                  view: window
+                }));
               } catch (_) {}
             });
             if (typeof node.click === 'function') {
@@ -2637,13 +2643,19 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           clientX: rect.left + rect.width / 2,
           clientY: rect.top + rect.height / 2
         };
-        try { node.dispatchEvent(new PointerEvent('pointerdown', { ...pointInit, pointerId: 1, pointerType: 'touch', isPrimary: true })); } catch (_) {}
-        try { node.dispatchEvent(new TouchEvent('touchstart', { bubbles: true, cancelable: true, composed: true })); } catch (_) {}
-        try { node.dispatchEvent(new PointerEvent('pointerup', { ...pointInit, pointerId: 1, pointerType: 'touch', isPrimary: true })); } catch (_) {}
-        try { node.dispatchEvent(new TouchEvent('touchend', { bubbles: true, cancelable: true, composed: true })); } catch (_) {}
+        if (typeof node.focus === 'function') {
+          try { node.focus(); } catch (_) {}
+        }
         ['mousedown', 'mouseup', 'click'].forEach((type) => {
           try {
-            node.dispatchEvent(new MouseEvent(type, { ...pointInit, view: window }));
+            node.dispatchEvent(new MouseEvent(type, {
+              bubbles: pointInit.bubbles,
+              cancelable: pointInit.cancelable,
+              composed: pointInit.composed,
+              clientX: pointInit.clientX,
+              clientY: pointInit.clientY,
+              view: window
+            }));
           } catch (_) {}
         });
         if (typeof node.click === 'function') {
@@ -2690,13 +2702,19 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           clientX: rect.left + rect.width / 2,
           clientY: rect.top + rect.height / 2
         };
-        try { node.dispatchEvent(new PointerEvent('pointerdown', { ...pointInit, pointerId: 1, pointerType: 'touch', isPrimary: true })); } catch (_) {}
-        try { node.dispatchEvent(new TouchEvent('touchstart', { bubbles: true, cancelable: true, composed: true })); } catch (_) {}
-        try { node.dispatchEvent(new PointerEvent('pointerup', { ...pointInit, pointerId: 1, pointerType: 'touch', isPrimary: true })); } catch (_) {}
-        try { node.dispatchEvent(new TouchEvent('touchend', { bubbles: true, cancelable: true, composed: true })); } catch (_) {}
+        if (typeof node.focus === 'function') {
+          try { node.focus(); } catch (_) {}
+        }
         ['mousedown', 'mouseup', 'click'].forEach((type) => {
           try {
-            node.dispatchEvent(new MouseEvent(type, { ...pointInit, view: window }));
+            node.dispatchEvent(new MouseEvent(type, {
+              bubbles: pointInit.bubbles,
+              cancelable: pointInit.cancelable,
+              composed: pointInit.composed,
+              clientX: pointInit.clientX,
+              clientY: pointInit.clientY,
+              view: window
+            }));
           } catch (_) {}
         });
         if (typeof node.click === 'function') {
