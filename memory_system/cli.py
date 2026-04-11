@@ -1112,7 +1112,7 @@ def _handle_memla_serve(args: argparse.Namespace) -> int:
     host = str(args.host or "127.0.0.1").strip() or "127.0.0.1"
     port = int(args.port)
     print(f"Serving Memla API at http://{host}:{port}")
-    print("Routes: GET /health, GET /state, GET /memory, GET /actions, GET /missions, POST /missions, POST /actions/plan, POST /actions/draft, POST /actions/capsule, POST /run, POST /scout, POST /followup")
+    print("Routes: GET /health, GET /state, GET /memory, GET /actions, GET /missions, POST /missions, POST /actions/plan, POST /actions/draft, POST /actions/capsule, POST /run, POST /scout, POST /followup, POST /debug/browser")
     print("Press Ctrl+C to stop the local API server.")
     try:
         _serve_memla_api(

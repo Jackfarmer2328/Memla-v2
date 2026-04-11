@@ -24,6 +24,75 @@ struct MemlaFollowupRequest: Codable {
     }
 }
 
+struct MemlaBrowserDebugCandidate: Codable {
+    let role: String
+    let label: String
+    let score: Double
+    let groupKey: String
+    let groupLabel: String
+    let selected: Bool
+    let opensSubflow: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case role
+        case label
+        case score
+        case groupKey = "group_key"
+        case groupLabel = "group_label"
+        case selected
+        case opensSubflow = "opens_subflow"
+    }
+}
+
+struct MemlaBrowserDebugRequest: Codable {
+    let source: String
+    let reason: String
+    let title: String
+    let url: String
+    let pageKind: String
+    let pageSummary: String
+    let authState: String
+    let inspectionStatus: String
+    let buttonActionStatus: String
+    let autoDriveEnabled: Bool
+    let autoDriveStatus: String
+    let residuals: [String]
+    let safeActions: [String]
+    let serviceFacts: [String: String]
+    let pendingStep: [String: String]
+    let topCandidates: [MemlaBrowserDebugCandidate]
+    let agencyTrace: [String]
+    let mirrorDebugText: String
+    let agencyTraceText: String
+
+    enum CodingKeys: String, CodingKey {
+        case source
+        case reason
+        case title
+        case url
+        case pageKind = "page_kind"
+        case pageSummary = "page_summary"
+        case authState = "auth_state"
+        case inspectionStatus = "inspection_status"
+        case buttonActionStatus = "button_action_status"
+        case autoDriveEnabled = "auto_drive_enabled"
+        case autoDriveStatus = "auto_drive_status"
+        case residuals
+        case safeActions = "safe_actions"
+        case serviceFacts = "service_facts"
+        case pendingStep = "pending_step"
+        case topCandidates = "top_candidates"
+        case agencyTrace = "agency_trace"
+        case mirrorDebugText = "mirror_debug_text"
+        case agencyTraceText = "agency_trace_text"
+    }
+}
+
+struct MemlaAckEnvelope: Codable {
+    let ok: Bool
+    let message: String?
+}
+
 struct MemlaHealthResponse: Codable {
     let ok: Bool
     let service: String

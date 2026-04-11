@@ -72,6 +72,38 @@ class MemlaMissionDecisionRequest(BaseModel):
     note: str = ""
 
 
+class MemlaBrowserDebugCandidateRequest(BaseModel):
+    role: str = ""
+    label: str = ""
+    score: float = 0.0
+    group_key: str = ""
+    group_label: str = ""
+    selected: bool = False
+    opens_subflow: bool = False
+
+
+class MemlaBrowserDebugRequest(BaseModel):
+    source: str = "ios_browser"
+    reason: str = ""
+    title: str = ""
+    url: str = ""
+    page_kind: str = ""
+    page_summary: str = ""
+    auth_state: str = ""
+    inspection_status: str = ""
+    button_action_status: str = ""
+    auto_drive_enabled: bool = False
+    auto_drive_status: str = ""
+    residuals: list[str] = Field(default_factory=list)
+    safe_actions: list[str] = Field(default_factory=list)
+    service_facts: dict[str, str] = Field(default_factory=dict)
+    pending_step: dict[str, str] = Field(default_factory=dict)
+    top_candidates: list[MemlaBrowserDebugCandidateRequest] = Field(default_factory=list)
+    agency_trace: list[str] = Field(default_factory=list)
+    mirror_debug_text: str = ""
+    agency_trace_text: str = ""
+
+
 def _resolve_terminal_defaults(
     *,
     model: str,
@@ -396,6 +428,69 @@ def create_memla_app(
             state_path=state_path,
             defaults=defaults,
         )
+
+    @app.post("/debug/browser")
+    def debug_browser(request: MemlaBrowserDebugRequest) -> dict[str, Any]:
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[Memla Browser Debug][{stamp}] source={request.source or 'unknown'} reason={request.reason or 'unspecified'}")
+        if request.title:
+            print(f"Title: {request.title}")
+        if request.url:
+            print(f"URL: {request.url}")
+        summary_parts = [
+            f"page_kind={request.page_kind or 'unknown'}",
+            f"auth={request.auth_state or 'unknown'}",
+            f"inspection={request.inspection_status or 'n/a'}",
+            f"button={request.button_action_status or 'n/a'}",
+            f"agency={'enabled' if request.auto_drive_enabled else 'disabled'}",
+            f"status={request.auto_drive_status or 'n/a'}",
+        ]
+        print("State: " + " | ".join(summary_parts))
+        if request.pending_step:
+            pending_bits = [f"{key}={value}" for key, value in request.pending_step.items() if str(value).strip()]
+            if pending_bits:
+                print("PendingStep: " + " | ".join(pending_bits))
+        if request.residuals:
+            print("Residuals: " + ", ".join(request.residuals[:8]))
+        if request.safe_actions:
+            print("SafeActions: " + ", ".join(request.safe_actions[:8]))
+        if request.service_facts:
+            fact_bits = [f"{key}={value}" for key, value in sorted(request.service_facts.items()) if str(value).strip()]
+            if fact_bits:
+                print("ServiceFacts: " + " | ".join(fact_bits[:18]))
+        if request.top_candidates:
+            print("TopCandidates:")
+            for candidate in request.top_candidates[:10]:
+                score = f"{candidate.score:.1f}"
+                detail_parts = [
+                    candidate.role or "unknown",
+                    candidate.label or "(empty)",
+                    f"score={score}",
+                ]
+                if candidate.group_key:
+                    detail_parts.append(f"group={candidate.group_key}")
+                if candidate.group_label:
+                    detail_parts.append(f"group_label={candidate.group_label}")
+                if candidate.selected:
+                    detail_parts.append("selected=true")
+                if candidate.opens_subflow:
+                    detail_parts.append("opens_subflow=true")
+                print("  - " + " | ".join(detail_parts))
+        if request.agency_trace:
+            print("AgencyTrace:")
+            for line in request.agency_trace[-18:]:
+                print(f"  {line}")
+        elif request.agency_trace_text.strip():
+            print("AgencyTraceText:")
+            print(request.agency_trace_text.strip())
+        if request.mirror_debug_text.strip():
+            print("MirrorDebugText:")
+            print(request.mirror_debug_text.strip())
+        print("[/Memla Browser Debug]")
+        return {
+            "ok": True,
+            "message": "browser_debug_logged",
+        }
 
     return app
 

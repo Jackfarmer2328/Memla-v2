@@ -109,6 +109,14 @@ actor MemlaClient {
         )
     }
 
+    func debugBrowser(payload: MemlaBrowserDebugRequest, baseURL: String) async throws -> MemlaAckEnvelope {
+        try await post(
+            path: "/debug/browser",
+            baseURL: baseURL,
+            payload: payload
+        )
+    }
+
     private func get<T: Decodable>(path: String, baseURL: String) async throws -> T {
         let request = try URLRequest(url: endpoint(path: path, baseURL: baseURL))
         let (data, response) = try await URLSession.shared.data(for: request)

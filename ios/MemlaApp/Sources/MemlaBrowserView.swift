@@ -3929,6 +3929,8 @@ struct MemlaBrowserView: View {
     @State private var autoDriveEnabled = false
     @State private var autoDriveStatus = "Manual Mirror mode. Tap the distilled controls yourself."
     @State private var debugCopyStatus = ""
+    @State private var debugUploadStatus = ""
+    @State private var lastDebugUploadMarker = ""
     @State private var lastAutoDriveSignature = ""
     @State private var pendingDoorDashRole: String = ""
     @State private var pendingDoorDashLabel: String = ""
@@ -4023,6 +4025,8 @@ struct MemlaBrowserView: View {
                 autoDriveEnabled = false
                 autoDriveStatus = "Manual Mirror mode. Tap the distilled controls yourself."
                 debugCopyStatus = ""
+                debugUploadStatus = ""
+                lastDebugUploadMarker = ""
                 lastAutoDriveSignature = ""
                 pendingDoorDashRole = ""
                 pendingDoorDashLabel = ""
@@ -4108,6 +4112,15 @@ struct MemlaBrowserView: View {
                     return
                 }
                 appendAgencyTrace("Search: \(status)")
+            }
+            .onReceive(browser.$inspectionStatus.removeDuplicates()) { status in
+                guard autoDriveEnabled, !status.isEmpty else {
+                    return
+                }
+                let lowered = status.lowercased()
+                if lowered.contains("timed out") || lowered.contains("memla_js_exception") {
+                    sendBrowserDebugSnapshot(reason: "inspection_status=\(status)", state: browser.websiteState)
+                }
             }
         }
     }
@@ -5081,6 +5094,11 @@ struct MemlaBrowserView: View {
                 }
                 .disabled(browser.isInspecting || browser.isLoading)
 
+                Button("Send Debug") {
+                    sendBrowserDebugSnapshot(reason: "manual_toolbar", state: browser.websiteState, force: true)
+                }
+                .disabled(browser.currentURL.isEmpty)
+
                 Spacer()
 
                 if let url = URL(string: browser.currentURL), !browser.currentURL.isEmpty {
@@ -5132,6 +5150,11 @@ struct MemlaBrowserView: View {
                 if let state = browser.websiteState {
                     Button("Copy Debug") {
                         copyDebugSnapshot(state)
+                    }
+                    .buttonStyle(.bordered)
+                    .font(.caption2)
+                    Button("Send Debug") {
+                        sendBrowserDebugSnapshot(reason: "manual_console", state: state, force: true)
                     }
                     .buttonStyle(.bordered)
                     .font(.caption2)
@@ -5195,6 +5218,12 @@ struct MemlaBrowserView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+            }
+            if !debugUploadStatus.isEmpty {
+                Text(debugUploadStatus)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
         }
         .padding(.horizontal, 12)
@@ -7385,6 +7414,7 @@ struct MemlaBrowserView: View {
                 let confirmationDeadline = pendingStepActionRole == "dd_modifier_save" ? 4.8 : 4.0
                 if Date().timeIntervalSince(pendingStepActionAt) >= confirmationDeadline {
                     appendAgencyTrace("DoorDash step never confirmed from mirror. Re-planning from current state.")
+                    sendBrowserDebugSnapshot(reason: "pending_step_timeout", state: state)
                     rollbackPendingDoorDashStepFailure()
                     lastAutoDriveSignature = ""
                     lastDoorDashPlannerMarker = ""
@@ -7970,6 +8000,84 @@ struct MemlaBrowserView: View {
     private func copyAgencyTrace() {
         UIPasteboard.general.string = agencyTraceText()
         debugCopyStatus = "Copied agency trace."
+    }
+
+    private func sendBrowserDebugSnapshot(reason: String, state: WebsiteC2AState?, force: Bool = false) {
+        let resolvedState = state ?? browser.websiteState
+        let marker = [
+            reason,
+            browser.currentURL,
+            resolvedState?.pageKind ?? "",
+            pendingStepActionRole,
+            pendingStepActionLabel,
+            autoDriveStatus
+        ].joined(separator: "||")
+        if !force, marker == lastDebugUploadMarker {
+            return
+        }
+        lastDebugUploadMarker = marker
+        let baseURL = UserDefaults.standard.string(forKey: "memlaBaseURL")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !baseURL.isEmpty else {
+            debugUploadStatus = "No Memla server URL is saved, so debug upload is unavailable."
+            return
+        }
+        let topCandidates = Array((resolvedState?.candidates ?? []).prefix(10)).map { candidate in
+            MemlaBrowserDebugCandidate(
+                role: candidate.role,
+                label: candidate.label,
+                score: candidate.score,
+                groupKey: candidate.groupKey,
+                groupLabel: candidate.groupLabel,
+                selected: candidate.isSelected,
+                opensSubflow: candidate.opensSubflow
+            )
+        }
+        let pendingStep: [String: String] = [
+            "role": pendingStepActionRole,
+            "label": pendingStepActionLabel,
+            "commit_kind": pendingStepCommitKind,
+            "target_group_key": pendingStepTargetGroupKey,
+            "target_group_label": pendingStepTargetGroupLabel,
+            "target_opens_subflow": pendingStepTargetOpensSubflow ? "true" : "false",
+            "tap_acknowledged": pendingStepTapAcknowledged ? "true" : "false",
+            "tap_verified": pendingStepTapVerifiedSelection ? "true" : "false",
+            "observed_group_key": pendingStepObservedGroupKey,
+            "observed_group_label": pendingStepObservedGroupLabel,
+            "seconds_since_action": pendingStepActionAt == .distantPast ? "" : String(format: "%.2f", Date().timeIntervalSince(pendingStepActionAt))
+        ]
+        let payload = MemlaBrowserDebugRequest(
+            source: "ios_browser",
+            reason: reason,
+            title: browser.pageTitle,
+            url: browser.currentURL,
+            pageKind: resolvedState?.pageKind ?? "",
+            pageSummary: resolvedState?.summary ?? "",
+            authState: resolvedState?.authState ?? "",
+            inspectionStatus: browser.inspectionStatus,
+            buttonActionStatus: browser.buttonActionStatus,
+            autoDriveEnabled: autoDriveEnabled,
+            autoDriveStatus: autoDriveStatus,
+            residuals: resolvedState?.residuals ?? [],
+            safeActions: resolvedState?.safeActions ?? [],
+            serviceFacts: resolvedState?.serviceFacts ?? [:],
+            pendingStep: pendingStep,
+            topCandidates: topCandidates,
+            agencyTrace: Array(agencyTrace.reversed()),
+            mirrorDebugText: resolvedState.map { debugSnapshotText(for: $0) } ?? "",
+            agencyTraceText: agencyTraceText()
+        )
+        Task {
+            do {
+                _ = try await MemlaClient.shared.debugBrowser(payload: payload, baseURL: baseURL)
+                await MainActor.run {
+                    debugUploadStatus = "Sent debug snapshot to Memla server."
+                }
+            } catch {
+                await MainActor.run {
+                    debugUploadStatus = "Debug upload failed: \(error.localizedDescription)"
+                }
+            }
+        }
     }
 
     private func debugSnapshotText(for state: WebsiteC2AState) -> String {
