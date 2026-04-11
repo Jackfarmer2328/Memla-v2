@@ -3096,9 +3096,11 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           pushUnique(doordashCandidates, candidateFromElement(anchor, 'dd_store_card', cardRoot, label));
         });
 
-        const cartReviewButtons = Array.from(document.querySelectorAll('button,a[href],[role="button"]'))
-          .filter(visible)
-          .filter((el) => /view cart|items? in cart|open order cart/i.test(labelForElement(el)));
+        const cartReviewButtons = itemModal
+          ? []
+          : Array.from(document.querySelectorAll('button,a[href],[role="button"]'))
+            .filter(visible)
+            .filter((el) => /view cart|items? in cart|open order cart/i.test(labelForElement(el)));
         cartReviewButtons.slice(0, 4).forEach((button) => {
           doordashHasCartCTA = true;
           const root = closestWithText(button, 12, 180);
@@ -3106,14 +3108,16 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           pushUnique(doordashCandidates, candidateFromElement(button, 'dd_cart_cta', root, label));
         });
 
-        const cartButton = Array.from(document.querySelectorAll('button[data-testid="OrderCartIconButton"], button[aria-controls="order-cart"]'))
-          .filter(visible)[0];
+        const cartButton = itemModal
+          ? null
+          : Array.from(document.querySelectorAll('button[data-testid="OrderCartIconButton"], button[aria-controls="order-cart"]'))
+            .filter(visible)[0];
         if (cartButton) {
           doordashHasCartCTA = true;
           pushUnique(doordashCandidates, candidateFromElement(cartButton, 'dd_cart_cta', cartButton.closest('section,div'), 'Open cart'));
         }
 
-        if (continueAnchor) {
+        if (continueAnchor && !itemModal) {
           doordashHasContinueCTA = true;
           pushUnique(doordashCandidates, candidateFromElement(continueAnchor, 'dd_continue_cta', cartDrawer || continueAnchor.closest('section,div'), 'Continue'));
         }
@@ -3130,7 +3134,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             pushUnique(doordashCandidates, candidateFromElement(modalClose, 'dd_modal_close', itemModal, 'Close item'));
           }
 
-          const addToCartButtons = Array.from(document.querySelectorAll('button,[role="button"],a[href]'))
+          const addToCartButtons = Array.from((explicitItemModal || itemModal || document).querySelectorAll('button,[role="button"],a[href]'))
             .filter(visible)
             .filter((el) => /add to cart/i.test(labelForElement(el)));
           doordashCustomizerAddToCartLabel = addToCartButtons.length > 0 ? clean(labelForElement(addToCartButtons[0])) : '';
@@ -4532,12 +4536,13 @@ struct MemlaBrowserView: View {
 
     private func unresolvedRequiredDoorDashGroup(
         in candidates: [WebsiteC2ACandidate],
+        traversedDerivedGroups: Set<DoorDashCustomizerGroupKind>,
         excluding excludedGroups: Set<DoorDashCustomizerGroupKind>
     ) -> (kind: DoorDashCustomizerGroupKind, label: String)? {
         struct GroupStats {
             var label: String
             var required: Bool
-            var hasSelected: Bool
+            var hasResolvedSelection: Bool
             var order: Int
         }
 
@@ -4550,22 +4555,24 @@ struct MemlaBrowserView: View {
             guard kind != .unknown, !excludedGroups.contains(kind) else {
                 continue
             }
+            let resolvedSelection = candidate.isSelected
+                && (!candidate.opensSubflow || traversedDerivedGroups.contains(kind))
             var stats = statsByGroup[kind] ?? GroupStats(
                 label: candidate.groupLabel,
                 required: candidate.groupRequired,
-                hasSelected: candidate.isSelected,
+                hasResolvedSelection: resolvedSelection,
                 order: index
             )
             if stats.label.isEmpty {
                 stats.label = candidate.groupLabel
             }
             stats.required = stats.required || candidate.groupRequired
-            stats.hasSelected = stats.hasSelected || candidate.isSelected
+            stats.hasResolvedSelection = stats.hasResolvedSelection || resolvedSelection
             statsByGroup[kind] = stats
         }
 
         return statsByGroup
-            .filter { $0.value.required && !$0.value.hasSelected }
+            .filter { $0.value.required && !$0.value.hasResolvedSelection }
             .sorted { left, right in
                 if left.value.order == right.value.order {
                     return left.key.rawValue < right.key.rawValue
@@ -5642,7 +5649,11 @@ struct MemlaBrowserView: View {
         let preservedGroups = preservedDoorDashGroupKinds(for: modifierTargets.stage)
         let traversedDerivedGroups = traversedDoorDashDerivedGroups
         let protectedGroups = preservedGroups.union(traversedDerivedGroups)
-        let unresolvedRequiredGroup = unresolvedRequiredDoorDashGroup(in: candidates, excluding: protectedGroups)
+        let unresolvedRequiredGroup = unresolvedRequiredDoorDashGroup(
+            in: candidates,
+            traversedDerivedGroups: traversedDerivedGroups,
+            excluding: protectedGroups
+        )
         let saveCandidate = candidates.first(where: { $0.role == "dd_modifier_save" && !$0.blocked })
         let addCandidate: WebsiteC2ACandidate?
         if let existingAddCandidate = candidates.first(where: { $0.role == "dd_add_to_cart" && !$0.blocked }) {
@@ -5684,7 +5695,8 @@ struct MemlaBrowserView: View {
             if targetGroupKind != .unknown, preferredGroups.contains(targetGroupKind), targetGroupKind != detectedActiveGroupKind {
                 activeGroupKind = targetGroupKind
                 activeGroupLabel = initialTargetCandidate.groupLabel.isEmpty ? detectedActiveGroupLabel : initialTargetCandidate.groupLabel
-                activeGroupRequired = unresolvedRequiredGroup?.kind == targetGroupKind || detectedActiveGroupRequired
+                activeGroupRequired = unresolvedRequiredGroup?.kind == targetGroupKind
+                    || (detectedActiveGroupKind == targetGroupKind && detectedActiveGroupRequired)
             } else if let unresolvedRequiredGroup,
                       unresolvedRequiredGroup.kind != .unknown,
                       (detectedActiveGroupKind == .unknown
