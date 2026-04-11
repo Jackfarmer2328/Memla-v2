@@ -256,7 +256,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             self.flushQueuedInspectIfNeeded()
         }
         inspectTimeoutWorkItem = timeoutWorkItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 6.0, execute: timeoutWorkItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10.0, execute: timeoutWorkItem)
         webView.evaluateJavaScript(Self.pageInspectionScript) { [weak self] result, error in
             DispatchQueue.main.async {
                 guard let self = self else {
@@ -443,6 +443,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
                 let ok = payload["ok"] as? Bool ?? false
                 self.buttonActionStatus = ok ? reason.capitalized : "Button tap blocked: \(reason)"
                 if ok {
+                    self.suppressGroundingUntil = Date().addingTimeInterval(3.0)
                     let inspectDelay: TimeInterval
                     switch candidate.role {
                     case "dd_item_card", "dd_modifier_option", "dd_modifier_save":
@@ -452,14 +453,6 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
                     }
                     DispatchQueue.main.asyncAfter(deadline: .now() + inspectDelay) {
                         self.inspectPage(capsule: capsule)
-                    }
-                    if candidate.role == "dd_modifier_option" || candidate.role == "dd_modifier_save" {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + inspectDelay + 0.95) {
-                            guard !self.isInspecting, !self.isLoading else {
-                                return
-                            }
-                            self.inspectPage(capsule: capsule)
-                        }
                     }
                 }
             }
@@ -604,7 +597,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         guard Date() >= suppressGroundingUntil else {
             return
         }
-        guard !isInspecting, !isLoading, webView.url != nil else {
+        guard !isInspecting, !isLoading, !isRunningButtonAction, webView.url != nil else {
             return
         }
         webView.evaluateJavaScript(Self.pageGroundingProbeScript) { [weak self] result, error in
@@ -633,7 +626,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         guard Date() >= suppressGroundingUntil else {
             return
         }
-        guard !isAutoInspectQueued, !isInspecting else {
+        guard !isAutoInspectQueued, !isInspecting, !isRunningButtonAction else {
             return
         }
         isAutoInspectQueued = true
@@ -2456,12 +2449,12 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           const optionGroupCache = new WeakMap();
           const groupDescriptorForNode = (node) => {
             if (!node || !visible(node)) return null;
-            const text = clean(node.innerText || '');
+            const text = clean(node.textContent || '');
             if (!text || text.length < 12 || text.length > 900) return null;
             if (/^your recommended options\\b/i.test(text)) return null;
             if (!/(required|optional).*(select|choose)|preferences\\s*\\(optional\\)|choose your|topping side|crust|toppings?/i.test(text)) return null;
             const headerNode = node.querySelector('h1,h2,h3,h4,[role="heading"]');
-            const heading = clean(headerNode?.innerText || '');
+            const heading = clean(headerNode?.textContent || '');
             const firstLine = clean((text.split('\\n').find(Boolean)) || '');
             const source = heading || text;
             const headerMatch = source.match(/^(.{1,120}?)(?:\\s+(?:Required|\\(Optional\\)|Optional)\\b)/i);
@@ -3017,12 +3010,12 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           const optionGroupCache = new WeakMap();
           const groupDescriptorForNode = (node) => {
             if (!node || !visible(node)) return null;
-            const text = clean(node.innerText || '');
+            const text = clean(node.textContent || '');
             if (!text || text.length < 12 || text.length > 900) return null;
             if (/^your recommended options\\b/i.test(text)) return null;
             if (!/(required|optional).*(select|choose)|preferences\\s*\\(optional\\)|choose your|topping side|crust|toppings?/i.test(text)) return null;
             const headerNode = node.querySelector('h1,h2,h3,h4,[role="heading"]');
-            const heading = clean(headerNode?.innerText || '');
+            const heading = clean(headerNode?.textContent || '');
             const firstLine = clean((text.split('\\n').find(Boolean)) || '');
             const source = heading || text;
             const headerMatch = source.match(/^(.{1,120}?)(?:\\s+(?:Required|\\(Optional\\)|Optional)\\b)/i);
