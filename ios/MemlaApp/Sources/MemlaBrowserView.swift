@@ -4970,16 +4970,19 @@ struct MemlaBrowserView: View {
                 && pendingStepTargetOpensSubflow
                 && signature != pendingStepActionSignature
                 && (changedFromTargetGroup || changedFromObservedGroup)
+            if pendingStepCommitKind == "requested" {
+                if let candidate = matchingPendingDoorDashModifierCandidate(in: state), candidate.isSelected {
+                    return true
+                }
+                if pendingStepTapVerifiedSelection {
+                    return true
+                }
+                return advancedSubflow
+            }
             if let candidate = matchingPendingDoorDashModifierCandidate(in: state), candidate.isSelected {
                 if !pendingStepTargetOpensSubflow || advancedSubflow {
                     return true
                 }
-            }
-            if pendingStepCommitKind == "requested" {
-                if pendingStepTapVerifiedSelection && signature != pendingStepActionSignature {
-                    return true
-                }
-                return advancedSubflow
             }
             if !pendingStepObservedGroupKey.isEmpty, !activeGroupKey.isEmpty, activeGroupKey != pendingStepObservedGroupKey {
                 return true
