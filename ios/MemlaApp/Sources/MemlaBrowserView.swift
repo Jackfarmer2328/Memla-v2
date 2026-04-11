@@ -2883,6 +2883,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
       let doordashHasAddressCTA = false;
       let doordashHasPaymentSheet = false;
       let doordashHasCartCloseCTA = false;
+      let doordashActiveRoot = null;
       let ubereatsCandidates = [];
       let ubereatsActiveLayer = 'page';
       let ubereatsModalTitle = '';
@@ -3010,13 +3011,13 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           || explicitOptionFooter?.closest('[data-testid="ItemModal"],[role="dialog"]')
           || visibleDialogs.find((el) => /add to cart|choose your size|recommended options|build your own pizza|custom pizza/i.test(clean(el.innerText)));
         const cartDrawer = continueAnchor || cartCloseButton ? sharedAncestor(continueAnchor, cartCloseButton) : null;
-        const activeRoot = paymentSheet || cartDrawer || itemModal || null;
+        doordashActiveRoot = paymentSheet || cartDrawer || itemModal || null;
         doordashActiveLayer = paymentSheet ? 'payment_sheet' : cartDrawer ? 'cart_drawer' : itemModal ? 'item_modal' : 'page';
         doordashHasPaymentSheet = Boolean(paymentSheet);
         doordashHasCartCloseCTA = Boolean(cartCloseButton);
         doordashModalTitle = doordashActiveLayer === 'cart_drawer'
           ? 'Cart'
-          : clean((activeRoot?.querySelector('h1,h2,h3,[role="heading"]')?.innerText) || '');
+          : clean((doordashActiveRoot?.querySelector('h1,h2,h3,[role="heading"]')?.innerText) || '');
 
         const storeCardElements = Array.from(document.querySelectorAll('[data-anchor-id="StoreCard"]'))
           .filter(visible)
@@ -3675,7 +3676,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
       }
 
       const textRoot = (doordashActiveLayer === 'item_modal' || doordashActiveLayer === 'cart_drawer' || doordashActiveLayer === 'payment_sheet')
-        ? activeRoot
+        ? doordashActiveRoot
         : document.body;
       const text = clean(textRoot ? (textRoot.textContent || textRoot.innerText || '') : '');
       return {
