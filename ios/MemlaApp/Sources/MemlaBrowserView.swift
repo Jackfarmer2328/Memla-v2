@@ -2408,6 +2408,19 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           const targetFingerprint = \(fingerprintLiteral);
           const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
           const normalized = (value) => clean(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+          const rawLines = (el) => String(el?.innerText || '')
+            .split('\\n')
+            .map(clean)
+            .filter(Boolean);
+          const firstMeaningfulTextLine = (el) => {
+            const lines = rawLines(el);
+            return lines.find((line) => {
+              const lower = line.toLowerCase();
+              return /[a-z]/i.test(line)
+                && !/^(required|optional|preferences|choose your size|topping side|user preferences)$/i.test(lower)
+                && !/\\$\\d/.test(lower);
+            }) || lines[0] || '';
+          };
           const visible = (el) => {
             if (!el) return false;
             const style = window.getComputedStyle(el);
@@ -2432,25 +2445,6 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             return 'unknown';
           };
 
-          const customizerGroups = [];
-          Array.from(itemModal.querySelectorAll('fieldset,section,div'))
-            .filter(visible)
-            .forEach((el) => {
-              const text = clean(el.innerText || '');
-              if (!text || text.length < 12 || text.length > 900) return;
-              if (/^your recommended options\\b/i.test(text)) return;
-              if (!/(required|optional).*(select|choose)|preferences\\s*\\(optional\\)|choose your|topping side|crust|toppings?/i.test(text)) return;
-              const headerMatch = text.match(/^(.{1,120}?)(?:\\s+(?:Required|\\(Optional\\)|Optional)\\b)/i);
-              const header = clean(headerMatch ? headerMatch[1] : (/^preferences\\b/i.test(text) ? 'Preferences' : ''));
-              if (!header || /^required$/i.test(header) || /^optional$/i.test(header)) return;
-              customizerGroups.push({
-                header,
-                groupKey: inferGroupKey(header, text),
-                root: el,
-                text
-              });
-            });
-
           const optionRootForElement = (el) => {
             if (!el) return null;
             const id = clean((el.getAttribute && el.getAttribute('id')) || '');
@@ -2465,11 +2459,47 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             return el.closest('label,[role="radio"],[role="checkbox"]') || el;
           };
 
+          const optionGroupCache = new WeakMap();
+          const groupDescriptorForNode = (node) => {
+            if (!node || !visible(node)) return null;
+            const text = clean(node.innerText || '');
+            if (!text || text.length < 12 || text.length > 900) return null;
+            if (/^your recommended options\\b/i.test(text)) return null;
+            if (!/(required|optional).*(select|choose)|preferences\\s*\\(optional\\)|choose your|topping side|crust|toppings?/i.test(text)) return null;
+            const headerNode = node.querySelector('h1,h2,h3,h4,[role="heading"]');
+            const heading = clean(headerNode?.innerText || '');
+            const firstLine = clean((text.split('\\n').find(Boolean)) || '');
+            const source = heading || text;
+            const headerMatch = source.match(/^(.{1,120}?)(?:\\s+(?:Required|\\(Optional\\)|Optional)\\b)/i);
+            const header = clean(
+              headerMatch
+                ? headerMatch[1]
+                : (/^preferences\\b/i.test(source) ? 'Preferences' : heading || firstLine)
+            );
+            if (!header || /^required$/i.test(header) || /^optional$/i.test(header)) return null;
+            return {
+              header,
+              groupKey: inferGroupKey(header, text),
+              root: node,
+              text
+            };
+          };
+
           const groupForRoot = (root) => {
             if (!root) return null;
-            return customizerGroups
-              .filter((group) => group.root && group.root.contains(root))
-              .sort((left, right) => clean(left.text || '').length - clean(right.text || '').length)[0] || null;
+            if (optionGroupCache.has(root)) {
+              return optionGroupCache.get(root);
+            }
+            let node = root;
+            let group = null;
+            for (let depth = 0; node && node !== itemModal && depth < 8; depth += 1, node = node.parentElement) {
+              group = groupDescriptorForNode(node);
+              if (group) {
+                break;
+              }
+            }
+            optionGroupCache.set(root, group);
+            return group;
           };
 
           const fingerprintFor = (role, label, groupKey, groupLabel) =>
@@ -2481,7 +2511,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           const scored = optionElements.map((el) => {
             const root = optionRootForElement(el);
             if (!root || !visible(root)) return null;
-            const resolvedLabel = clean(root.innerText || el.innerText || el.textContent || '');
+            const resolvedLabel = firstMeaningfulTextLine(root) || clean(el.getAttribute?.('aria-label') || el.innerText || el.textContent || '');
             if (!resolvedLabel) return null;
             const group = groupForRoot(root);
             const resolvedGroupLabel = clean(group?.header || '');
