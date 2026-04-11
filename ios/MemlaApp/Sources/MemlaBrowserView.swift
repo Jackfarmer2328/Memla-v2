@@ -5245,8 +5245,8 @@ struct MemlaBrowserView: View {
         let modifierTargets = currentModifierTargets()
         let remainingModifierTerms = modifierTargets.terms
         let requestedModifierTerms = allRequestedModifierTerms()
-        let activeGroupKind = doorDashActiveGroupKind(from: state, candidates: candidates)
-        let activeGroupLabel = doorDashActiveGroupLabel(from: state, candidates: candidates)
+        let detectedActiveGroupKind = doorDashActiveGroupKind(from: state, candidates: candidates)
+        let detectedActiveGroupLabel = doorDashActiveGroupLabel(from: state, candidates: candidates)
         let saveCandidate = candidates.first(where: { $0.role == "dd_modifier_save" && !$0.blocked })
         let addCandidate: WebsiteC2ACandidate?
         if let existingAddCandidate = candidates.first(where: { $0.role == "dd_add_to_cart" && !$0.blocked }) {
@@ -5273,6 +5273,27 @@ struct MemlaBrowserView: View {
             )
         } else {
             addCandidate = nil
+        }
+        let initialTargetCandidate = bestDoorDashModifierCandidate(
+            in: candidates,
+            targetTerms: remainingModifierTerms,
+            preferredGroup: detectedActiveGroupKind
+        )?.candidate
+        let preferredGroups = preferredDoorDashGroupKinds(for: modifierTargets.stage)
+        let activeGroupKind: DoorDashCustomizerGroupKind
+        let activeGroupLabel: String
+        if let initialTargetCandidate {
+            let targetGroupKind = doorDashGroupKind(for: initialTargetCandidate)
+            if targetGroupKind != .unknown, preferredGroups.contains(targetGroupKind), targetGroupKind != detectedActiveGroupKind {
+                activeGroupKind = targetGroupKind
+                activeGroupLabel = initialTargetCandidate.groupLabel.isEmpty ? detectedActiveGroupLabel : initialTargetCandidate.groupLabel
+            } else {
+                activeGroupKind = detectedActiveGroupKind
+                activeGroupLabel = detectedActiveGroupLabel
+            }
+        } else {
+            activeGroupKind = detectedActiveGroupKind
+            activeGroupLabel = detectedActiveGroupLabel
         }
         let targetCandidate = bestDoorDashModifierCandidate(
             in: candidates,
