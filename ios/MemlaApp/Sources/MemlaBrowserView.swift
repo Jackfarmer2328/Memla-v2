@@ -7555,6 +7555,9 @@ struct MemlaBrowserView: View {
                 autoDriveStatus = focus == "waiting"
                     ? "Waiting for DoorDash customizer transition..."
                     : "Waiting on DoorDash \(focus) in \(group)..."
+                if state.pageKind == "dd_item_modal" {
+                    sendBrowserDebugSnapshot(reason: "customizer_no_action:\(focus):\(group)", state: state)
+                }
             } else if state.pageKind == "dd_storefront" {
                 autoDriveStatus = "Waiting for DoorDash menu items..."
             } else if state.pageKind == "ue_storefront" {
@@ -7576,11 +7579,16 @@ struct MemlaBrowserView: View {
             lastAutoDriveSignature = signature
             autoDriveStatus = "Waiting for DoorDash customizer transition..."
             appendAgencyTrace(autoDriveStatus)
+            sendBrowserDebugSnapshot(reason: "customizer_duplicate_wait:\(action.candidate.label)", state: state)
             return
         }
 
         lastAutoDriveSignature = signature
         autoDriveStatus = action.status
+        if state.pageKind == "dd_item_modal",
+           ["dd_modifier_option", "dd_modifier_save", "dd_add_to_cart"].contains(action.candidate.role) {
+            sendBrowserDebugSnapshot(reason: "pre_action:\(action.candidate.role):\(action.candidate.label)", state: state)
+        }
         if action.candidate.role == "dd_modifier_option" {
             recordPendingDoorDashStep(
                 role: action.candidate.role,
