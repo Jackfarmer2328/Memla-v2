@@ -3206,6 +3206,9 @@ struct MemlaBrowserView: View {
     @State private var addToCartRetryCount = 0
     @State private var preferCartProgress = false
     @State private var completedModifierTerms: Set<String> = []
+    @State private var inFlightModifierTerms: Set<String> = []
+    @State private var doorDashModifierCommitPending = false
+    @State private var doorDashPendingCommitKind = ""
     @State private var primaryFoodItemAdded = false
     @State private var pendingFoodAddOns: [String] = []
     @State private var pendingFoodAddOperation = ""
@@ -3280,6 +3283,9 @@ struct MemlaBrowserView: View {
                 addToCartRetryCount = 0
                 preferCartProgress = false
                 completedModifierTerms = []
+                inFlightModifierTerms = []
+                doorDashModifierCommitPending = false
+                doorDashPendingCommitKind = ""
                 lastModifierSelectionLabel = ""
                 lastModifierSelectionAt = .distantPast
                 primaryFoodItemAdded = false
@@ -3550,6 +3556,9 @@ struct MemlaBrowserView: View {
         pendingDoorDashLabel = ""
         pendingFoodAddOperation = ""
         completedModifierTerms = []
+        inFlightModifierTerms = []
+        doorDashModifierCommitPending = false
+        doorDashPendingCommitKind = ""
         lastModifierSelectionLabel = ""
         lastModifierSelectionAt = .distantPast
         pendingStepActionRole = ""
@@ -3640,21 +3649,24 @@ struct MemlaBrowserView: View {
         }
         if let size = capsule.slots["size"], !size.isEmpty {
             let normalizedSize = normalizedCommerceTerm(size)
-            if !normalizedSize.isEmpty && !completedModifierTerms.contains(normalizedSize) {
+            if !normalizedSize.isEmpty
+                && !completedModifierTerms.contains(normalizedSize)
+                && !inFlightModifierTerms.contains(normalizedSize)
+            {
                 return (.size, [normalizedSize])
             }
         }
         if let toppings = capsule.slots["toppings"], !toppings.isEmpty {
             let remainingToppings = splitCommerceTerms(toppings)
                 .map(normalizedCommerceTerm)
-                .filter { !$0.isEmpty && !completedModifierTerms.contains($0) }
+                .filter { !$0.isEmpty && !completedModifierTerms.contains($0) && !inFlightModifierTerms.contains($0) }
             if let nextTopping = remainingToppings.first {
                 return (.toppings, [nextTopping])
             }
         } else if let modifiers = capsule.slots["modifiers"], !modifiers.isEmpty {
             let remainingModifiers = splitCommerceTerms(modifiers)
                 .map(normalizedCommerceTerm)
-                .filter { !$0.isEmpty && !completedModifierTerms.contains($0) }
+                .filter { !$0.isEmpty && !completedModifierTerms.contains($0) && !inFlightModifierTerms.contains($0) }
             if let nextModifier = remainingModifiers.first {
                 return (.modifiers, [nextModifier])
             }
@@ -3837,6 +3849,9 @@ struct MemlaBrowserView: View {
         pendingDoorDashLabel = ""
         addToCartRetryCount = 0
         pendingFoodAddOperation = ""
+        inFlightModifierTerms = []
+        doorDashModifierCommitPending = false
+        doorDashPendingCommitKind = ""
         lastModifierSelectionLabel = ""
         lastModifierSelectionAt = .distantPast
         pendingStepActionRole = ""
@@ -4505,12 +4520,343 @@ struct MemlaBrowserView: View {
             saveCandidate: saveCandidate,
             addCandidate: addCandidate,
             filteredCandidates: filteredCandidates,
-            addToCartAllowed: remainingModifierTerms.isEmpty
+            addToCartAllowed: remainingModifierTerms.isEmpty && inFlightModifierTerms.isEmpty && !doorDashModifierCommitPending
+        )
+    }
+
+    private struct DoorDashWorkflowPlannerState {
+        let remainingTerms: [String]
+        let inFlightTerms: [String]
+        let commitPending: Bool
+        let addToCartAllowed: Bool
+        let lastTransitionKind: DoorDashCustomizerFocusKind?
+    }
+
+    private struct DoorDashWorkflowTransition {
+        let kind: DoorDashCustomizerFocusKind
+        let candidate: WebsiteC2ACandidate?
+        let consumedTerms: [String]
+        let score: Double
+        let nextState: DoorDashWorkflowPlannerState
+    }
+
+    private struct DoorDashWorkflowPlan {
+        let plannerState: DoorDashWorkflowPlannerState
+        let focusKind: DoorDashCustomizerFocusKind
+        let focusLabel: String
+        let allowedCandidates: [WebsiteC2ACandidate]
+        let nextTransition: DoorDashWorkflowTransition?
+    }
+
+    private func makeDoorDashWorkflowPlannerState(
+        remainingTerms: [String],
+        inFlightTerms: [String],
+        commitPending: Bool,
+        lastTransitionKind: DoorDashCustomizerFocusKind?
+    ) -> DoorDashWorkflowPlannerState {
+        let normalizedRemaining = remainingTerms.filter { !$0.isEmpty }
+        let normalizedInFlight = inFlightTerms.filter { !$0.isEmpty }
+        return DoorDashWorkflowPlannerState(
+            remainingTerms: normalizedRemaining,
+            inFlightTerms: normalizedInFlight,
+            commitPending: commitPending,
+            addToCartAllowed: normalizedRemaining.isEmpty && normalizedInFlight.isEmpty && !commitPending,
+            lastTransitionKind: lastTransitionKind
+        )
+    }
+
+    private func currentDoorDashCommitKind() -> DoorDashCustomizerFocusKind? {
+        switch doorDashPendingCommitKind {
+        case "requested":
+            return .requestedModifier
+        case "prerequisite":
+            return .prerequisiteModifier
+        default:
+            return nil
+        }
+    }
+
+    private func initialDoorDashWorkflowPlannerState(from snapshot: DoorDashCustomizerSnapshot) -> DoorDashWorkflowPlannerState {
+        makeDoorDashWorkflowPlannerState(
+            remainingTerms: snapshot.remainingTerms,
+            inFlightTerms: Array(inFlightModifierTerms).sorted(),
+            commitPending: doorDashModifierCommitPending,
+            lastTransitionKind: currentDoorDashCommitKind()
+        )
+    }
+
+    private func legalDoorDashWorkflowTransitions(
+        for snapshot: DoorDashCustomizerSnapshot,
+        plannerState: DoorDashWorkflowPlannerState
+    ) -> [DoorDashWorkflowTransition] {
+        var transitions: [DoorDashWorkflowTransition] = []
+
+        if plannerState.commitPending {
+            if plannerState.lastTransitionKind == .requestedModifier,
+               let prerequisite = snapshot.prerequisiteCandidate
+            {
+                transitions.append(
+                    DoorDashWorkflowTransition(
+                        kind: .prerequisiteModifier,
+                        candidate: prerequisite,
+                        consumedTerms: [],
+                        score: 160,
+                        nextState: makeDoorDashWorkflowPlannerState(
+                            remainingTerms: plannerState.remainingTerms,
+                            inFlightTerms: plannerState.inFlightTerms,
+                            commitPending: true,
+                            lastTransitionKind: .prerequisiteModifier
+                        )
+                    )
+                )
+            }
+
+            if let save = snapshot.saveCandidate {
+                let saveScore: Double
+                if plannerState.lastTransitionKind == .prerequisiteModifier || snapshot.prerequisiteCandidate == nil {
+                    saveScore = 155
+                } else {
+                    saveScore = 65
+                }
+                transitions.append(
+                    DoorDashWorkflowTransition(
+                        kind: .saveStep,
+                        candidate: save,
+                        consumedTerms: [],
+                        score: saveScore,
+                        nextState: makeDoorDashWorkflowPlannerState(
+                            remainingTerms: plannerState.remainingTerms,
+                            inFlightTerms: [],
+                            commitPending: false,
+                            lastTransitionKind: .saveStep
+                        )
+                    )
+                )
+            }
+
+            if transitions.isEmpty, let prerequisite = snapshot.prerequisiteCandidate {
+                transitions.append(
+                    DoorDashWorkflowTransition(
+                        kind: .prerequisiteModifier,
+                        candidate: prerequisite,
+                        consumedTerms: [],
+                        score: 110,
+                        nextState: makeDoorDashWorkflowPlannerState(
+                            remainingTerms: plannerState.remainingTerms,
+                            inFlightTerms: plannerState.inFlightTerms,
+                            commitPending: true,
+                            lastTransitionKind: .prerequisiteModifier
+                        )
+                    )
+                )
+            }
+        } else {
+            if let target = snapshot.targetCandidate {
+                let matched = candidateMatchedModifierTerms(target, targetTerms: plannerState.remainingTerms)
+                if !matched.isEmpty {
+                    let nextRemaining = plannerState.remainingTerms.filter { !matched.contains($0) }
+                    let nextInFlight = Array(Set(plannerState.inFlightTerms).union(matched)).sorted()
+                    transitions.append(
+                        DoorDashWorkflowTransition(
+                            kind: .requestedModifier,
+                            candidate: target,
+                            consumedTerms: matched,
+                            score: 170 + Double(matched.count * 10),
+                            nextState: makeDoorDashWorkflowPlannerState(
+                                remainingTerms: nextRemaining,
+                                inFlightTerms: nextInFlight,
+                                commitPending: true,
+                                lastTransitionKind: .requestedModifier
+                            )
+                        )
+                    )
+                }
+            }
+
+            if plannerState.remainingTerms.isEmpty && plannerState.inFlightTerms.isEmpty {
+                if let add = snapshot.addCandidate {
+                    transitions.append(
+                        DoorDashWorkflowTransition(
+                            kind: .reviewStep,
+                            candidate: add,
+                            consumedTerms: [],
+                            score: 190,
+                            nextState: makeDoorDashWorkflowPlannerState(
+                                remainingTerms: [],
+                                inFlightTerms: [],
+                                commitPending: false,
+                                lastTransitionKind: .reviewStep
+                            )
+                        )
+                    )
+                } else if let save = snapshot.saveCandidate {
+                    transitions.append(
+                        DoorDashWorkflowTransition(
+                            kind: .saveStep,
+                            candidate: save,
+                            consumedTerms: [],
+                            score: 90,
+                            nextState: makeDoorDashWorkflowPlannerState(
+                                remainingTerms: [],
+                                inFlightTerms: [],
+                                commitPending: false,
+                                lastTransitionKind: .saveStep
+                            )
+                        )
+                    )
+                }
+            } else if snapshot.targetCandidate == nil, let prerequisite = snapshot.prerequisiteCandidate {
+                transitions.append(
+                    DoorDashWorkflowTransition(
+                        kind: .prerequisiteModifier,
+                        candidate: prerequisite,
+                        consumedTerms: [],
+                        score: 85,
+                        nextState: makeDoorDashWorkflowPlannerState(
+                            remainingTerms: plannerState.remainingTerms,
+                            inFlightTerms: plannerState.inFlightTerms,
+                            commitPending: true,
+                            lastTransitionKind: .prerequisiteModifier
+                        )
+                    )
+                )
+            }
+        }
+
+        if transitions.isEmpty {
+            transitions.append(
+                DoorDashWorkflowTransition(
+                    kind: .waiting,
+                    candidate: nil,
+                    consumedTerms: [],
+                    score: -40,
+                    nextState: plannerState
+                )
+            )
+        }
+
+        return transitions.sorted { left, right in
+            if left.score == right.score {
+                return readableDoorDashFocusKind(left.kind) < readableDoorDashFocusKind(right.kind)
+            }
+            return left.score > right.score
+        }
+    }
+
+    private func baseDoorDashWorkflowScore(for plannerState: DoorDashWorkflowPlannerState) -> Double {
+        var score = 0.0
+        score -= Double(plannerState.remainingTerms.count) * 32.0
+        score -= Double(plannerState.inFlightTerms.count) * 14.0
+        if plannerState.commitPending {
+            score -= 18.0
+        }
+        if plannerState.addToCartAllowed {
+            score += 90.0
+        }
+        return score
+    }
+
+    private func scoreDoorDashWorkflowPath(
+        from snapshot: DoorDashCustomizerSnapshot,
+        plannerState: DoorDashWorkflowPlannerState,
+        depth: Int
+    ) -> (score: Double, firstTransition: DoorDashWorkflowTransition?) {
+        let transitions = legalDoorDashWorkflowTransitions(for: snapshot, plannerState: plannerState)
+        guard depth > 0 else {
+            return (baseDoorDashWorkflowScore(for: plannerState), nil)
+        }
+
+        var bestScore = -Double.infinity
+        var bestFirst: DoorDashWorkflowTransition?
+
+        for transition in transitions {
+            let future = depth > 1
+                ? scoreDoorDashWorkflowPath(from: snapshot, plannerState: transition.nextState, depth: depth - 1)
+                : (score: baseDoorDashWorkflowScore(for: transition.nextState), firstTransition: nil as DoorDashWorkflowTransition?)
+            let total = transition.score + (future.score * 0.72) + baseDoorDashWorkflowScore(for: transition.nextState)
+            if total > bestScore {
+                bestScore = total
+                bestFirst = transition.kind == .waiting ? nil : transition
+            }
+        }
+
+        return (bestScore, bestFirst)
+    }
+
+    private func allowedDoorDashWorkflowCandidates(
+        for focusKind: DoorDashCustomizerFocusKind,
+        snapshot: DoorDashCustomizerSnapshot,
+        candidates: [WebsiteC2ACandidate]
+    ) -> [WebsiteC2ACandidate] {
+        let candidatePool = snapshot.addCandidate.map { add in
+            candidates.contains(where: { $0.id == add.id }) ? candidates : (candidates + [add])
+        } ?? candidates
+
+        let filtered: [WebsiteC2ACandidate]
+        switch focusKind {
+        case .requestedModifier, .prerequisiteModifier:
+            filtered = candidatePool.filter { ["dd_modifier_option", "dd_modal_close"].contains($0.role) }
+        case .saveStep:
+            filtered = candidatePool.filter { ["dd_modifier_save", "dd_modal_close"].contains($0.role) }
+        case .reviewStep:
+            filtered = candidatePool.filter { ["dd_add_to_cart", "dd_cart_cta", "dd_modal_close"].contains($0.role) }
+        case .waiting:
+            filtered = snapshot.filteredCandidates
+        }
+        return filtered.isEmpty ? snapshot.filteredCandidates : filtered
+    }
+
+    private func focusLabelForDoorDashWorkflowPlan(
+        focusKind: DoorDashCustomizerFocusKind,
+        snapshot: DoorDashCustomizerSnapshot,
+        plannerState: DoorDashWorkflowPlannerState
+    ) -> String {
+        switch focusKind {
+        case .requestedModifier:
+            if !plannerState.remainingTerms.isEmpty {
+                return "Resolve \(plannerState.remainingTerms.joined(separator: ", "))"
+            }
+            return "Resolve requested modifier"
+        case .prerequisiteModifier:
+            if let prerequisite = snapshot.prerequisiteCandidate {
+                return "Complete prerequisite: \(prerequisite.label)"
+            }
+            return "Complete prerequisite customizer step"
+        case .saveStep:
+            return "Commit current customizer step"
+        case .reviewStep:
+            return "Add to cart"
+        case .waiting:
+            return "Waiting for next customizer transition"
+        }
+    }
+
+    private func planDoorDashCustomizerWorkflow(
+        from candidates: [WebsiteC2ACandidate],
+        state: WebsiteC2AState
+    ) -> DoorDashWorkflowPlan {
+        let snapshot = doorDashCustomizerSnapshot(from: candidates, state: state)
+        let plannerState = initialDoorDashWorkflowPlannerState(from: snapshot)
+        let search = scoreDoorDashWorkflowPath(from: snapshot, plannerState: plannerState, depth: 4)
+        let nextTransition = search.firstTransition
+        let focusKind = nextTransition?.kind ?? snapshot.focusKind
+        let allowedCandidates = allowedDoorDashWorkflowCandidates(for: focusKind, snapshot: snapshot, candidates: candidates)
+        let focusLabel = focusLabelForDoorDashWorkflowPlan(
+            focusKind: focusKind,
+            snapshot: snapshot,
+            plannerState: plannerState
+        )
+        return DoorDashWorkflowPlan(
+            plannerState: plannerState,
+            focusKind: focusKind,
+            focusLabel: focusLabel,
+            allowedCandidates: allowedCandidates,
+            nextTransition: nextTransition
         )
     }
 
     private func focusedDoorDashItemModalCandidates(from candidates: [WebsiteC2ACandidate], state: WebsiteC2AState) -> [WebsiteC2ACandidate] {
-        return doorDashCustomizerSnapshot(from: candidates, state: state).filteredCandidates
+        return planDoorDashCustomizerWorkflow(from: candidates, state: state).allowedCandidates
     }
 
     private func readableDoorDashFocusKind(_ kind: DoorDashCustomizerFocusKind) -> String {
@@ -4535,11 +4881,14 @@ struct MemlaBrowserView: View {
             WebsiteMirrorFact(id: "actions", title: "Moves", value: "\(state.safeActions.count)")
         ]
         if state.pageKind == "dd_item_modal" {
-            let snapshot = doorDashCustomizerSnapshot(from: state.candidates, state: state)
-            facts.append(WebsiteMirrorFact(id: "focus", title: "Focus", value: snapshot.focusLabel))
-            facts.append(WebsiteMirrorFact(id: "step", title: "Step", value: readableDoorDashFocusKind(snapshot.focusKind)))
-            if !snapshot.remainingTerms.isEmpty {
-                facts.append(WebsiteMirrorFact(id: "remaining", title: "Remaining", value: snapshot.remainingTerms.joined(separator: ", ")))
+            let plan = planDoorDashCustomizerWorkflow(from: state.candidates, state: state)
+            facts.append(WebsiteMirrorFact(id: "focus", title: "Focus", value: plan.focusLabel))
+            facts.append(WebsiteMirrorFact(id: "step", title: "Step", value: readableDoorDashFocusKind(plan.focusKind)))
+            if !plan.plannerState.remainingTerms.isEmpty {
+                facts.append(WebsiteMirrorFact(id: "remaining", title: "Remaining", value: plan.plannerState.remainingTerms.joined(separator: ", ")))
+            }
+            if !plan.plannerState.inFlightTerms.isEmpty {
+                facts.append(WebsiteMirrorFact(id: "inflight", title: "In Flight", value: plan.plannerState.inFlightTerms.joined(separator: ", ")))
             }
         }
         if let verification = state.capsuleVerification {
@@ -5659,10 +6008,12 @@ struct MemlaBrowserView: View {
 
         lastAutoDriveSignature = signature
         autoDriveStatus = action.status
-        if !action.consumedTerms.isEmpty {
-            completedModifierTerms.formUnion(action.consumedTerms)
-        }
         if action.candidate.role == "dd_modifier_option" {
+            if !action.consumedTerms.isEmpty {
+                inFlightModifierTerms.formUnion(action.consumedTerms)
+            }
+            doorDashModifierCommitPending = true
+            doorDashPendingCommitKind = action.consumedTerms.isEmpty ? "prerequisite" : "requested"
             lastModifierSelectionLabel = action.candidate.label
             lastModifierSelectionAt = Date()
             pendingStepActionRole = action.candidate.role
@@ -5670,6 +6021,12 @@ struct MemlaBrowserView: View {
             pendingStepActionSignature = signature
             pendingStepActionAt = Date()
         } else if action.candidate.role == "dd_modifier_save" {
+            if !inFlightModifierTerms.isEmpty {
+                completedModifierTerms.formUnion(inFlightModifierTerms)
+                inFlightModifierTerms.removeAll()
+            }
+            doorDashModifierCommitPending = false
+            doorDashPendingCommitKind = ""
             lastModifierSelectionLabel = ""
             lastModifierSelectionAt = .distantPast
             pendingStepActionRole = action.candidate.role
@@ -5712,7 +6069,10 @@ struct MemlaBrowserView: View {
         let agencyState = [
             primaryFoodItemAdded ? "primary_added" : "primary_pending",
             pendingFoodAddOns.first ?? "",
-            completedModifierTerms.sorted().joined(separator: ",")
+            completedModifierTerms.sorted().joined(separator: ","),
+            inFlightModifierTerms.sorted().joined(separator: ","),
+            doorDashModifierCommitPending ? "commit_pending" : "commit_clear",
+            doorDashPendingCommitKind
         ].joined(separator: "|")
         return [state.pageKind, browser.currentURL, candidateSlice, agencyState].joined(separator: "||")
     }
@@ -5918,50 +6278,46 @@ struct MemlaBrowserView: View {
                 )
             }
         case "dd_item_modal":
-            let snapshot = doorDashCustomizerSnapshot(from: candidates, state: state)
-            switch snapshot.focusKind {
+            let plan = planDoorDashCustomizerWorkflow(from: candidates, state: state)
+            guard let transition = plan.nextTransition, let candidate = transition.candidate else {
+                return nil
+            }
+            switch transition.kind {
             case .requestedModifier:
-                if let target = snapshot.targetCandidate {
-                    let consumed = candidateMatchedModifierTerms(target, targetTerms: snapshot.remainingTerms)
-                    return MirrorAutoDriveAction(
-                        candidate: target,
-                        allowCaution: true,
-                        status: "Selecting \(target.label)...",
-                        pendingRole: "",
-                        consumedTerms: consumed
-                    )
-                }
+                return MirrorAutoDriveAction(
+                    candidate: candidate,
+                    allowCaution: true,
+                    status: "Selecting \(candidate.label)...",
+                    pendingRole: "",
+                    consumedTerms: transition.consumedTerms
+                )
             case .prerequisiteModifier:
-                if let prerequisite = snapshot.prerequisiteCandidate {
-                    return MirrorAutoDriveAction(
-                        candidate: prerequisite,
-                        allowCaution: true,
-                        status: "Continuing through \(prerequisite.label)...",
-                        pendingRole: ""
-                    )
-                }
+                return MirrorAutoDriveAction(
+                    candidate: candidate,
+                    allowCaution: true,
+                    status: "Continuing through \(candidate.label)...",
+                    pendingRole: ""
+                )
             case .saveStep:
-                if let save = snapshot.saveCandidate {
-                    return MirrorAutoDriveAction(
-                        candidate: save,
-                        allowCaution: true,
-                        status: "Saving options...",
-                        pendingRole: ""
-                    )
-                }
+                return MirrorAutoDriveAction(
+                    candidate: candidate,
+                    allowCaution: true,
+                    status: "Saving options...",
+                    pendingRole: ""
+                )
             case .reviewStep:
-                if let add = snapshot.addCandidate, snapshot.addToCartAllowed {
-                    return MirrorAutoDriveAction(
-                        candidate: add,
-                        allowCaution: true,
-                        status: "Adding item to cart...",
-                        pendingRole: "dd_add_to_cart"
-                    )
+                guard plan.plannerState.addToCartAllowed else {
+                    return nil
                 }
+                return MirrorAutoDriveAction(
+                    candidate: candidate,
+                    allowCaution: true,
+                    status: "Adding item to cart...",
+                    pendingRole: "dd_add_to_cart"
+                )
             case .waiting:
                 return nil
             }
-            return nil
         case "dd_cart_drawer", "dd_cart_page":
             if !pendingFoodAddOns.isEmpty,
                let close = candidates.first(where: { $0.role == "dd_modal_close" && !$0.blocked }) {
