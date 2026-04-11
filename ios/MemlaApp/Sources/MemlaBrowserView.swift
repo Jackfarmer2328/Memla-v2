@@ -3967,6 +3967,7 @@ struct MemlaBrowserView: View {
     @State private var pendingStepObservedCheckedCheckboxCount = 0
     @State private var pendingStepConsumedTerms: Set<String> = []
     @State private var pendingStepCommitKind = ""
+    @State private var pendingStepTapRetryCount = 0
     @State private var autoDriveEpoch = 0
 
     private struct MirrorAutoDriveAction {
@@ -4097,6 +4098,7 @@ struct MemlaBrowserView: View {
                     || lowered.contains("field focused")
                 if pendingStepActionRole.hasPrefix("dd_modifier") {
                     if failed {
+                        sendBrowserDebugSnapshot(reason: "button_status_failed:\(status)", state: browser.websiteState, force: true)
                         rollbackPendingDoorDashStepFailure()
                     } else if succeeded {
                         pendingStepTapAcknowledged = true
@@ -4104,6 +4106,7 @@ struct MemlaBrowserView: View {
                             pendingStepTapVerifiedSelection = true
                         }
                         appendAgencyTrace("DoorDash tap acknowledged. Waiting for mirror confirmation.")
+                        sendBrowserDebugSnapshot(reason: "button_status_ack:\(status)", state: browser.websiteState, force: true)
                     }
                 }
             }
@@ -4882,6 +4885,7 @@ struct MemlaBrowserView: View {
         pendingStepObservedCheckedCheckboxCount = 0
         pendingStepConsumedTerms = []
         pendingStepCommitKind = ""
+        pendingStepTapRetryCount = 0
     }
 
     private func clearPendingStepAction() {
@@ -4901,6 +4905,7 @@ struct MemlaBrowserView: View {
         pendingStepObservedCheckedCheckboxCount = 0
         pendingStepConsumedTerms = []
         pendingStepCommitKind = ""
+        pendingStepTapRetryCount = 0
     }
 
     private func recordPendingDoorDashStep(
@@ -4928,6 +4933,7 @@ struct MemlaBrowserView: View {
         pendingStepObservedCheckedCheckboxCount = doorDashFactInt(state, key: "dd_checked_checkbox_count")
         pendingStepConsumedTerms = consumedTerms
         pendingStepCommitKind = commitKind
+        pendingStepTapRetryCount = 0
     }
 
     private func matchingPendingDoorDashModifierCandidate(in state: WebsiteC2AState) -> WebsiteC2ACandidate? {
@@ -4964,6 +4970,25 @@ struct MemlaBrowserView: View {
                 && targetGroupKey.isEmpty
                 && targetGroupLabel.isEmpty
                 && targetFingerprint.isEmpty
+        }
+    }
+
+    private func pendingDoorDashRetryCandidate(in state: WebsiteC2AState) -> WebsiteC2ACandidate? {
+        switch pendingStepActionRole {
+        case "dd_modifier_option":
+            if let matched = matchingPendingDoorDashModifierCandidate(in: state) {
+                return matched
+            }
+            let targetLabel = normalizedCommerceTerm(pendingStepActionLabel)
+            return state.candidates.first {
+                $0.role == "dd_modifier_option"
+                    && !$0.blocked
+                    && normalizedCommerceTerm($0.label) == targetLabel
+            }
+        case "dd_modifier_save":
+            return state.candidates.first { $0.role == "dd_modifier_save" && !$0.blocked }
+        default:
+            return nil
         }
     }
 
@@ -7411,8 +7436,27 @@ struct MemlaBrowserView: View {
                 lastAutoDriveSignature = ""
                 lastDoorDashPlannerMarker = ""
             } else {
+                let pendingSeconds = Date().timeIntervalSince(pendingStepActionAt)
+                if !pendingStepTapAcknowledged,
+                   pendingStepTapRetryCount < 1,
+                   pendingSeconds >= 1.15,
+                   let retryCandidate = pendingDoorDashRetryCandidate(in: state) {
+                    pendingStepTapRetryCount += 1
+                    autoDriveStatus = "Retrying \(retryCandidate.label)..."
+                    appendAgencyTrace("DoorDash tap was not acknowledged. Retrying \(retryCandidate.label) once.")
+                    sendBrowserDebugSnapshot(reason: "pending_step_retry:\(retryCandidate.role):\(retryCandidate.label)", state: state, force: true)
+                    let actionEpoch = autoDriveEpoch
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        guard actionEpoch == autoDriveEpoch, autoDriveEnabled else {
+                            return
+                        }
+                        performAutoDriveAction(retryCandidate, allowCaution: true)
+                    }
+                    lastAutoDriveSignature = signature
+                    return
+                }
                 let confirmationDeadline = pendingStepActionRole == "dd_modifier_save" ? 4.8 : 4.0
-                if Date().timeIntervalSince(pendingStepActionAt) >= confirmationDeadline {
+                if pendingSeconds >= confirmationDeadline {
                     appendAgencyTrace("DoorDash step never confirmed from mirror. Re-planning from current state.")
                     sendBrowserDebugSnapshot(reason: "pending_step_timeout", state: state)
                     rollbackPendingDoorDashStepFailure()
@@ -7585,10 +7629,6 @@ struct MemlaBrowserView: View {
 
         lastAutoDriveSignature = signature
         autoDriveStatus = action.status
-        if state.pageKind == "dd_item_modal",
-           ["dd_modifier_option", "dd_modifier_save", "dd_add_to_cart"].contains(action.candidate.role) {
-            sendBrowserDebugSnapshot(reason: "pre_action:\(action.candidate.role):\(action.candidate.label)", state: state)
-        }
         if action.candidate.role == "dd_modifier_option" {
             recordPendingDoorDashStep(
                 role: action.candidate.role,
@@ -7613,6 +7653,10 @@ struct MemlaBrowserView: View {
             clearPendingStepAction()
         }
         appendAgencyTrace("Action: \(action.candidate.role) → \(action.candidate.label)")
+        if state.pageKind == "dd_item_modal",
+           ["dd_modifier_option", "dd_modifier_save", "dd_add_to_cart"].contains(action.candidate.role) {
+            sendBrowserDebugSnapshot(reason: "pre_action:\(action.candidate.role):\(action.candidate.label)", state: state, force: true)
+        }
         if action.candidate.role == "dd_item_card", !primaryFoodItemAdded {
             inProgressPrimaryItemLabel = action.candidate.label
         }
