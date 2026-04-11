@@ -29,6 +29,7 @@ struct WebsiteC2ACandidate: Identifiable {
     let groupRequired: Bool
     let tapFingerprint: String
     let isSelected: Bool
+    let opensSubflow: Bool
 
     init(
         id: String,
@@ -47,7 +48,8 @@ struct WebsiteC2ACandidate: Identifiable {
         groupLabel: String = "",
         groupRequired: Bool = false,
         tapFingerprint: String = "",
-        isSelected: Bool = false
+        isSelected: Bool = false,
+        opensSubflow: Bool = false
     ) {
         self.id = id
         self.domIndex = domIndex
@@ -66,6 +68,7 @@ struct WebsiteC2ACandidate: Identifiable {
         self.groupRequired = groupRequired
         self.tapFingerprint = tapFingerprint
         self.isSelected = isSelected
+        self.opensSubflow = opensSubflow
     }
 }
 
@@ -1474,6 +1477,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             let groupRequired = stringValue(raw["group_required"]) == "true"
             let tapFingerprint = stringValue(raw["tap_fingerprint"])
             let isSelected = stringValue(raw["selected"]) == "true"
+            let opensSubflow = stringValue(raw["opens_subflow"]) == "true"
             guard !label.isEmpty || !url.isEmpty else {
                 return nil
             }
@@ -1510,7 +1514,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
                 groupLabel: groupLabel,
                 groupRequired: groupRequired,
                 tapFingerprint: tapFingerprint,
-                isSelected: isSelected
+                isSelected: isSelected,
+                opensSubflow: opensSubflow
             )
         }
         var seenKeys = Set<String>()
@@ -2880,7 +2885,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         group_label: clean(metadata.groupLabel || ''),
         group_required: metadata.groupRequired ? 'true' : 'false',
         tap_fingerprint: clean(metadata.tapFingerprint || ''),
-        selected: metadata.selected ? 'true' : 'false'
+        selected: metadata.selected ? 'true' : 'false',
+        opens_subflow: metadata.opensSubflow ? 'true' : 'false'
       });
       const collectText = (selector, limit, mapper, root = document) => Array.from(root.querySelectorAll(selector))
         .filter(visible)
@@ -3249,6 +3255,13 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             }
             return group;
           };
+          const opensSubflowForOptionRoot = (root) => {
+            if (!root || !root.querySelectorAll) return false;
+            return Array.from(root.querySelectorAll('svg path')).some((path) => {
+              const d = clean(path.getAttribute('d') || '');
+              return d.includes('11.707 7.29289') || d.includes('9.58586 7.99992');
+            });
+          };
 
           const seenOptionRoots = new WeakSet();
           const modalOptionButtons = Array.from(itemModal.querySelectorAll('label,input[type="radio"],input[type="checkbox"],[role="radio"],[role="checkbox"]'))
@@ -3295,6 +3308,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             const groupKey = group?.groupKey || inferDoorDashGroupKey(group?.header || '', clean([label, contextForElement(el, root)].join(' ')));
             const groupLabel = group?.header || '';
             const selected = checkedStateForOption(el, root);
+            const opensSubflow = opensSubflowForOptionRoot(root);
             const groupMapKey = group ? groupMapKeyFor(group) : '';
             if (group) {
               const stats = customizerGroupStats.get(groupMapKey) || {
@@ -3324,6 +3338,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
                 groupLabel,
                 groupRequired: Boolean(group?.required),
                 selected,
+                opensSubflow,
                 tapFingerprint: fingerprintForCandidate({
                   role: 'dd_modifier_option',
                   label,
@@ -3909,6 +3924,7 @@ struct MemlaBrowserView: View {
     @State private var doorDashPendingCommitKind = ""
     @State private var primaryFoodItemAdded = false
     @State private var inProgressPrimaryItemLabel = ""
+    @State private var traversedDoorDashDerivedGroups: Set<DoorDashCustomizerGroupKind> = []
     @State private var pendingFoodAddOns: [String] = []
     @State private var pendingFoodAddOperation = ""
     @State private var agencyTrace: [String] = []
@@ -3922,6 +3938,7 @@ struct MemlaBrowserView: View {
     @State private var pendingStepTargetGroupKey = ""
     @State private var pendingStepTargetGroupLabel = ""
     @State private var pendingStepTargetTapFingerprint = ""
+    @State private var pendingStepTargetOpensSubflow = false
     @State private var pendingStepActionSignature = ""
     @State private var pendingStepActionAt = Date.distantPast
     @State private var pendingStepTapAcknowledged = false
@@ -4004,6 +4021,7 @@ struct MemlaBrowserView: View {
                 lastModifierSelectionAt = .distantPast
                 primaryFoodItemAdded = false
                 inProgressPrimaryItemLabel = ""
+                traversedDoorDashDerivedGroups = []
                 pendingFoodAddOns = initialFoodAddOns(from: route.capsule)
                 pendingFoodAddOperation = ""
                 agencyTrace = []
@@ -4311,11 +4329,13 @@ struct MemlaBrowserView: View {
         lastModifierSelectionGroupKey = ""
         lastModifierSelectionAt = .distantPast
         inProgressPrimaryItemLabel = ""
+        traversedDoorDashDerivedGroups = []
         pendingStepActionRole = ""
         pendingStepActionLabel = ""
         pendingStepTargetGroupKey = ""
         pendingStepTargetGroupLabel = ""
         pendingStepTargetTapFingerprint = ""
+        pendingStepTargetOpensSubflow = false
         pendingStepActionSignature = ""
         pendingStepActionAt = .distantPast
         pendingStepTapAcknowledged = false
@@ -4542,6 +4562,22 @@ struct MemlaBrowserView: View {
             }
             .map { (kind: $0.key, label: $0.value.label) }
             .first
+    }
+
+    private func selectedDoorDashModifierCandidate(
+        in candidates: [WebsiteC2ACandidate],
+        group: DoorDashCustomizerGroupKind
+    ) -> WebsiteC2ACandidate? {
+        guard group != .unknown else {
+            return nil
+        }
+        let selected = candidates.filter {
+            $0.role == "dd_modifier_option"
+                && !$0.blocked
+                && $0.isSelected
+                && doorDashGroupKind(for: $0) == group
+        }
+        return selected.first(where: { $0.opensSubflow }) ?? selected.first
     }
 
     private func expandedCommerceTerms(from rawTerms: [String]) -> [String] {
@@ -4797,11 +4833,13 @@ struct MemlaBrowserView: View {
         lastModifierSelectionLabel = ""
         lastModifierSelectionGroupKey = ""
         lastModifierSelectionAt = .distantPast
+        traversedDoorDashDerivedGroups = []
         pendingStepActionRole = ""
         pendingStepActionLabel = ""
         pendingStepTargetGroupKey = ""
         pendingStepTargetGroupLabel = ""
         pendingStepTargetTapFingerprint = ""
+        pendingStepTargetOpensSubflow = false
         pendingStepActionSignature = ""
         pendingStepActionAt = .distantPast
         pendingStepTapAcknowledged = false
@@ -4820,6 +4858,7 @@ struct MemlaBrowserView: View {
         pendingStepTargetGroupKey = ""
         pendingStepTargetGroupLabel = ""
         pendingStepTargetTapFingerprint = ""
+        pendingStepTargetOpensSubflow = false
         pendingStepActionSignature = ""
         pendingStepActionAt = .distantPast
         pendingStepTapAcknowledged = false
@@ -4846,6 +4885,7 @@ struct MemlaBrowserView: View {
         pendingStepTargetGroupKey = candidate?.groupKey ?? ""
         pendingStepTargetGroupLabel = candidate?.groupLabel ?? ""
         pendingStepTargetTapFingerprint = candidate?.tapFingerprint ?? ""
+        pendingStepTargetOpensSubflow = candidate?.opensSubflow ?? false
         pendingStepActionSignature = signature
         pendingStepActionAt = Date()
         pendingStepTapAcknowledged = false
@@ -4942,6 +4982,13 @@ struct MemlaBrowserView: View {
             }
             doorDashModifierCommitPending = true
             doorDashPendingCommitKind = pendingStepCommitKind
+            if pendingStepCommitKind == "prerequisite",
+               pendingStepTargetOpensSubflow {
+                let traversedGroup = doorDashGroupKind(from: pendingStepTargetGroupKey)
+                if traversedGroup != .unknown {
+                    traversedDoorDashDerivedGroups.insert(traversedGroup)
+                }
+            }
             lastModifierSelectionLabel = pendingStepActionLabel
             lastModifierSelectionGroupKey = pendingStepTargetGroupKey
             lastModifierSelectionAt = Date()
@@ -5543,10 +5590,12 @@ struct MemlaBrowserView: View {
         let activeGroupKind: DoorDashCustomizerGroupKind
         let activeGroupLabel: String
         let activeGroupRequired: Bool
+        let activeGroupResolved: Bool
         let stage: FoodModifierStage
         let remainingTerms: [String]
         let requestedTerms: [String]
         let preservedGroups: Set<DoorDashCustomizerGroupKind>
+        let traversedDerivedGroups: Set<DoorDashCustomizerGroupKind>
         let focusLabel: String
         let targetCandidate: WebsiteC2ACandidate?
         let prerequisiteCandidate: WebsiteC2ACandidate?
@@ -5564,7 +5613,9 @@ struct MemlaBrowserView: View {
         let detectedActiveGroupLabel = doorDashActiveGroupLabel(from: state, candidates: candidates)
         let detectedActiveGroupRequired = state.serviceFacts["dd_active_group_required"] == "true"
         let preservedGroups = preservedDoorDashGroupKinds(for: modifierTargets.stage)
-        let unresolvedRequiredGroup = unresolvedRequiredDoorDashGroup(in: candidates, excluding: preservedGroups)
+        let traversedDerivedGroups = traversedDoorDashDerivedGroups
+        let protectedGroups = preservedGroups.union(traversedDerivedGroups)
+        let unresolvedRequiredGroup = unresolvedRequiredDoorDashGroup(in: candidates, excluding: protectedGroups)
         let saveCandidate = candidates.first(where: { $0.role == "dd_modifier_save" && !$0.blocked })
         let addCandidate: WebsiteC2ACandidate?
         if let existingAddCandidate = candidates.first(where: { $0.role == "dd_add_to_cart" && !$0.blocked }) {
@@ -5633,23 +5684,61 @@ struct MemlaBrowserView: View {
             activeGroupLabel = detectedActiveGroupLabel
             activeGroupRequired = detectedActiveGroupRequired
         }
+        let selectedActiveCandidate = selectedDoorDashModifierCandidate(in: candidates, group: activeGroupKind)
+        let activeGroupResolved: Bool
+        if activeGroupRequired, let selectedActiveCandidate {
+            if selectedActiveCandidate.opensSubflow {
+                activeGroupResolved = traversedDerivedGroups.contains(activeGroupKind)
+            } else {
+                activeGroupResolved = true
+            }
+        } else {
+            activeGroupResolved = false
+        }
         let targetCandidate = bestDoorDashModifierCandidate(
             in: candidates,
             targetTerms: remainingModifierTerms,
             preferredGroup: activeGroupKind
         )?.candidate
-        let prerequisiteCandidate = fallbackDoorDashModifierCandidate(
-            in: candidates,
-            activeGroup: activeGroupKind,
-            disallowedGroups: preservedGroups
-        )
+        let prerequisiteCandidate: WebsiteC2ACandidate?
+        if activeGroupRequired {
+            if let selectedActiveCandidate,
+               selectedActiveCandidate.opensSubflow,
+               !traversedDerivedGroups.contains(activeGroupKind) {
+                prerequisiteCandidate = selectedActiveCandidate
+            } else if activeGroupResolved {
+                prerequisiteCandidate = nil
+            } else {
+                prerequisiteCandidate = fallbackDoorDashModifierCandidate(
+                    in: candidates,
+                    activeGroup: activeGroupKind,
+                    disallowedGroups: protectedGroups
+                )
+            }
+        } else {
+            prerequisiteCandidate = fallbackDoorDashModifierCandidate(
+                in: candidates,
+                activeGroup: activeGroupKind,
+                disallowedGroups: protectedGroups
+            )
+        }
 
         let focusKind: DoorDashCustomizerFocusKind
         let focusLabel: String
         let filteredCandidates: [WebsiteC2ACandidate]
 
         if !remainingModifierTerms.isEmpty {
-            if activeGroupRequired, prerequisiteCandidate == nil {
+            if let targetCandidate {
+                focusKind = .requestedModifier
+                focusLabel = "Resolve \(remainingModifierTerms.joined(separator: ", "))"
+                let stepCandidates = candidates.filter { ["dd_modifier_option", "dd_modal_close"].contains($0.role) }
+                filteredCandidates = stepCandidates.isEmpty ? candidates : stepCandidates
+            } else if activeGroupRequired, activeGroupResolved, saveCandidate != nil {
+                focusKind = .saveStep
+                focusLabel = "Commit resolved \(activeGroupLabel.isEmpty ? "customizer step" : activeGroupLabel)"
+                let saveStep = candidates.filter { ["dd_modifier_save", "dd_modal_close"].contains($0.role) }
+                filteredCandidates = saveStep.isEmpty ? candidates : saveStep
+            } else if activeGroupRequired, prerequisiteCandidate == nil {
                 focusKind = .waiting
                 focusLabel = activeGroupLabel.isEmpty
                     ? "Waiting for required customizer step"
@@ -5666,11 +5755,6 @@ struct MemlaBrowserView: View {
                 focusLabel = "Save current customizer step"
                 let saveStep = candidates.filter { ["dd_modifier_save", "dd_modal_close"].contains($0.role) }
                 filteredCandidates = saveStep.isEmpty ? candidates : saveStep
-            } else if let targetCandidate {
-                focusKind = .requestedModifier
-                focusLabel = "Resolve \(remainingModifierTerms.joined(separator: ", "))"
-                let stepCandidates = candidates.filter { ["dd_modifier_option", "dd_modal_close"].contains($0.role) }
-                filteredCandidates = stepCandidates.isEmpty ? candidates : stepCandidates
             } else if let prerequisiteCandidate {
                 focusKind = .prerequisiteModifier
                 focusLabel = "Clear prerequisite: \(prerequisiteCandidate.label)"
@@ -5707,10 +5791,12 @@ struct MemlaBrowserView: View {
             activeGroupKind: activeGroupKind,
             activeGroupLabel: activeGroupLabel,
             activeGroupRequired: activeGroupRequired,
+            activeGroupResolved: activeGroupResolved,
             stage: modifierTargets.stage,
             remainingTerms: remainingModifierTerms,
             requestedTerms: requestedModifierTerms,
             preservedGroups: preservedGroups,
+            traversedDerivedGroups: traversedDerivedGroups,
             focusLabel: focusLabel,
             targetCandidate: targetCandidate,
             prerequisiteCandidate: prerequisiteCandidate,
@@ -5833,7 +5919,7 @@ struct MemlaBrowserView: View {
             }
 
             if let save = snapshot.saveCandidate,
-               !(snapshot.activeGroupRequired && snapshot.prerequisiteCandidate == nil) {
+               (!snapshot.activeGroupRequired || snapshot.activeGroupResolved) {
                 let saveScore: Double
                 if plannerState.lastTransitionKind == .prerequisiteModifier
                     || activeGroup == .unknown
@@ -5875,6 +5961,26 @@ struct MemlaBrowserView: View {
                     )
                 )
             }
+
+            if transitions.isEmpty,
+               snapshot.activeGroupRequired,
+               snapshot.activeGroupResolved,
+               let save = snapshot.saveCandidate {
+                transitions.append(
+                    DoorDashWorkflowTransition(
+                        kind: .saveStep,
+                        candidate: save,
+                        consumedTerms: [],
+                        score: 145,
+                        nextState: makeDoorDashWorkflowPlannerState(
+                            remainingTerms: plannerState.remainingTerms,
+                            inFlightTerms: [],
+                            commitPending: false,
+                            lastTransitionKind: .saveStep
+                        )
+                    )
+                )
+            }
         } else {
             if let target = snapshot.targetCandidate {
                 let targetGroup = doorDashGroupKind(for: target)
@@ -5904,6 +6010,23 @@ struct MemlaBrowserView: View {
                         )
                     }
                 }
+            } else if snapshot.activeGroupRequired,
+                      snapshot.activeGroupResolved,
+                      let save = snapshot.saveCandidate {
+                transitions.append(
+                    DoorDashWorkflowTransition(
+                        kind: .saveStep,
+                        candidate: save,
+                        consumedTerms: [],
+                        score: 140,
+                        nextState: makeDoorDashWorkflowPlannerState(
+                            remainingTerms: plannerState.remainingTerms,
+                            inFlightTerms: plannerState.inFlightTerms,
+                            commitPending: false,
+                            lastTransitionKind: .saveStep
+                        )
+                    )
+                )
             }
 
             if plannerState.remainingTerms.isEmpty && plannerState.inFlightTerms.isEmpty {
@@ -6044,7 +6167,8 @@ struct MemlaBrowserView: View {
                     return true
                 }
                 let candidateGroup = doorDashGroupKind(for: candidate)
-                if snapshot.preservedGroups.contains(candidateGroup), candidateGroup != snapshot.activeGroupKind {
+                let protectedGroups = snapshot.preservedGroups.union(snapshot.traversedDerivedGroups)
+                if protectedGroups.contains(candidateGroup), candidateGroup != snapshot.activeGroupKind {
                     return false
                 }
                 let preferredGroups = preferredDoorDashGroupKinds(for: snapshot.stage)
@@ -6165,6 +6289,7 @@ struct MemlaBrowserView: View {
             nextLabel,
             plan.plannerState.remainingTerms.joined(separator: ","),
             plan.plannerState.inFlightTerms.joined(separator: ","),
+            plan.snapshot.traversedDerivedGroups.map(\.rawValue).sorted().joined(separator: ","),
             plan.plannerState.commitPending ? "commit_pending" : "commit_clear"
         ].joined(separator: "|")
         guard marker != lastDoorDashPlannerMarker else {
@@ -6189,6 +6314,13 @@ struct MemlaBrowserView: View {
                 .sorted()
                 .joined(separator: ", ")
             parts.append("preserve=\(preserved)")
+        }
+        if !plan.snapshot.traversedDerivedGroups.isEmpty {
+            let traversed = plan.snapshot.traversedDerivedGroups
+                .map(readableDoorDashGroupKind)
+                .sorted()
+                .joined(separator: ", ")
+            parts.append("derived=\(traversed)")
         }
         if let nextCandidate = plan.nextTransition?.candidate {
             parts.append("next=\(nextCandidate.role):\(nextCandidate.label)")
@@ -7442,9 +7574,14 @@ struct MemlaBrowserView: View {
         ].joined(separator: "|")
         let agencyState = [
             primaryFoodItemAdded ? "primary_added" : "primary_pending",
+            inProgressPrimaryItemLabel,
             pendingFoodAddOns.first ?? "",
             completedModifierTerms.sorted().joined(separator: ","),
             inFlightModifierTerms.sorted().joined(separator: ","),
+            traversedDoorDashDerivedGroups
+                .map(\.rawValue)
+                .sorted()
+                .joined(separator: ","),
             doorDashModifierCommitPending ? "commit_pending" : "commit_clear",
             doorDashPendingCommitKind
         ].joined(separator: "|")
