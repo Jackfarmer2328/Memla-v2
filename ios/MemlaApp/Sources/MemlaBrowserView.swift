@@ -580,6 +580,37 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         }
     }
 
+    func tapDoorDashContinueToCheckout(capsule: ActionCapsule?) {
+        isRunningButtonAction = true
+        buttonActionStatus = "Continuing to checkout..."
+        webView.evaluateJavaScript(Self.doorDashContinueToCheckoutScript) { [weak self] result, error in
+            DispatchQueue.main.async {
+                guard let self = self else {
+                    return
+                }
+                self.isRunningButtonAction = false
+                if let error = error {
+                    self.buttonActionStatus = error.localizedDescription
+                    return
+                }
+                guard let payload = result as? [String: Any] else {
+                    self.buttonActionStatus = "Continue tap returned no page result."
+                    return
+                }
+                if let jsError = Self.javaScriptPayloadError(payload) {
+                    self.buttonActionStatus = jsError
+                    return
+                }
+                let reason = Self.stringValue(payload["reason"]).replacingOccurrences(of: "_", with: " ")
+                let ok = payload["ok"] as? Bool ?? false
+                self.buttonActionStatus = ok ? reason.capitalized : "Continue tap blocked: \(reason)"
+                if ok {
+                    self.scheduleDoorDashFollowUpInspect(after: 1.1, capsule: capsule, suppressGroundingFor: 2.4)
+                }
+            }
+        }
+    }
+
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         websiteState = nil
         inspectionStatus = ""
@@ -2858,6 +2889,119 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           ok: false,
           reason: 'memla_js_exception',
           memla_js_script: 'dd_add_to_cart_tap',
+          memla_js_error: String(error),
+          memla_js_stack: String((error && error.stack) || '')
+        };
+      }
+    })();
+    """
+
+    private static let doorDashContinueToCheckoutScript = """
+    (() => {
+      try {
+      const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+      const visible = (el) => {
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 1 && rect.height > 1;
+      };
+      const labelForElement = (el) => clean(el?.innerText || el?.textContent || el?.value || el?.getAttribute?.('aria-label') || el?.getAttribute?.('title') || '');
+      const contextForElement = (el, rootOverride) => clean((rootOverride || el?.closest('article,li,section,div,[role="dialog"]'))?.textContent || '').slice(0, 420);
+      const ancestorSet = (el) => {
+        const nodes = new Set();
+        let node = el;
+        while (node) {
+          nodes.add(node);
+          node = node.parentElement;
+        }
+        return nodes;
+      };
+      const sharedAncestor = (left, right) => {
+        if (!left && !right) return null;
+        if (!left) return right?.closest('section,div,[role="dialog"]') || right || null;
+        if (!right) return left?.closest('section,div,[role="dialog"]') || left || null;
+        const leftAncestors = ancestorSet(left);
+        let node = right;
+        while (node) {
+          if (leftAncestors.has(node)) {
+            return node;
+          }
+          node = node.parentElement;
+        }
+        return left.closest('section,div,[role="dialog"]') || right.closest('section,div,[role="dialog"]') || left;
+      };
+      const continueMatcher = (el, root) => {
+        const text = clean([labelForElement(el), contextForElement(el, root)].join(' ')).toLowerCase();
+        if (!text) return false;
+        if (/close|dismiss|address|clear view ct|edit address|continue browsing|open cart|view cart/.test(text)) return false;
+        return /continue|checkout|review order/.test(text);
+      };
+      const activate = (node) => {
+        if (!node) return;
+        try { node.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
+        const rect = typeof node.getBoundingClientRect === 'function'
+          ? node.getBoundingClientRect()
+          : { left: 0, top: 0, width: 0, height: 0 };
+        const pointInit = {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          clientX: rect.left + rect.width / 2,
+          clientY: rect.top + rect.height / 2
+        };
+        if (typeof node.focus === 'function') {
+          try { node.focus(); } catch (_) {}
+        }
+        ['mousedown', 'mouseup', 'click'].forEach((type) => {
+          try {
+            node.dispatchEvent(new MouseEvent(type, {
+              bubbles: pointInit.bubbles,
+              cancelable: pointInit.cancelable,
+              composed: pointInit.composed,
+              clientX: pointInit.clientX,
+              clientY: pointInit.clientY,
+              view: window
+            }));
+          } catch (_) {}
+        });
+        if (typeof node.click === 'function') {
+          try { node.click(); } catch (_) {}
+        }
+      };
+
+      const controls = Array.from(document.querySelectorAll('button,[role="button"],a[href]')).filter(visible);
+      const continueAnchor = controls.find((el) =>
+        el.matches('a[href*="/consumer/checkout"]') && continueMatcher(el, null)
+      ) || null;
+      const cartCloseButton = controls.find((el) => /close/i.test(labelForElement(el))) || null;
+      const visibleDialogs = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"]')).filter(visible);
+      const cartDrawer = sharedAncestor(continueAnchor, cartCloseButton)
+        || visibleDialogs.find((el) => Array.from(el.querySelectorAll('button,[role="button"],a[href]')).filter(visible).some((child) => continueMatcher(child, el)))
+        || null;
+
+      const scopedControls = cartDrawer
+        ? Array.from(cartDrawer.querySelectorAll('button,[role="button"],a[href]')).filter(visible)
+        : controls;
+      const continueControl = scopedControls.find((el) => continueMatcher(el, cartDrawer || null))
+        || controls.find((el) => continueMatcher(el, cartDrawer || null))
+        || null;
+      if (!continueControl) {
+        return { ok: false, reason: 'doordash_continue_not_found' };
+      }
+
+      activate(continueControl);
+      return {
+        ok: true,
+        reason: 'tapped_doordash_continue',
+        label: clean(labelForElement(continueControl) || 'Continue')
+      };
+      } catch (error) {
+        return {
+          ok: false,
+          reason: 'memla_js_exception',
+          memla_js_script: 'dd_continue_tap',
           memla_js_error: String(error),
           memla_js_stack: String((error && error.stack) || '')
         };
@@ -8159,6 +8303,10 @@ struct MemlaBrowserView: View {
         }
         if candidate.role == "dd_add_to_cart", browser.websiteState?.pageKind == "dd_item_modal" {
             browser.tapDoorDashAddToCart(capsule: route.capsule)
+            return
+        }
+        if candidate.role == "dd_continue_cta" {
+            browser.tapDoorDashContinueToCheckout(capsule: route.capsule)
             return
         }
         browser.tapButtonCandidate(candidate, allowCaution: allowCaution, capsule: route.capsule)
