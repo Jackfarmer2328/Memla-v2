@@ -3069,7 +3069,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
 
         const continueAnchor = Array.from(document.querySelectorAll('a[href*="/consumer/checkout"]'))
           .filter(visible)
-          .find((el) => /continue/i.test(labelForElement(el)));
+          .find((el) => /continue|checkout/i.test(labelForElement(el)));
         const cartCloseButton = Array.from(document.querySelectorAll('button[data-testid="dbd-pre-checkout-header-close-button"], button[aria-label="Close"]'))
           .filter(visible)[0] || null;
 
@@ -3083,6 +3083,16 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           || explicitOptionFooter?.closest('[data-testid="ItemModal"],[role="dialog"]')
           || visibleDialogs.find((el) => /add to cart|choose your size|recommended options|build your own pizza|custom pizza/i.test(clean(el.innerText)));
         const cartDrawer = continueAnchor || cartCloseButton ? sharedAncestor(continueAnchor, cartCloseButton) : null;
+        const cartContinueButton = cartDrawer
+          ? Array.from(cartDrawer.querySelectorAll('button,[role="button"],a[href]'))
+            .filter(visible)
+            .find((el) => {
+              const text = clean([labelForElement(el), contextForElement(el, cartDrawer)].join(' '));
+              if (!text) return false;
+              if (/close|dismiss|address|clear view ct|edit address/i.test(text)) return false;
+              return /continue|checkout|review order/i.test(text);
+            })
+          : null;
         doordashActiveRoot = paymentSheet || cartDrawer || itemModal || null;
         doordashActiveLayer = paymentSheet ? 'payment_sheet' : cartDrawer ? 'cart_drawer' : itemModal ? 'item_modal' : 'page';
         doordashHasPaymentSheet = Boolean(paymentSheet);
@@ -3125,16 +3135,17 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           pushUnique(doordashCandidates, candidateFromElement(cartButton, 'dd_cart_cta', cartButton.closest('section,div'), 'Open cart'));
         }
 
-        if (continueAnchor && !itemModal) {
+        if ((continueAnchor || cartContinueButton) && !itemModal) {
           doordashHasContinueCTA = true;
-          pushUnique(doordashCandidates, candidateFromElement(continueAnchor, 'dd_continue_cta', cartDrawer || continueAnchor.closest('section,div'), 'Continue'));
+          const continueControl = cartContinueButton || continueAnchor;
+          pushUnique(doordashCandidates, candidateFromElement(continueControl, 'dd_continue_cta', cartDrawer || continueControl.closest('section,div'), 'Continue'));
         }
 
         if (cartCloseButton && cartDrawer) {
           pushUnique(doordashCandidates, candidateFromElement(cartCloseButton, 'dd_modal_close', cartDrawer, 'Close cart'));
         }
 
-        if (itemModal) {
+        if (itemModal && !cartDrawer) {
           const modalClose = Array.from(itemModal.querySelectorAll('button,[role="button"]'))
             .filter(visible)
             .find((el) => /^x$/i.test(labelForElement(el)) || /close|dismiss/i.test(labelForElement(el)));
