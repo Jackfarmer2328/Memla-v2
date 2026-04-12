@@ -2737,7 +2737,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         const text = clean(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
         return /^save(?: options)?(?:\\s*\\+\\$?\\d[\\d.,]*)?$/i.test(text) || /^save$/i.test(text);
       };
-      const button = Array.from(document.querySelectorAll('#prism-modal-footer button[data-testid="optionFooter"], button[data-testid="optionFooter"]'))
+      const button = Array.from(document.querySelectorAll('#prism-modal-footer button[data-testid="optionFooter"], [data-testid="in-content-modal-footer-container"] button[data-testid="optionFooter"], button[data-testid="optionFooter"]'))
         .filter(visible)
         .find(saveMatcher)
         || Array.from(document.querySelectorAll('button, [role="button"]'))
@@ -2809,7 +2809,9 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         const text = clean(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
         return /^(?:add to cart|update item)(?:\\s*[-+]\\s*.*)?$/i.test(text) || /add to cart|update item/i.test(text);
       };
-      const button = Array.from(document.querySelectorAll('#prism-modal-footer button, button, [role="button"]'))
+      const button = Array.from(document.querySelectorAll(
+        '#prism-modal-footer button[data-testid="optionFooter"], [data-testid="in-content-modal-footer-container"] button[data-testid="optionFooter"], button[data-testid="optionFooter"], button, [role="button"]'
+      ))
         .filter(visible)
         .find(addMatcher);
       if (!button) {
@@ -2915,7 +2917,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
 
       const headings = collectText('h1,h2,h3,[role="heading"]', 10, (el) => el.innerText || el.textContent);
       const inputs = collectText('input,textarea,select', 18, (el) => el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.name || el.id || el.type || el.tagName);
-      const buttons = collectText('button,[role="button"],input[type="button"],input[type="submit"],a[role="button"]', 24, (el) => el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title'));
+      const buttons = collectText('button,[role="button"],input[type="button"],input[type="submit"],a[role="button"]', 24, (el) => el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || el.getAttribute('title'));
       const links = collectText('a[href]', 24, (el) => el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || el.href);
       const candidates = interactiveElements
         .map((el) => {
@@ -3989,6 +3991,7 @@ struct MemlaBrowserView: View {
     @State private var pendingStepConsumedTerms: Set<String> = []
     @State private var pendingStepCommitKind = ""
     @State private var pendingStepTapRetryCount = 0
+    @State private var doorDashReviewBridgePending = false
     @State private var autoDriveEpoch = 0
 
     private struct MirrorAutoDriveAction {
@@ -4064,6 +4067,7 @@ struct MemlaBrowserView: View {
                 primaryFoodItemAdded = false
                 inProgressPrimaryItemLabel = ""
                 traversedDoorDashDerivedGroups = []
+                doorDashReviewBridgePending = false
                 pendingFoodAddOns = initialFoodAddOns(from: route.capsule)
                 pendingFoodAddOperation = ""
                 agencyTrace = []
@@ -4119,6 +4123,20 @@ struct MemlaBrowserView: View {
                     || lowered.contains("field focused")
                 if pendingStepActionRole.hasPrefix("dd_modifier") {
                     if failed {
+                        if shouldBridgeDoorDashReviewAfterSaveFailure(status: status, state: browser.websiteState) {
+                            doorDashReviewBridgePending = true
+                            appendAgencyTrace("DoorDash review CTA is now expected. Re-planning for Add to cart.")
+                            lastAutoDriveSignature = ""
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                                guard autoDriveEnabled,
+                                      !browser.isLoading,
+                                      !browser.isInspecting,
+                                      !browser.isRunningButtonAction else {
+                                    return
+                                }
+                                browser.inspectPage(capsule: route.capsule)
+                            }
+                        }
                         sendBrowserDebugSnapshot(reason: "button_status_failed:\(status)", state: browser.websiteState, force: true)
                         rollbackPendingDoorDashStepFailure()
                     } else if succeeded {
@@ -4383,6 +4401,7 @@ struct MemlaBrowserView: View {
         lastModifierSelectionAt = .distantPast
         inProgressPrimaryItemLabel = ""
         traversedDoorDashDerivedGroups = []
+        doorDashReviewBridgePending = false
         pendingStepActionRole = ""
         pendingStepActionLabel = ""
         pendingStepTargetGroupKey = ""
@@ -4886,6 +4905,7 @@ struct MemlaBrowserView: View {
         inFlightModifierTerms = []
         doorDashModifierCommitPending = false
         doorDashPendingCommitKind = ""
+        doorDashReviewBridgePending = false
         lastModifierSelectionLabel = ""
         lastModifierSelectionGroupKey = ""
         lastModifierSelectionAt = .distantPast
@@ -4938,6 +4958,9 @@ struct MemlaBrowserView: View {
         consumedTerms: Set<String>,
         commitKind: String
     ) {
+        if role != "dd_modifier_save" {
+            doorDashReviewBridgePending = false
+        }
         pendingStepActionRole = role
         pendingStepActionLabel = label
         pendingStepTargetGroupKey = candidate?.groupKey ?? ""
@@ -5717,6 +5740,20 @@ struct MemlaBrowserView: View {
         let addToCartAllowed: Bool
     }
 
+    private func shouldBridgeDoorDashReviewAfterSaveFailure(status: String, state: WebsiteC2AState?) -> Bool {
+        guard pendingStepActionRole == "dd_modifier_save",
+              let state,
+              state.pageKind == "dd_item_modal" else {
+            return false
+        }
+        let lowered = status.lowercased()
+        guard lowered.contains("doordash modifier save not found") || lowered.contains("save tap blocked: doordash modifier save not found") else {
+            return false
+        }
+        let modifierTargets = currentModifierTargets()
+        return modifierTargets.terms.isEmpty && inFlightModifierTerms.isEmpty
+    }
+
     private func doorDashCustomizerSnapshot(from candidates: [WebsiteC2ACandidate], state: WebsiteC2AState) -> DoorDashCustomizerSnapshot {
         let modifierTargets = currentModifierTargets()
         let remainingModifierTerms = modifierTargets.terms
@@ -5732,8 +5769,8 @@ struct MemlaBrowserView: View {
             traversedDerivedGroups: traversedDerivedGroups,
             excluding: protectedGroups
         )
-        let saveCandidate = candidates.first(where: { $0.role == "dd_modifier_save" && !$0.blocked })
-        let addCandidate: WebsiteC2ACandidate?
+        var saveCandidate = candidates.first(where: { $0.role == "dd_modifier_save" && !$0.blocked })
+        var addCandidate: WebsiteC2ACandidate?
         if let existingAddCandidate = candidates.first(where: { $0.role == "dd_add_to_cart" && !$0.blocked }) {
             addCandidate = existingAddCandidate
         } else if state.serviceFacts["dd_has_add_to_cart"] == "true" {
@@ -5758,6 +5795,33 @@ struct MemlaBrowserView: View {
             )
         } else {
             addCandidate = nil
+        }
+        let finalReviewBridgeActive = doorDashReviewBridgePending
+            && remainingModifierTerms.isEmpty
+            && inFlightModifierTerms.isEmpty
+        if finalReviewBridgeActive {
+            if addCandidate == nil {
+                let label = state.serviceFacts["dd_add_to_cart_label"] ?? "Add to cart"
+                addCandidate = WebsiteC2ACandidate(
+                    id: "bridged-dd-item-modal-add-to-cart",
+                    domIndex: -1,
+                    label: label,
+                    url: "",
+                    kind: "button",
+                    role: "dd_add_to_cart",
+                    score: 5.3,
+                    matchedTerms: [],
+                    blocked: false,
+                    tapSafety: "caution",
+                    tapReason: "Needs user review before Memla taps",
+                    reason: "DoorDash review CTA after final customizer save",
+                    groupKey: DoorDashCustomizerGroupKind.review.rawValue,
+                    groupLabel: "Add to cart",
+                    groupRequired: false,
+                    tapFingerprint: "dd_add_to_cart | review | add to cart | add to cart"
+                )
+            }
+            saveCandidate = nil
         }
         let initialTargetCandidate = bestDoorDashModifierCandidate(
             in: candidates,
