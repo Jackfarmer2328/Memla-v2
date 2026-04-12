@@ -8259,6 +8259,11 @@ struct MemlaBrowserView: View {
     }
 
     private func performAutoDriveAction(_ candidate: WebsiteC2ACandidate, allowCaution: Bool) {
+        if candidate.role == "dd_continue_cta" {
+            appendAgencyTrace("Tap: \(candidate.label)")
+            tapCandidate(candidate, allowCaution: true)
+            return
+        }
         if !candidate.url.isEmpty {
             appendAgencyTrace("Open: \(candidate.label)")
             openCandidate(candidate)
@@ -8269,6 +8274,10 @@ struct MemlaBrowserView: View {
     }
 
     private func openCandidate(_ candidate: WebsiteC2ACandidate) {
+        if candidate.role == "dd_continue_cta" {
+            tapCandidate(candidate, allowCaution: true)
+            return
+        }
         guard !candidate.blocked, let url = URL(string: candidate.url) else {
             return
         }
