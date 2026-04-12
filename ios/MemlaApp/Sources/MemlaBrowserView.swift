@@ -8260,8 +8260,13 @@ struct MemlaBrowserView: View {
 
     private func performAutoDriveAction(_ candidate: WebsiteC2ACandidate, allowCaution: Bool) {
         if candidate.role == "dd_continue_cta" {
-            appendAgencyTrace("Tap: \(candidate.label)")
-            tapCandidate(candidate, allowCaution: true)
+            if !candidate.url.isEmpty {
+                appendAgencyTrace("Open: \(candidate.label)")
+                openCandidate(candidate)
+            } else {
+                appendAgencyTrace("Tap: \(candidate.label)")
+                tapCandidate(candidate, allowCaution: true)
+            }
             return
         }
         if !candidate.url.isEmpty {
@@ -8274,7 +8279,7 @@ struct MemlaBrowserView: View {
     }
 
     private func openCandidate(_ candidate: WebsiteC2ACandidate) {
-        if candidate.role == "dd_continue_cta" {
+        if candidate.role == "dd_continue_cta", candidate.url.isEmpty {
             tapCandidate(candidate, allowCaution: true)
             return
         }
@@ -8315,6 +8320,13 @@ struct MemlaBrowserView: View {
             return
         }
         if candidate.role == "dd_continue_cta" {
+            if !candidate.url.isEmpty, let url = URL(string: candidate.url) {
+                let scheme = url.scheme?.lowercased() ?? ""
+                if scheme == "http" || scheme == "https" {
+                    browser.navigate(to: url, autoInspect: true, capsule: route.capsule)
+                    return
+                }
+            }
             browser.tapDoorDashContinueToCheckout(capsule: route.capsule)
             return
         }
