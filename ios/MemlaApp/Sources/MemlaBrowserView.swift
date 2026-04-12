@@ -5972,9 +5972,14 @@ struct MemlaBrowserView: View {
         var transitions: [DoorDashWorkflowTransition] = []
         let activeGroup = snapshot.activeGroupKind
         let preferredGroups = preferredDoorDashGroupKinds(for: snapshot.stage)
+        let prerequisiteOverlapsRequested = snapshot.prerequisiteCandidate.map {
+            !candidateMatchedModifierTerms($0, targetTerms: plannerState.remainingTerms).isEmpty
+        } ?? false
 
         func requestedTransition(scoreBase: Double) -> DoorDashWorkflowTransition? {
-            guard let target = snapshot.targetCandidate else {
+            let requestedCandidate = snapshot.targetCandidate
+                ?? (prerequisiteOverlapsRequested ? snapshot.prerequisiteCandidate : nil)
+            guard let target = requestedCandidate else {
                 return nil
             }
             let targetGroup = doorDashGroupKind(for: target)
@@ -6172,7 +6177,7 @@ struct MemlaBrowserView: View {
                         )
                     )
                 }
-            } else if let prerequisite = snapshot.prerequisiteCandidate {
+            } else if let prerequisite = snapshot.prerequisiteCandidate, !prerequisiteOverlapsRequested {
                 let prerequisiteGroup = doorDashGroupKind(for: prerequisite)
                 let canUsePrerequisite = snapshot.targetCandidate == nil
                     || activeGroup == .crust
