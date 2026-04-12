@@ -2565,6 +2565,12 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             const headerNode = node.querySelector('h1,h2,h3,h4,[role="heading"]');
             const heading = clean(headerNode?.textContent || '');
             const firstLine = clean((text.split('\\n').find(Boolean)) || '');
+            const hasStructuredMarker = /(required|optional).*(select|choose)|preferences\\s*\\(optional\\)|choose your|add toppings|crust seasoning|topping side/i.test(text);
+            const optionDescendants = Array.from(
+              node.querySelectorAll('label,input[type="radio"],input[type="checkbox"],[role="radio"],[role="checkbox"]')
+            ).filter(visible);
+            if (!heading && !hasStructuredMarker && optionDescendants.length < 2) return null;
+            if (!heading && !hasStructuredMarker && optionDescendants.length <= 1 && /edit selection/i.test(text)) return null;
             const source = heading || text;
             const headerMatch = source.match(/^(.{1,120}?)(?:\\s+(?:Required|\\(Optional\\)|Optional)\\b)/i);
             const header = clean(
@@ -3134,9 +3140,16 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             pushUnique(doordashCandidates, candidateFromElement(modalClose, 'dd_modal_close', itemModal, 'Close item'));
           }
 
-          const addToCartButtons = Array.from((explicitItemModal || itemModal || document).querySelectorAll('button,[role="button"],a[href]'))
-            .filter(visible)
-            .filter((el) => /add to cart/i.test(labelForElement(el)));
+          const footerActionButtons = Array.from(document.querySelectorAll(
+            '#prism-modal-footer button[data-testid="optionFooter"], [data-testid="in-content-modal-footer-container"] button[data-testid="optionFooter"], button[data-testid="optionFooter"]'
+          )).filter(visible);
+          const addToCartButtons = footerActionButtons
+            .filter((el) => /add to cart|update item/i.test(labelForElement(el)))
+            .concat(
+              Array.from((explicitItemModal || itemModal || document).querySelectorAll('button,[role="button"],a[href]'))
+                .filter(visible)
+                .filter((el) => /add to cart|update item/i.test(labelForElement(el)))
+            );
           doordashCustomizerAddToCartLabel = addToCartButtons.length > 0 ? clean(labelForElement(addToCartButtons[0])) : '';
           addToCartButtons.forEach((button) => {
             doordashHasAddToCartCTA = true;
@@ -3169,12 +3182,11 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             .filter(visible)
             .some((el) => /add special instructions/i.test(labelForElement(el)));
 
-          const saveFooterButtons = Array.from((explicitItemModal || itemModal || document).querySelectorAll('button[data-testid="optionFooter"]'))
-            .filter(visible);
+          const saveFooterButtons = footerActionButtons;
           saveFooterButtons.forEach((button) => {
             const root = sharedAncestor(itemModal, button) || closestWithText(button, 8, 220);
             const label = clean(labelForElement(button));
-            if (!label || /add to cart/i.test(label)) {
+            if (!label || /add to cart|update item/i.test(label)) {
               return;
             }
             pushUnique(doordashCandidates, candidateFromElement(button, 'dd_modifier_save', root, label, {
@@ -3235,6 +3247,12 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             const headerNode = node.querySelector('h1,h2,h3,h4,[role="heading"]');
             const heading = clean(headerNode?.textContent || '');
             const firstLine = clean((text.split('\\n').find(Boolean)) || '');
+            const hasStructuredMarker = /(required|optional).*(select|choose)|preferences\\s*\\(optional\\)|choose your|add toppings|crust seasoning|topping side/i.test(text);
+            const optionDescendants = Array.from(
+              node.querySelectorAll('label,input[type="radio"],input[type="checkbox"],[role="radio"],[role="checkbox"]')
+            ).filter(visible);
+            if (!heading && !hasStructuredMarker && optionDescendants.length < 2) return null;
+            if (!heading && !hasStructuredMarker && optionDescendants.length <= 1 && /edit selection/i.test(text)) return null;
             const source = heading || text;
             const headerMatch = source.match(/^(.{1,120}?)(?:\\s+(?:Required|\\(Optional\\)|Optional)\\b)/i);
             const header = clean(
