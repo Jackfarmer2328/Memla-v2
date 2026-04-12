@@ -2972,9 +2972,25 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
       };
 
       const controls = Array.from(document.querySelectorAll('button,[role="button"],a[href]')).filter(visible);
-      const continueAnchor = controls.find((el) =>
-        el.matches('a[href*="/consumer/checkout"]') && continueMatcher(el, null)
-      ) || null;
+      const exactCheckoutAnchor = (() => {
+        try {
+          const match = document.evaluate(
+            '//a[contains(@href, "/consumer/checkout/") and contains(@class, "ButtonRoot")]',
+            document,
+            null,
+            XPathResult.FIRST_ORDERED_NODE_TYPE,
+            null
+          ).singleNodeValue;
+          return visible(match) ? match : null;
+        } catch (_) {
+          return null;
+        }
+      })();
+      const continueAnchor = exactCheckoutAnchor
+        || controls.find((el) =>
+          el.matches('a[href*="/consumer/checkout"]') && continueMatcher(el, null)
+        )
+        || null;
       const cartCloseButton = controls.find((el) => /close/i.test(labelForElement(el))) || null;
       const visibleDialogs = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"]')).filter(visible);
       const cartDrawer = sharedAncestor(continueAnchor, cartCloseButton)
@@ -2987,15 +3003,16 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
       const continueControl = scopedControls.find((el) => continueMatcher(el, cartDrawer || null))
         || controls.find((el) => continueMatcher(el, cartDrawer || null))
         || null;
-      if (!continueControl) {
+      const resolvedContinue = continueAnchor || continueControl;
+      if (!resolvedContinue) {
         return { ok: false, reason: 'doordash_continue_not_found' };
       }
 
-      activate(continueControl);
+      activate(resolvedContinue);
       return {
         ok: true,
         reason: 'tapped_doordash_continue',
-        label: clean(labelForElement(continueControl) || 'Continue')
+        label: clean(labelForElement(resolvedContinue) || 'Continue')
       };
       } catch (error) {
         return {
@@ -8260,13 +8277,8 @@ struct MemlaBrowserView: View {
 
     private func performAutoDriveAction(_ candidate: WebsiteC2ACandidate, allowCaution: Bool) {
         if candidate.role == "dd_continue_cta" {
-            if !candidate.url.isEmpty {
-                appendAgencyTrace("Open: \(candidate.label)")
-                openCandidate(candidate)
-            } else {
-                appendAgencyTrace("Tap: \(candidate.label)")
-                tapCandidate(candidate, allowCaution: true)
-            }
+            appendAgencyTrace("Tap: \(candidate.label)")
+            tapCandidate(candidate, allowCaution: true)
             return
         }
         if !candidate.url.isEmpty {
@@ -8279,7 +8291,7 @@ struct MemlaBrowserView: View {
     }
 
     private func openCandidate(_ candidate: WebsiteC2ACandidate) {
-        if candidate.role == "dd_continue_cta", candidate.url.isEmpty {
+        if candidate.role == "dd_continue_cta" {
             tapCandidate(candidate, allowCaution: true)
             return
         }
@@ -8320,13 +8332,6 @@ struct MemlaBrowserView: View {
             return
         }
         if candidate.role == "dd_continue_cta" {
-            if !candidate.url.isEmpty, let url = URL(string: candidate.url) {
-                let scheme = url.scheme?.lowercased() ?? ""
-                if scheme == "http" || scheme == "https" {
-                    browser.navigate(to: url, autoInspect: true, capsule: route.capsule)
-                    return
-                }
-            }
             browser.tapDoorDashContinueToCheckout(capsule: route.capsule)
             return
         }
