@@ -3093,6 +3093,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
               return /continue|checkout|review order/i.test(text);
             })
           : null;
+        const activeItemModal = cartDrawer ? null : itemModal;
         doordashActiveRoot = paymentSheet || cartDrawer || itemModal || null;
         doordashActiveLayer = paymentSheet ? 'payment_sheet' : cartDrawer ? 'cart_drawer' : itemModal ? 'item_modal' : 'page';
         doordashHasPaymentSheet = Boolean(paymentSheet);
@@ -3114,7 +3115,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           pushUnique(doordashCandidates, candidateFromElement(anchor, 'dd_store_card', cardRoot, label));
         });
 
-        const cartReviewButtons = itemModal
+        const cartReviewButtons = activeItemModal
           ? []
           : Array.from(document.querySelectorAll('button,a[href],[role="button"]'))
             .filter(visible)
@@ -3126,7 +3127,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           pushUnique(doordashCandidates, candidateFromElement(button, 'dd_cart_cta', root, label));
         });
 
-        const cartButton = itemModal
+        const cartButton = activeItemModal
           ? null
           : Array.from(document.querySelectorAll('button[data-testid="OrderCartIconButton"], button[aria-controls="order-cart"]'))
             .filter(visible)[0];
@@ -3135,7 +3136,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           pushUnique(doordashCandidates, candidateFromElement(cartButton, 'dd_cart_cta', cartButton.closest('section,div'), 'Open cart'));
         }
 
-        if ((continueAnchor || cartContinueButton) && !itemModal) {
+        if ((continueAnchor || cartContinueButton) && !activeItemModal) {
           doordashHasContinueCTA = true;
           const continueControl = cartContinueButton || continueAnchor;
           pushUnique(doordashCandidates, candidateFromElement(continueControl, 'dd_continue_cta', cartDrawer || continueControl.closest('section,div'), 'Continue'));
@@ -3145,12 +3146,12 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           pushUnique(doordashCandidates, candidateFromElement(cartCloseButton, 'dd_modal_close', cartDrawer, 'Close cart'));
         }
 
-        if (itemModal && !cartDrawer) {
-          const modalClose = Array.from(itemModal.querySelectorAll('button,[role="button"]'))
+        if (activeItemModal) {
+          const modalClose = Array.from(activeItemModal.querySelectorAll('button,[role="button"]'))
             .filter(visible)
             .find((el) => /^x$/i.test(labelForElement(el)) || /close|dismiss/i.test(labelForElement(el)));
           if (modalClose) {
-            pushUnique(doordashCandidates, candidateFromElement(modalClose, 'dd_modal_close', itemModal, 'Close item'));
+            pushUnique(doordashCandidates, candidateFromElement(modalClose, 'dd_modal_close', activeItemModal, 'Close item'));
           }
 
           const footerActionButtons = Array.from(document.querySelectorAll(
@@ -3159,14 +3160,14 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           const addToCartButtons = footerActionButtons
             .filter((el) => /add to cart|update item/i.test(labelForElement(el)))
             .concat(
-              Array.from((explicitItemModal || itemModal || document).querySelectorAll('button,[role="button"],a[href]'))
+              Array.from((explicitItemModal || activeItemModal || document).querySelectorAll('button,[role="button"],a[href]'))
                 .filter(visible)
                 .filter((el) => /add to cart|update item/i.test(labelForElement(el)))
             );
           doordashCustomizerAddToCartLabel = addToCartButtons.length > 0 ? clean(labelForElement(addToCartButtons[0])) : '';
           addToCartButtons.forEach((button) => {
             doordashHasAddToCartCTA = true;
-            const root = sharedAncestor(itemModal, button) || closestWithText(button, 18, 240);
+            const root = sharedAncestor(activeItemModal, button) || closestWithText(button, 18, 240);
             pushUnique(doordashCandidates, candidateFromElement(button, 'dd_add_to_cart', root, 'Add to cart', {
               groupKey: 'review',
               groupLabel: 'Add to cart',
@@ -3179,25 +3180,25 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             }));
           });
 
-          const checkedRadios = Array.from(itemModal.querySelectorAll('input[type="radio"]:checked')).filter(visible);
-          const checkedCheckboxes = Array.from(itemModal.querySelectorAll('input[type="checkbox"]:checked')).filter(visible);
-          const allOptions = Array.from(itemModal.querySelectorAll('input[type="radio"],input[type="checkbox"]')).filter(visible);
+          const checkedRadios = Array.from(activeItemModal.querySelectorAll('input[type="radio"]:checked')).filter(visible);
+          const checkedCheckboxes = Array.from(activeItemModal.querySelectorAll('input[type="checkbox"]:checked')).filter(visible);
+          const allOptions = Array.from(activeItemModal.querySelectorAll('input[type="radio"],input[type="checkbox"]')).filter(visible);
           doordashCustomizerCheckedRadioCount = checkedRadios.length;
           doordashCustomizerCheckedCheckboxCount = checkedCheckboxes.length;
           doordashCustomizerOptionCount = allOptions.length;
 
-          const recommendedPresetButtons = Array.from(itemModal.querySelectorAll('button,[role="button"]'))
+          const recommendedPresetButtons = Array.from(activeItemModal.querySelectorAll('button,[role="button"]'))
             .filter(visible)
             .filter((el) => /^#\\d+/.test(clean(labelForElement(el))));
           doordashCustomizerRecommendedPresetCount = recommendedPresetButtons.length;
 
-          doordashCustomizerHasSpecialInstructions = Array.from(itemModal.querySelectorAll('button,[role="button"],a[href]'))
+          doordashCustomizerHasSpecialInstructions = Array.from(activeItemModal.querySelectorAll('button,[role="button"],a[href]'))
             .filter(visible)
             .some((el) => /add special instructions/i.test(labelForElement(el)));
 
           const saveFooterButtons = footerActionButtons;
           saveFooterButtons.forEach((button) => {
-            const root = sharedAncestor(itemModal, button) || closestWithText(button, 8, 220);
+            const root = sharedAncestor(activeItemModal, button) || closestWithText(button, 8, 220);
             const label = clean(labelForElement(button));
             if (!label || /add to cart|update item/i.test(label)) {
               return;
@@ -3219,7 +3220,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             const id = clean((el.getAttribute && el.getAttribute('id')) || '');
             if (id) {
               try {
-                const boundLabel = itemModal.querySelector(`label[for="${CSS.escape(id)}"]`);
+                const boundLabel = activeItemModal.querySelector(`label[for="${CSS.escape(id)}"]`);
                 if (boundLabel && visible(boundLabel)) {
                   return boundLabel;
                 }
@@ -3314,7 +3315,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           };
 
           const seenOptionRoots = new WeakSet();
-          const modalOptionButtons = Array.from(itemModal.querySelectorAll('label,input[type="radio"],input[type="checkbox"],[role="radio"],[role="checkbox"]'))
+          const modalOptionButtons = Array.from(activeItemModal.querySelectorAll('label,input[type="radio"],input[type="checkbox"],[role="radio"],[role="checkbox"]'))
             .filter(visible)
             .filter((el) => {
               const elementLabel = clean(labelForElement(el));
