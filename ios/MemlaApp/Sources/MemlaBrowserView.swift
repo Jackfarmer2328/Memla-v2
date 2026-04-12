@@ -5973,7 +5973,48 @@ struct MemlaBrowserView: View {
         let activeGroup = snapshot.activeGroupKind
         let preferredGroups = preferredDoorDashGroupKinds(for: snapshot.stage)
 
+        func requestedTransition(scoreBase: Double) -> DoorDashWorkflowTransition? {
+            guard let target = snapshot.targetCandidate else {
+                return nil
+            }
+            let targetGroup = doorDashGroupKind(for: target)
+            let targetAllowed = activeGroup == .unknown
+                || targetGroup == activeGroup
+                || preferredGroups.contains(targetGroup)
+                || (snapshot.stage == .toppings && activeGroup == .toppingSide)
+            guard targetAllowed else {
+                return nil
+            }
+            let matched = candidateMatchedModifierTerms(target, targetTerms: plannerState.remainingTerms)
+            guard !matched.isEmpty else {
+                return nil
+            }
+            let nextRemaining = plannerState.remainingTerms.filter { !matched.contains($0) }
+            let nextInFlight = Array(Set(plannerState.inFlightTerms).union(matched)).sorted()
+            let score = scoreBase
+                + Double(matched.count * 10)
+                + (targetGroup == .size || targetGroup == .topping ? 6.0 : 0.0)
+            return DoorDashWorkflowTransition(
+                kind: .requestedModifier,
+                candidate: target,
+                consumedTerms: matched,
+                score: score,
+                nextState: makeDoorDashWorkflowPlannerState(
+                    remainingTerms: nextRemaining,
+                    inFlightTerms: nextInFlight,
+                    commitPending: true,
+                    lastTransitionKind: .requestedModifier
+                )
+            )
+        }
+
         if plannerState.commitPending {
+            if !snapshot.activeGroupRequired || snapshot.activeGroupResolved {
+                if let requested = requestedTransition(scoreBase: 176) {
+                    transitions.append(requested)
+                }
+            }
+
             if plannerState.lastTransitionKind == .requestedModifier,
                activeGroup == .toppingSide,
                let prerequisite = snapshot.prerequisiteCandidate
@@ -6078,34 +6119,8 @@ struct MemlaBrowserView: View {
                 )
             }
         } else {
-            if let target = snapshot.targetCandidate {
-                let targetGroup = doorDashGroupKind(for: target)
-                let targetAllowed = activeGroup == .unknown
-                    || targetGroup == activeGroup
-                    || preferredGroups.contains(targetGroup)
-                    || (snapshot.stage == .toppings && activeGroup == .toppingSide)
-                if targetAllowed {
-                    let matched = candidateMatchedModifierTerms(target, targetTerms: plannerState.remainingTerms)
-                    if !matched.isEmpty {
-                        let nextRemaining = plannerState.remainingTerms.filter { !matched.contains($0) }
-                        let nextInFlight = Array(Set(plannerState.inFlightTerms).union(matched)).sorted()
-                        let scoreBase: Double = targetGroup == .size || targetGroup == .topping ? 182 : 170
-                        transitions.append(
-                            DoorDashWorkflowTransition(
-                                kind: .requestedModifier,
-                                candidate: target,
-                                consumedTerms: matched,
-                                score: scoreBase + Double(matched.count * 10),
-                                nextState: makeDoorDashWorkflowPlannerState(
-                                    remainingTerms: nextRemaining,
-                                    inFlightTerms: nextInFlight,
-                                    commitPending: true,
-                                    lastTransitionKind: .requestedModifier
-                                )
-                            )
-                        )
-                    }
-                }
+            if let requested = requestedTransition(scoreBase: 176) {
+                transitions.append(requested)
             } else if snapshot.activeGroupRequired,
                       snapshot.activeGroupResolved,
                       let save = snapshot.saveCandidate {
