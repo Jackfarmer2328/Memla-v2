@@ -7837,15 +7837,6 @@ struct MemlaBrowserView: View {
             }
         }
 
-        if state.pageKind == "dd_cart_drawer" || state.pageKind == "dd_cart_page" || state.pageKind == "ue_cart_page" {
-            autoDriveStatus = state.pageKind == "ue_cart_page"
-                ? "Cart is ready. Review the order before checkout."
-                : "DoorDash cart is ready. Review the order before checkout."
-            appendAgencyTrace(autoDriveStatus)
-            lastAutoDriveSignature = signature
-            return
-        }
-
         guard signature != lastAutoDriveSignature else {
             return
         }
