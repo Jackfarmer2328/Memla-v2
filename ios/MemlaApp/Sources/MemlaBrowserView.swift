@@ -5738,6 +5738,7 @@ struct MemlaBrowserView: View {
         let addCandidate: WebsiteC2ACandidate?
         let filteredCandidates: [WebsiteC2ACandidate]
         let addToCartAllowed: Bool
+        let finalReviewBridgeActive: Bool
     }
 
     private func shouldBridgeDoorDashReviewAfterSaveFailure(status: String, state: WebsiteC2AState?) -> Bool {
@@ -5984,7 +5985,8 @@ struct MemlaBrowserView: View {
             saveCandidate: saveCandidate,
             addCandidate: addCandidate,
             filteredCandidates: filteredCandidates,
-            addToCartAllowed: remainingModifierTerms.isEmpty && inFlightModifierTerms.isEmpty && !doorDashModifierCommitPending
+            addToCartAllowed: remainingModifierTerms.isEmpty && inFlightModifierTerms.isEmpty && !doorDashModifierCommitPending,
+            finalReviewBridgeActive: finalReviewBridgeActive
         )
     }
 
@@ -6231,7 +6233,8 @@ struct MemlaBrowserView: View {
             }
 
             if plannerState.remainingTerms.isEmpty && plannerState.inFlightTerms.isEmpty {
-                if let add = snapshot.addCandidate, activeGroup == .review || activeGroup == .unknown {
+                if let add = snapshot.addCandidate,
+                   activeGroup == .review || activeGroup == .unknown || snapshot.finalReviewBridgeActive {
                     transitions.append(
                         DoorDashWorkflowTransition(
                             kind: .reviewStep,
