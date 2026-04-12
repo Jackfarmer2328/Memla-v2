@@ -2487,8 +2487,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
           const inferGroupKey = (header, text = '') => {
             const combined = clean([header, text].join(' ')).toLowerCase();
             if (!combined) return 'unknown';
-            if (/topping side|left half|right half|whole/.test(combined)) return 'topping_side';
             if (/choose your size|\\bsize\\b|\\b10"\\b|\\b12"\\b|\\b14"\\b|\\b16"\\b/.test(combined)) return 'size';
+            if (/topping side|left half|right half|whole/.test(combined)) return 'topping_side';
             if (/\\bcrust\\b|hand tossed|thin crust|brooklyn|gluten free/.test(combined)) return 'crust';
             if (/topping|premium chicken|pineapple|pepperoni|beef|ham|bacon|olive|mushroom|onion|sausage/.test(combined)) return 'topping';
             if (/preferences|special instructions/.test(combined)) return 'preferences';
@@ -2884,7 +2884,7 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         } catch (_) {}
       });
       const elementIndex = (el) => Number(el?.dataset?.memlaIndex ?? interactiveElements.indexOf(el));
-      const labelForElement = (el) => clean(el?.innerText || el?.value || el?.getAttribute?.('aria-label') || el?.getAttribute?.('title') || absoluteHref(el));
+      const labelForElement = (el) => clean(el?.innerText || el?.textContent || el?.value || el?.getAttribute?.('aria-label') || el?.getAttribute?.('title') || absoluteHref(el));
       const contextForElement = (el, rootOverride) => clean((rootOverride || el.closest('article,li,section,div,[role="dialog"]'))?.textContent || '').slice(0, 420);
       const candidateFromElement = (el, role, rootOverride, overrideLabel, metadata = {}) => ({
         id: String(elementIndex(el)),
@@ -3049,8 +3049,8 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
         const inferDoorDashGroupKey = (header, text = '') => {
           const combined = clean([header, text].join(' ')).toLowerCase();
           if (!combined) return 'unknown';
-          if (/topping side|left half|right half|whole/.test(combined)) return 'topping_side';
           if (/choose your size|\\bsize\\b|\\b10\"\\b|\\b12\"\\b|\\b14\"\\b|\\b16\"\\b/.test(combined)) return 'size';
+          if (/topping side|left half|right half|whole/.test(combined)) return 'topping_side';
           if (/\\bcrust\\b|hand tossed|thin crust|brooklyn|gluten free/.test(combined)) return 'crust';
           if (/topping|premium chicken|pineapple|pepperoni|beef|ham|bacon|olive|mushroom|onion|sausage/.test(combined)) return 'topping';
           if (/preferences|special instructions/.test(combined)) return 'preferences';
@@ -3173,7 +3173,10 @@ final class MemlaBrowserModel: NSObject, ObservableObject, WKNavigationDelegate 
             .filter(visible);
           saveFooterButtons.forEach((button) => {
             const root = sharedAncestor(itemModal, button) || closestWithText(button, 8, 220);
-            const label = clean(labelForElement(button)) || 'Save';
+            const label = clean(labelForElement(button));
+            if (!label || /add to cart/i.test(label)) {
+              return;
+            }
             pushUnique(doordashCandidates, candidateFromElement(button, 'dd_modifier_save', root, label, {
               groupKey: 'save',
               groupLabel: 'Save',
